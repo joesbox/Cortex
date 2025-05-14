@@ -1,0 +1,101 @@
+<Application
+    x:Class="Cortex.App"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+	xmlns:lvc="using:LiveChartsCore.SkiaSharpView.Avalonia"
+    xmlns:local="using:Cortex"
+    RequestedThemeVariant="Dark">
+	<!--  "Default" ThemeVariant follows system theme variant. "Dark" or "Light" are other available options.  -->
+
+	<Application.DataTemplates>
+		<local:ViewLocator />
+	</Application.DataTemplates>
+
+	<Application.Styles>
+		<StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml" />
+
+		<!-- Global font family for TextBlock and Control -->
+		<Style Selector="TextBlock">
+			<Setter Property="FontFamily" Value="avares://Cortex/Assets/BellotaText-Light.ttf#Bellota Text Light"/>
+		</Style>
+
+		<Style Selector="ContentControl">
+			<Setter Property="FontFamily" Value="avares://Cortex/Assets/BellotaText-Light.ttf#Bellota Text Light"/>
+		</Style>
+
+		<Style Selector="Menu">
+			<Setter Property="FontFamily" Value="avares://Cortex/Assets/BellotaText-Light.ttf#Bellota Text Light"/>
+		</Style>
+
+		<Style Selector="Window">
+			<Setter Property="FontFamily" Value="avares://Cortex/Assets/BellotaText-Light.ttf#Bellota Text Light"/>
+		</Style>
+
+		<Style Selector="lvc|CartesianChart">
+			<Setter Property="FontFamily" Value="avares://Cortex/Assets/BellotaText-Light.ttf#Bellota Text Light"/>
+		</Style>
+		<FluentTheme>
+			<FluentTheme.Palettes>
+				<ColorPaletteResources
+                    x:Key="Light"
+                    Accent="#ff0078d7"
+                    AltHigh="White"
+                    AltLow="White"
+                    AltMedium="White"
+                    AltMediumHigh="White"
+                    AltMediumLow="White"
+                    BaseHigh="Black"
+                    BaseLow="#ffcccccc"
+                    BaseMedium="#ff898989"
+                    BaseMediumHigh="#ff5d5d5d"
+                    BaseMediumLow="#ff737373"
+                    ChromeAltLow="#ff5d5d5d"
+                    ChromeBlackHigh="Black"
+                    ChromeBlackLow="#ffcccccc"
+                    ChromeBlackMedium="#ff5d5d5d"
+                    ChromeBlackMediumLow="#ff898989"
+                    ChromeDisabledHigh="#ffcccccc"
+                    ChromeDisabledLow="#ff898989"
+                    ChromeGray="#ff737373"
+                    ChromeHigh="#ffcccccc"
+                    ChromeLow="#ffececec"
+                    ChromeMedium="#ffe6e6e6"
+                    ChromeMediumLow="#ffececec"
+                    ChromeWhite="White"
+                    ListLow="#ffe6e6e6"
+                    ListMedium="#ffcccccc"
+                    RegionColor="#fffeffff" />
+				<ColorPaletteResources
+                    x:Key="Dark"
+                    Accent="#ff800071"
+                    AltHigh="Black"
+                    AltLow="Black"
+                    AltMedium="Black"
+                    AltMediumHigh="Black"
+                    AltMediumLow="Black"
+                    BaseHigh="White"
+                    BaseLow="#ff4e405c"
+                    BaseMedium="#ffab9eb6"
+                    BaseMediumHigh="#ffc2b6cc"
+                    BaseMediumLow="#ff7c6f89"
+                    ChromeAltLow="#ffc2b6cc"
+                    ChromeBlackHigh="Black"
+                    ChromeBlackLow="#ffc2b6cc"
+                    ChromeBlackMedium="Black"
+                    ChromeBlackMediumLow="Black"
+                    ChromeDisabledHigh="#ff4e405c"
+                    ChromeDisabledLow="#ffab9eb6"
+                    ChromeGray="#ff94879f"
+                    ChromeHigh="#ff94879f"
+                    ChromeLow="#ff261639"
+                    ChromeMedium="#ff302042"
+                    ChromeMediumLow="#ff443553"
+                    ChromeWhite="White"
+                    ListLow="#ff302042"
+                    ListMedium="#ff4e405c"
+                    RegionColor="#212130" />
+			</FluentTheme.Palettes>
+		</FluentTheme>
+		<StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml" />
+	</Application.Styles>
+</Application>

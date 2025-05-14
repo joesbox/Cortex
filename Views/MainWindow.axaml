@@ -1,0 +1,439 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Cortex.ViewModels"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+		xmlns:local="using:AvaloniaSample"
+		xmlns:lvc="using:LiveChartsCore.SkiaSharpView.Avalonia"
+        mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
+        x:Class="Cortex.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Icon="/Assets/cortex.ico"
+		MinWidth="1200"
+        MinHeight="600"
+        Title="C O R T E X">
+	<!-- Main Grid -->
+	<Grid RowDefinitions="Auto, *, Auto">
+		<Grid Grid.Row="0">
+			<Rectangle Fill="#30303b" Height="30" Margin="0, 0, 0, 0"/>
+			<!-- Main Menu -->
+			<Menu Height="20" FontSize="14" Margin="5, 0, 0, 0" Background="#30303b" VerticalAlignment="Center">
+				<MenuItem Header="File">
+					<MenuItem Header="Open" />
+					<MenuItem Header="Save" />
+					<MenuItem Header="Exit" Command="{Binding ExitCommand}"/>
+				</MenuItem>
+				<MenuItem Header="Help">
+					<MenuItem Header="About" />
+				</MenuItem>
+			</Menu>
+		</Grid>
+		<Grid Grid.Row="1">
+			<Rectangle Fill="#302042" Height="{Binding $parent.Bounds.Height}" Width="60" Margin="0, 0, 0, 0" HorizontalAlignment="Left"/>
+			<TabControl TabStripPlacement="Left" SelectedIndex="3">
+				<!--Connection tab-->
+				<TabItem Padding="10,0,10,0" ToolTip.Tip="Connection" ToolTip.Placement="Right" ToolTip.VerticalOffset="0">
+					<TabItem.Header>
+						<StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+							<Image Source="avares://Cortex/Assets/connection.png" Width="20" Margin="0, 0, 5, 0" HorizontalAlignment="Center"/>
+						</StackPanel>
+					</TabItem.Header>
+					<Grid RowDefinitions="Auto, *">
+						<Border Margin="5" BorderBrush="#302042"
+													BorderThickness="1"
+													CornerRadius="10"
+													Background="#ff15151f"
+													Height="100"
+													Width="320"
+													VerticalAlignment="Top"
+													HorizontalAlignment="Left"
+													Grid.Row="0">
+							<Grid RowDefinitions="Auto, Auto">
+								<ComboBox ItemsSource="{Binding SerialPorts}"
+									SelectedItem="{Binding SelectedSerialPort, Mode=TwoWay}"
+									Width="300" Margin="10"
+									Grid.Row="0"/>
+								<Grid Grid.Row="1" ColumnDefinitions="*,*,*">
+									<Button Content="Disconnect"
+											Command="{Binding DisconnectCommand}"
+											Margin="10, 0, 0, 0"
+											Width="90"
+											HorizontalAlignment="Center"
+											Grid.Column="0"
+											HorizontalContentAlignment="Center"/>
+									<Button Content="Refresh"
+											Command="{Binding RefreshSerialPortsCommand}"
+											Margin="0, 0, 0, 0"
+											Width="90"
+											HorizontalAlignment="Center"
+											Grid.Column="1"
+											HorizontalContentAlignment="Center"/>
+									<Button Content="Connect"
+											Command="{Binding ConnectCommand}"
+											CommandParameter="{Binding SelectedSerialPort}"
+											Margin="0, 0, 10, 0"
+											Width="90"
+											HorizontalAlignment="Center"
+											Grid.Column="2"
+											HorizontalContentAlignment="Center"/>
+
+								</Grid>
+							</Grid>
+						</Border>
+						<DockPanel LastChildFill="True" Grid.Row="1">
+							<Border Margin="5" BorderBrush="#302042"
+														BorderThickness="1"
+														CornerRadius="10"
+														Background="#ff15151f"
+														HorizontalAlignment="Stretch"
+														VerticalAlignment="Stretch">
+								<Grid RowDefinitions="Auto, *" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+									  Margin="10,10,10,20">
+									<TextBlock	Text="System Log" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="5" Grid.Row="0"></TextBlock>
+									<ScrollViewer Grid.Row="1"
+												  VerticalScrollBarVisibility="Auto"
+												  HorizontalScrollBarVisibility="Disabled"
+												  Name="LogScrollViewer"
+												  Height="{Binding $parent.Bounds.Height}">
+										<ItemsControl ItemsSource="{Binding LogEntries}">
+											<ItemsControl.ItemTemplate>
+												<DataTemplate>
+													<TextBlock Text="{Binding}" Margin="2" />
+												</DataTemplate>
+											</ItemsControl.ItemTemplate>
+										</ItemsControl>
+									</ScrollViewer>
+								</Grid>
+							</Border>
+						</DockPanel>
+					</Grid>
+				</TabItem>
+				<!--Status tab-->
+				<TabItem Padding="10,0,10,0" ToolTip.Tip="Status" ToolTip.Placement="Right" ToolTip.VerticalOffset="0">
+					<TabItem.Header>
+						<StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+							<Image Source="avares://Cortex/Assets/status.png" Width="30" HorizontalAlignment="Center"/>
+						</StackPanel>
+					</TabItem.Header>
+					<!-- Status area grid-->
+					<Grid RowDefinitions="*, Auto, 1.5*">
+						<Grid.Styles>
+							<!-- Style for pointer over -->
+							<Style Selector="GridSplitter:pointerover">
+								<Setter Property="Background" Value="#2A213B"/>
+							</Style>
+
+							<!-- Full template with handle -->
+							<Style Selector="GridSplitter">
+								<Setter Property="Template">
+									<ControlTemplate>
+										<Border Background="#30303b" Height="5">
+											<!-- Handle: three horizontal bars -->
+											<StackPanel Orientation="Vertical" HorizontalAlignment="Center" VerticalAlignment="Center">
+												<Rectangle Width="12" Height="2" Fill="#AAAAAA" Margin="2,2"/>
+											</StackPanel>
+										</Border>
+									</ControlTemplate>
+								</Setter>
+							</Style>
+						</Grid.Styles>
+						<Grid ColumnDefinitions="*, 3*">
+							<Grid Grid.Column="0" Grid.Row="0">
+								<Border Margin="5" BorderBrush="#302042"
+												BorderThickness="1"
+												CornerRadius="10"
+												Background="#ff15151f">
+									<Grid RowDefinitions="*, *">
+										<Grid ColumnDefinitions="*, *, *" Grid.Row="0" Margin="0,0,0,20">
+											<Viewbox Stretch="Uniform" MaxHeight="200" MaxWidth="200" Grid.Column="0" Margin="10, 10, 10, 0">
+												<StackPanel Orientation="Vertical">
+													<lvc:PieChart
+																Width="200" Height="200"
+																Series="{Binding SysTemp}"
+																InitialRotation="-225"
+																MaxAngle="270"
+																MinValue="0"
+																MaxValue="100"
+																HorizontalAlignment="Stretch"
+																VerticalAlignment="Stretch">
+													</lvc:PieChart>
+													<TextBlock Text="System" FontSize="25" Margin="0, 0, 0, 0" HorizontalAlignment="Center" VerticalAlignment="Bottom"/>
+													<TextBlock Text="Temperature" FontSize="25" Margin="0, 0, 0, 0" HorizontalAlignment="Center" VerticalAlignment="Bottom"/>
+												</StackPanel>
+											</Viewbox>
+											<Viewbox Stretch="Uniform" MaxHeight="200" MaxWidth="200" Grid.Column="1" Margin="10, 10, 10, 0">
+												<StackPanel>
+													<lvc:PieChart
+																Width="200" Height="200"
+																Series="{Binding SysCurrent}"
+																InitialRotation="-225"
+																MaxAngle="270"
+																MinValue="0"
+																MaxValue="240"
+																HorizontalAlignment="Stretch"
+																VerticalAlignment="Stretch">
+													</lvc:PieChart>
+													<TextBlock Text="System" FontSize="25" Margin="0, 0, 0, 0" HorizontalAlignment="Center" VerticalAlignment="Top"/>
+													<TextBlock Text="Current" FontSize="25" Margin="0, 0, 0, 0" HorizontalAlignment="Center" VerticalAlignment="Bottom"/>
+												</StackPanel>
+											</Viewbox>
+											<Viewbox Stretch="Uniform" MaxHeight="200" MaxWidth="200" Grid.Column="2" Margin="10, 10, 10, 0">
+												<StackPanel>
+													<lvc:PieChart
+																Width="200" Height="200"
+																Series="{Binding BattV}"
+																InitialRotation="-225"
+																MaxAngle="270"
+																MinValue="0"
+																MaxValue="18"
+																HorizontalAlignment="Stretch"
+																VerticalAlignment="Stretch">
+													</lvc:PieChart>
+													<TextBlock Text="Battery" FontSize="25" Margin="0, 0, 0, 0" HorizontalAlignment="Center" VerticalAlignment="Top"/>
+													<TextBlock Text="Voltage" FontSize="25" Margin="0, 0, 0, 0" HorizontalAlignment="Center" VerticalAlignment="Bottom"/>
+												</StackPanel>
+											</Viewbox>
+										</Grid>
+										<Grid ColumnDefinitions="*, *, *" Grid.Row="1" Margin="0,0,0,20" >
+											<Viewbox Stretch="Uniform" MaxHeight="200" MaxWidth="200" Grid.Row="0" Grid.Column="0" Margin="10, 10, 10, 0">
+												<StackPanel>
+													<lvc:PieChart
+																Width="200" Height="200"
+																Series="{Binding BattSoC}"
+																InitialRotation="-225"
+																MaxAngle="270"
+																MinValue="0"
+																MaxValue="100"
+																HorizontalAlignment="Stretch"
+																VerticalAlignment="Stretch">
+													</lvc:PieChart>
+													<TextBlock Text="Backup" FontSize="25" Margin="0, 0, 0, 0" HorizontalAlignment="Center" VerticalAlignment="Top"/>
+													<TextBlock Text="Battery SoC" FontSize="25" Margin="0, 0, 0, 0" HorizontalAlignment="Center" VerticalAlignment="Bottom"/>
+												</StackPanel>
+											</Viewbox>
+											<Viewbox Stretch="Uniform" MaxHeight="200" MaxWidth="200" Grid.Row="0" Grid.Column="1" Margin="10, 10, 10, 0">
+												<StackPanel>
+													<lvc:PieChart
+																Width="200" Height="200"
+																Series="{Binding BattSoC}"
+																InitialRotation="-225"
+																MaxAngle="270"
+																MinValue="0"
+																MaxValue="100"
+																HorizontalAlignment="Stretch"
+																VerticalAlignment="Stretch">
+													</lvc:PieChart>
+													<TextBlock Text="Backup" FontSize="25" Margin="0, 0, 0, 0" HorizontalAlignment="Center" VerticalAlignment="Top"/>
+													<TextBlock Text="Battery SoH" FontSize="25" Margin="0, 0, 0, 0" HorizontalAlignment="Center" VerticalAlignment="Bottom"/>
+												</StackPanel>
+											</Viewbox>
+											<Viewbox Stretch="Uniform" MaxHeight="200" MaxWidth="200" Grid.Row="0" Grid.Column="2" Margin="10, 10, 10, 0">
+												<StackPanel>
+													<lvc:PieChart
+																Width="200" Height="200"
+																Series="{Binding MobileSS}"
+																InitialRotation="-225"
+																MaxAngle="270"
+																MinValue="0"
+																MaxValue="100"
+																HorizontalAlignment="Stretch"
+																VerticalAlignment="Stretch">
+													</lvc:PieChart>
+													<TextBlock Text="Mobile" FontSize="25" Margin="0, 0, 0, 0" HorizontalAlignment="Center" VerticalAlignment="Top"/>
+													<TextBlock Text="Signal Strength" FontSize="25" Margin="0, 0, 0, 0" HorizontalAlignment="Center" VerticalAlignment="Bottom"/>
+												</StackPanel>
+											</Viewbox>
+										</Grid>
+									</Grid>
+								</Border>
+							</Grid>
+							<Grid Grid.Column="1" >
+								<Border Margin="5" BorderBrush="#302042"
+												BorderThickness="1"
+												CornerRadius="10"
+												Background="#ff15151f">
+									<DataGrid Grid.Row="0" Margin="10" ItemsSource="{Binding TestData}"
+											  AutoGenerateColumns="True" IsReadOnly="True"
+											  GridLinesVisibility="All"/>
+								</Border>
+							</Grid>
+						</Grid>
+						<GridSplitter Grid.Row="1" ResizeDirection="Rows" />
+						<Grid Grid.Row="2">
+							<Border Margin="5" BorderBrush="#302042"
+												BorderThickness="1"
+												CornerRadius="10"
+												Background="#ff15151f">
+								<lvc:CartesianChart Series="{Binding Series}" ZoomMode="Both" />
+							</Border>
+						</Grid>
+					</Grid>
+				</TabItem>
+				<!--Log history tab-->
+				<TabItem Padding="10,0,10,0" ToolTip.Tip="Log History" ToolTip.Placement="Right" ToolTip.VerticalOffset="0">
+					<TabItem.Header>
+						<StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+							<Image Source="avares://Cortex/Assets/log.png" Width="20" Margin="0, 0, 5, 0" HorizontalAlignment="Center"/>
+						</StackPanel>
+					</TabItem.Header>
+					<TextBlock Text="Content for Tab 2" Margin="0, 10, 0, 0"/>
+				</TabItem>
+				<!--Settings tab-->
+				<TabItem Padding="10,0,10,0" ToolTip.Tip="Settings" ToolTip.Placement="Right" ToolTip.VerticalOffset="0">
+					<TabItem.Header>
+						<StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+							<Image Source="avares://Cortex/Assets/settings.png" Width="20" Margin="0, 0, 5, 0" HorizontalAlignment="Center"/>
+						</StackPanel>
+					</TabItem.Header>
+					<Grid ColumnDefinitions="*,2*">
+						<Border Margin="5" BorderBrush="#302042"
+												BorderThickness="1"
+												CornerRadius="10"
+												Background="#ff15151f"
+												Grid.Column="0">
+							<TextBlock Text="System Settings" Margin="0,10,0,0" HorizontalAlignment="Center"></TextBlock>
+
+
+						</Border>
+						<Border Margin="5" BorderBrush="#302042"
+												BorderThickness="1"
+												CornerRadius="10"
+												Background="#ff15151f"
+												Grid.Column="1">
+							<TextBlock Text="Channel Settings" Margin="0,10,0,0" HorizontalAlignment="Center"></TextBlock>
+
+
+						</Border>
+					</Grid>
+				</TabItem>
+			</TabControl>
+		</Grid>
+		<Grid Grid.Row="2">
+			<Rectangle Fill="#800071" Height="22" Margin="0"/>
+			<StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
+				<Panel>
+					<Panel.Styles>
+						<Style Selector="Rectangle#StatusRect.connected">
+							<Setter Property="Fill" Value="#01AD59"/>
+						</Style>
+						<Style Selector="Rectangle#StatusRect.disconnected">
+							<Setter Property="Fill" Value="#CC2C1F"/>
+						</Style>
+
+						<Style Selector="Image#StatusIcon.connected">
+							<Setter Property="Source" Value="avares://Cortex/Assets/link.png"/>
+							<Setter Property="ToolTip.Tip" Value="Connected"/>
+							<Setter Property="ToolTip.Placement" Value="Top"/>
+							<Setter Property="ToolTip.VerticalOffset" Value="0"/>
+						</Style>
+						<Style Selector="Image#StatusIcon.disconnected">
+							<Setter Property="Source" Value="avares://Cortex/Assets/unlink.png"/>
+							<Setter Property="ToolTip.Tip" Value="Disconnected"/>
+							<Setter Property="ToolTip.Placement" Value="Top"/>
+							<Setter Property="ToolTip.VerticalOffset" Value="0"/>
+						</Style>
+					</Panel.Styles>
+					<Rectangle x:Name="StatusRect" Height="22" Width="24" Margin="0"/>
+					<Image x:Name="StatusIcon" Height="20"/>
+				</Panel>
+				<!--SD logging OK status icon-->
+				<Panel IsVisible="{Binding IsConnected}">
+					<Panel.Styles>
+						<Style Selector="Rectangle#SDRect.sdOK">
+							<Setter Property="Fill" Value="#01AD59"/>
+						</Style>
+						<Style Selector="Rectangle#SDRect.sdError">
+							<Setter Property="Fill" Value="#CC2C1F"/>
+						</Style>
+						<Style Selector="Image#SDIcon.sdOK">
+							<Setter Property="ToolTip.Tip" Value="SD Log OK"/>
+							<Setter Property="ToolTip.Placement" Value="Top"/>
+							<Setter Property="ToolTip.VerticalOffset" Value="0"/>
+						</Style>
+						<Style Selector="Image#SDIcon.sdError">
+							<Setter Property="ToolTip.Tip" Value="SD Log Error"/>
+							<Setter Property="ToolTip.Placement" Value="Top"/>
+							<Setter Property="ToolTip.VerticalOffset" Value="0"/>
+						</Style>
+					</Panel.Styles>
+					<Rectangle x:Name="SDRect" Height="22" Width="24" Margin="0" />
+					<Image x:Name="SDIcon" Source="avares://Cortex/Assets/sd.png" Height="20"/>
+				</Panel>
+				<!--Over current status icon-->
+				<Panel IsVisible="{Binding IsConnected}">
+					<Panel.Styles>
+						<Style Selector="Rectangle#currentRect.currentOK">
+							<Setter Property="Fill" Value="#01AD59"/>
+						</Style>
+						<Style Selector="Rectangle#currentRect.overCurrrent">
+							<Setter Property="Fill" Value="#CC2C1F"/>
+						</Style>
+						<Style Selector="Image#currentIcon.currentOK">
+							<Setter Property="ToolTip.Tip" Value="System current OK"/>
+							<Setter Property="ToolTip.Placement" Value="Top"/>
+							<Setter Property="ToolTip.VerticalOffset" Value="0"/>
+						</Style>
+						<Style Selector="Image#currentIcon.overCurrrent">
+							<Setter Property="ToolTip.Tip" Value="System over-current"/>
+							<Setter Property="ToolTip.Placement" Value="Top"/>
+							<Setter Property="ToolTip.VerticalOffset" Value="0"/>
+						</Style>
+					</Panel.Styles>
+					<Rectangle x:Name="currentRect" Height="22" Width="24" Margin="0" />
+					<Image x:Name="currentIcon" Source="avares://Cortex/Assets/current_ok.png" Height="20"/>
+				</Panel>
+				<!--Under voltage status icon-->
+				<Panel IsVisible="{Binding IsConnected}">
+					<Panel.Styles>
+						<Style Selector="Rectangle#voltRect.voltsOK">
+							<Setter Property="Fill" Value="#01AD59"/>
+						</Style>
+						<Style Selector="Rectangle#voltRect.underVolts">
+							<Setter Property="Fill" Value="#CC2C1F"/>
+						</Style>
+						<Style Selector="Image#voltIcon.voltsOK">
+							<Setter Property="ToolTip.Tip" Value="System voltage OK"/>
+							<Setter Property="ToolTip.Placement" Value="Top"/>
+							<Setter Property="ToolTip.VerticalOffset" Value="0"/>
+						</Style>
+						<Style Selector="Image#voltIcon.underVolts">
+							<Setter Property="ToolTip.Tip" Value="System under voltage"/>
+							<Setter Property="ToolTip.Placement" Value="Top"/>
+							<Setter Property="ToolTip.VerticalOffset" Value="0"/>
+						</Style>
+					</Panel.Styles>
+					<Rectangle x:Name="voltRect" Height="22" Width="24" Margin="0" />
+					<Image x:Name="voltIcon" Source="avares://Cortex/Assets/voltage_ok.png" Height="20"/>
+				</Panel>
+				<!-- Temperature status icon -->
+				<Panel IsVisible="{Binding IsConnected}">
+					<Panel.Styles>
+						<Style Selector="Rectangle#tempRect.tempOK">
+							<Setter Property="Fill" Value="#01AD59"/>
+						</Style>
+						<Style Selector="Rectangle#tempRect.overTemp">
+							<Setter Property="Fill" Value="#CC2C1F"/>
+						</Style>
+						<Style Selector="Image#tempIcon.tempOK">
+							<Setter Property="ToolTip.Tip" Value="System temp OK"/>
+							<Setter Property="ToolTip.Placement" Value="Top"/>
+							<Setter Property="ToolTip.VerticalOffset" Value="0"/>
+						</Style>
+						<Style Selector="Image#tempIcon.overTemp">
+							<Setter Property="ToolTip.Tip" Value="System over-temp"/>
+							<Setter Property="ToolTip.Placement" Value="Top"/>
+							<Setter Property="ToolTip.VerticalOffset" Value="0"/>
+						</Style>
+					</Panel.Styles>
+					<Rectangle x:Name="tempRect" Height="22" Width="24" Margin="0" />
+					<Image x:Name="tempIcon" Source="avares://Cortex/Assets/temperature.png" Height="20"/>
+				</Panel>
+			</StackPanel>
+			<TextBlock Text="{Binding SystemDateTime}" FontSize="14" Margin="5, 0, 5, 0"
+					   HorizontalAlignment="Right"
+					   VerticalAlignment="Center"
+					   IsVisible="{Binding SdOK}"
+					   ToolTip.Tip="Controller date &amp; time"/>
+		</Grid>
+	</Grid>
+</Window>
