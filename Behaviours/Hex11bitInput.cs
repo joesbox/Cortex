@@ -28,8 +28,8 @@ namespace Cortex.Behaviours
 
         private void OnTextInput(object? sender, TextInputEventArgs e)
         {
-            var textBox = (TextBox)sender;
-            var proposed = textBox.Text?.Remove(textBox.SelectionStart, textBox.SelectionEnd - textBox.SelectionStart);
+            TextBox? textBox = (TextBox)sender;
+            string? proposed = textBox.Text?.Remove(textBox.SelectionStart, textBox.SelectionEnd - textBox.SelectionStart);
             proposed = proposed?.Insert(textBox.CaretIndex, e.Text);
 
             if (!IsValidHex11Bit(proposed))

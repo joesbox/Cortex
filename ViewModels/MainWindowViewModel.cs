@@ -1,6 +1,8 @@
-﻿using Avalonia.Media.Imaging;
+﻿using Avalonia.Media;
+using Avalonia.Media.Imaging;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Cortex.Models;
 using Cortex.Services;
 using LiveChartsCore;
 using LiveChartsCore.Measure;
@@ -12,14 +14,22 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO.Ports;
+using System.Linq;
 using System.Timers;
+using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace Cortex.ViewModels
 {
     public partial class MainWindowViewModel : ObservableObject
     {
         [ObservableProperty]
+        private DataStructures dataStructuresView = new();
+
+        [ObservableProperty]
         private bool isConnected;
+
+        [ObservableProperty]
+        private bool commsEstablished;
 
         [ObservableProperty]
         private List<Tuple<int, int>> testData;
@@ -51,15 +61,97 @@ namespace Cortex.ViewModels
         [ObservableProperty]
         private string? receivedData;
 
+        [ObservableProperty]
+        private bool isChannelGridEnabled = true;
+
+        [ObservableProperty]
+        private bool isRetryEnabled;
+
+        [ObservableProperty]
+        private bool isMultichannelEnabled;
+
+        [ObservableProperty]
+        private bool isRunOnEnabled;
+
+        [ObservableProperty]
+        private bool isOverrideToggled;
+
+        [ObservableProperty]
+        private bool isPWMChannel;
+
+        [ObservableProperty]
+        private bool isSoftStartEnabled;
+
+        [ObservableProperty]
+        private bool isAnalogue;
+
+        [ObservableProperty]
+        private bool pullUpEnabled;
+
+        [ObservableProperty]
+        private bool pullDownEnabled;
+
+        [ObservableProperty]
+        private bool activeLow;
+
+        [ObservableProperty]
+        private double lowerAnalogueTH;
+
+        [ObservableProperty]
+        private double upperAnalogueTH;
+
+        [ObservableProperty]
+        private int lowerPWMRange;
+
+        [ObservableProperty]
+        private int upperPWMRange;
+
+        [ObservableProperty]
+        private bool isThresholdMode = true;
+
+        [ObservableProperty]
+        private int selectedChannelIndex;
+
+        [ObservableProperty]
+        private ChannelLabel selectedChannelLabel;
+
+        [ObservableProperty]
+        private ObservableCollection<ChannelLabel> channelDisplayList;
+
+        [ObservableProperty]
+        private OutputChannel? selectedChannel;
+
+        public bool IsScaledMode => !IsThresholdMode;
+
         private SerialPortService? _portService;
 
         private readonly Timer _pollTimer = new(3000); // Every 3 seconds
+
+        private readonly Timer _commsTimer = new(1000); // Every 1000 millis
 
         private readonly IAppCloser _appCloser;
 
         public RelayCommand ExitCommand { get; }
 
         public ObservableCollection<string> LogEntries { get; } = new();
+
+        public ObservableCollection<int> ChannelIndices { get; }        
+
+        partial void OnSelectedChannelIndexChanged(int oldValue, int newValue)
+        {
+            OnPropertyChanged(nameof(SelectedChannel));
+            SelectedChannelLabel = ChannelDisplayList.FirstOrDefault(c => c.Index == newValue);
+            SelectedChannel = DataStructuresView.Channels.ElementAtOrDefault(SelectedChannelIndex);
+        }
+
+        partial void OnSelectedChannelLabelChanged(ChannelLabel value)
+        {
+            SelectedChannelIndex = value?.Index ?? 0;
+            if (SelectedChannel != null)
+            {
+                SelectedChannel = DataStructuresView.Channels.ElementAtOrDefault(SelectedChannelIndex);
+            }
+        }
 
         public MainWindowViewModel(IAppCloser appCloser)
         {
@@ -69,6 +161,19 @@ namespace Cortex.ViewModels
             OverTemperature = false;
             UnderVoltage = true;
             CrcFailed = false;
+            isPWMChannel = false;
+
+            ChannelIndices = new ObservableCollection<int>(
+            Enumerable.Range(0, DataStructuresView.Channels.Count));
+
+            ChannelDisplayList = new ObservableCollection<ChannelLabel>(
+    Enumerable.Range(0, DataStructuresView.Channels.Count)
+    .Select(i => new ChannelLabel(i)));
+
+            SelectedChannelLabel = ChannelDisplayList.FirstOrDefault();
+
+            UpperAnalogueTH = 5.0;
+            UpperPWMRange = 100;
 
             _appCloser = appCloser;
             ExitCommand = new RelayCommand(OnExit);
@@ -85,6 +190,9 @@ namespace Cortex.ViewModels
 
             _pollTimer.Elapsed += (s, e) => LoadSerialPorts();
             _pollTimer.Start();
+
+            _commsTimer.Elapsed += (s, e) => HandleComms();
+            _commsTimer.Start();
 
         }
 
@@ -220,27 +328,55 @@ namespace Cortex.ViewModels
         private void Connect(string selectedPort)
         {
             _portService = new SerialPortService(selectedPort);
-            _portService.DataReceived += OnDataReceived;
-            _portService.Open();
+            _portService.DataUpdated += _portService_DataUpdated;
+            IsConnected = _portService.Open();
+
+            if (IsConnected)
+            {
+                AddLog("Connecting to ECU on " + selectedPort + "...");
+            }
+            _portService.InitComms();
         }
 
-        private void OnDataReceived(object? sender, string data)
+        private void _portService_DataUpdated(DataStructures obj)
         {
             Avalonia.Threading.Dispatcher.UIThread.Post(() =>
             {
-                ReceivedData = data;
+                DataStructuresView = obj;
             });
         }
+
+        private void HandleComms()
+        {
+            if (IsConnected)
+            {
+                if (!CommsEstablished)
+                {
+                    if (_portService != null)
+                    {
+                        CommsEstablished = _portService.InitComms();
+                        if (CommsEstablished)
+                        {
+                            AddLog("PDM Connected.");
+                        }
+                    }
+                }
+            }
+        }
+
 
         [RelayCommand]
         private void Disconnect()
         {
             if (_portService != null)
             {
-                _portService.DataReceived -= OnDataReceived;
+                _portService.DataUpdated -= _portService_DataUpdated;
                 _portService.Close();
                 _portService = null;
             }
+
+            IsConnected = false;
+            AddLog("Disconnected from ECU.");
         }
 
         public void AddLog(string message)
@@ -248,5 +384,28 @@ namespace Cortex.ViewModels
             var timestamp = DateTime.Now.ToString("HH:mm:ss");
             LogEntries.Add($"[{timestamp}] {message}");
         }
+
+        partial void OnPullUpEnabledChanged(bool value)
+        {
+            if (value)
+                PullDownEnabled = false;
+        }
+
+        partial void OnPullDownEnabledChanged(bool value)
+        {
+            if (value)
+                PullUpEnabled = false;
+        }
+    }
+}
+
+public partial class ChannelLabel : ObservableObject
+{
+    public int Index { get; }
+    public string Label => $"Channel {Index + 1}";
+
+    public ChannelLabel(int index)
+    {
+        Index = index;
     }
 }

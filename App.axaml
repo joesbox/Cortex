@@ -2,41 +2,42 @@
     x:Class="Cortex.App"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-	xmlns:lvc="using:LiveChartsCore.SkiaSharpView.Avalonia"
     xmlns:local="using:Cortex"
+    xmlns:lvc="using:LiveChartsCore.SkiaSharpView.Avalonia"
+    xmlns:themes="using:RangeSlider.Avalonia.Themes.Fluent"
     RequestedThemeVariant="Dark">
-	<!--  "Default" ThemeVariant follows system theme variant. "Dark" or "Light" are other available options.  -->
+    <!--  "Default" ThemeVariant follows system theme variant. "Dark" or "Light" are other available options.  -->
 
-	<Application.DataTemplates>
-		<local:ViewLocator />
-	</Application.DataTemplates>
+    <Application.DataTemplates>
+        <local:ViewLocator />
+    </Application.DataTemplates>
 
-	<Application.Styles>
-		<StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml" />
+    <Application.Styles>
+        <StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml" />
 
-		<!-- Global font family for TextBlock and Control -->
-		<Style Selector="TextBlock">
-			<Setter Property="FontFamily" Value="avares://Cortex/Assets/BellotaText-Light.ttf#Bellota Text Light"/>
-		</Style>
+        <!--  Global font family for TextBlock and Control  -->
+        <Style Selector="TextBlock">
+            <Setter Property="FontFamily" Value="avares://Cortex/Assets/BellotaText-Light.ttf#Bellota Text Light" />
+        </Style>
 
-		<Style Selector="ContentControl">
-			<Setter Property="FontFamily" Value="avares://Cortex/Assets/BellotaText-Light.ttf#Bellota Text Light"/>
-		</Style>
+        <Style Selector="ContentControl">
+            <Setter Property="FontFamily" Value="avares://Cortex/Assets/BellotaText-Light.ttf#Bellota Text Light" />
+        </Style>
 
-		<Style Selector="Menu">
-			<Setter Property="FontFamily" Value="avares://Cortex/Assets/BellotaText-Light.ttf#Bellota Text Light"/>
-		</Style>
+        <Style Selector="Menu">
+            <Setter Property="FontFamily" Value="avares://Cortex/Assets/BellotaText-Light.ttf#Bellota Text Light" />
+        </Style>
 
-		<Style Selector="Window">
-			<Setter Property="FontFamily" Value="avares://Cortex/Assets/BellotaText-Light.ttf#Bellota Text Light"/>
-		</Style>
+        <Style Selector="Window">
+            <Setter Property="FontFamily" Value="avares://Cortex/Assets/BellotaText-Light.ttf#Bellota Text Light" />
+        </Style>
 
-		<Style Selector="lvc|CartesianChart">
-			<Setter Property="FontFamily" Value="avares://Cortex/Assets/BellotaText-Light.ttf#Bellota Text Light"/>
-		</Style>
-		<FluentTheme>
-			<FluentTheme.Palettes>
-				<ColorPaletteResources
+        <Style Selector="lvc|CartesianChart">
+            <Setter Property="FontFamily" Value="avares://Cortex/Assets/BellotaText-Light.ttf#Bellota Text Light" />
+        </Style>
+        <FluentTheme>
+            <FluentTheme.Palettes>
+                <ColorPaletteResources
                     x:Key="Light"
                     Accent="#ff0078d7"
                     AltHigh="White"
@@ -65,7 +66,7 @@
                     ListLow="#ffe6e6e6"
                     ListMedium="#ffcccccc"
                     RegionColor="#fffeffff" />
-				<ColorPaletteResources
+                <ColorPaletteResources
                     x:Key="Dark"
                     Accent="#ff800071"
                     AltHigh="Black"
@@ -94,8 +95,9 @@
                     ListLow="#ff302042"
                     ListMedium="#ff4e405c"
                     RegionColor="#212130" />
-			</FluentTheme.Palettes>
-		</FluentTheme>
-		<StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml" />
-	</Application.Styles>
+            </FluentTheme.Palettes>
+        </FluentTheme>
+        <StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml" />
+        <themes:RangeSliderTheme />
+    </Application.Styles>
 </Application>

@@ -8,12 +8,13 @@
     xmlns:local="using:AvaloniaSample"
     xmlns:lvc="using:LiveChartsCore.SkiaSharpView.Avalonia"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:rs="using:RangeSlider.Avalonia.Controls"
     xmlns:vm="using:Cortex.ViewModels"
     Title="C O R T E X"
-    MinWidth="1200"
-    MinHeight="600"
-    d:DesignHeight="450"
-    d:DesignWidth="800"
+    MinWidth="1500"
+    MinHeight="700"
+    d:DesignHeight="750"
+    d:DesignWidth="1600"
     x:DataType="vm:MainWindowViewModel"
     Icon="/Assets/cortex.ico"
     mc:Ignorable="d">
@@ -67,7 +68,7 @@
                     <Grid RowDefinitions="Auto, *">
                         <Border
                             Grid.Row="0"
-                            Width="320"
+                            Width="340"
                             Height="100"
                             Margin="5"
                             HorizontalAlignment="Left"
@@ -79,27 +80,32 @@
                             <Grid RowDefinitions="Auto, Auto">
                                 <ComboBox
                                     Grid.Row="0"
-                                    Width="300"
+                                    Width="315"
                                     Margin="10"
                                     ItemsSource="{Binding SerialPorts}"
                                     SelectedItem="{Binding SelectedSerialPort, Mode=TwoWay}" />
-                                <Grid Grid.Row="1" ColumnDefinitions="*,*,*">
+                                <Grid
+                                    Grid.Row="1"
+                                    ColumnDefinitions="Auto,Auto,Auto"
+                                    ColumnSpacing="8">
                                     <Button
                                         Grid.Column="0"
-                                        Width="90"
+                                        Width="110"
                                         Margin="10,0,0,0"
                                         HorizontalAlignment="Center"
                                         HorizontalContentAlignment="Center"
                                         Command="{Binding DisconnectCommand}"
-                                        Content="Disconnect" />
+                                        Content="DISCONNECT"
+                                        IsEnabled="{Binding IsConnected}" />
                                     <Button
                                         Grid.Column="1"
                                         Width="90"
-                                        Margin="0,0,0,0"
+                                        Margin="5,0,5,0"
                                         HorizontalAlignment="Center"
                                         HorizontalContentAlignment="Center"
                                         Command="{Binding RefreshSerialPortsCommand}"
-                                        Content="Refresh" />
+                                        Content="REFRESH"
+                                        IsEnabled="{Binding !IsConnected}" />
                                     <Button
                                         Grid.Column="2"
                                         Width="90"
@@ -108,7 +114,8 @@
                                         HorizontalContentAlignment="Center"
                                         Command="{Binding ConnectCommand}"
                                         CommandParameter="{Binding SelectedSerialPort}"
-                                        Content="Connect" />
+                                        Content="CONNECT"
+                                        IsEnabled="{Binding !IsConnected}" />
 
                                 </Grid>
                             </Grid>
@@ -167,7 +174,12 @@
                         </StackPanel>
                     </TabItem.Header>
                     <!--  Status area grid  -->
-                    <Grid RowDefinitions="*, Auto, 1.5*">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="*" MinHeight="300" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="1.5*" />
+                        </Grid.RowDefinitions>
                         <Grid.Styles>
                             <!--  Style for pointer over  -->
                             <Style Selector="GridSplitter:pointerover">
@@ -468,7 +480,7 @@
                                 Source="avares://Cortex/Assets/settings.png" />
                         </StackPanel>
                     </TabItem.Header>
-                    <Grid ColumnDefinitions="Auto,*" RowDefinitions="*, Auto">
+                    <Grid ColumnDefinitions="Auto,*,*" RowDefinitions="*, Auto">
                         <Border
                             Grid.Column="0"
                             Margin="5"
@@ -476,18 +488,17 @@
                             BorderBrush="#302042"
                             BorderThickness="1"
                             CornerRadius="10">
-                            <Grid
-                                Margin="10,0,10,0"
+                            <StackPanel
+                                Margin="20,0,20,0"
                                 HorizontalAlignment="Center"
-                                RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto">
+                                Orientation="Vertical"
+                                Spacing="9">
                                 <TextBlock
-                                    Grid.Row="0"
                                     Margin="0,10,0,0"
                                     Padding="0,0,0,10"
                                     HorizontalAlignment="Center"
-                                    Text="System Settings" />
+                                    Text="System" />
                                 <StackPanel
-                                    Grid.Row="1"
                                     HorizontalAlignment="Center"
                                     Orientation="Horizontal"
                                     Spacing="8">
@@ -506,14 +517,13 @@
                                         OnContent="Enabled" />
                                 </StackPanel>
                                 <StackPanel
-                                    Grid.Row="2"
                                     HorizontalAlignment="Center"
                                     Orientation="Horizontal"
                                     Spacing="8">
                                     <TextBlock
                                         Margin="5"
                                         VerticalAlignment="Center"
-                                        Text="Enable GPS" />
+                                        Text="GPS" />
                                     <ToggleSwitch
                                         HorizontalAlignment="Left"
                                         VerticalAlignment="Center"
@@ -525,7 +535,6 @@
                                         OnContent="Enabled" />
                                 </StackPanel>
                                 <StackPanel
-                                    Grid.Row="3"
                                     HorizontalAlignment="Center"
                                     Orientation="Horizontal"
                                     Spacing="8">
@@ -544,7 +553,6 @@
                                         OnContent="Imperial" />
                                 </StackPanel>
                                 <StackPanel
-                                    Grid.Row="4"
                                     HorizontalAlignment="Center"
                                     Orientation="Horizontal"
                                     Spacing="8">
@@ -563,7 +571,6 @@
                                         OnContent="Imperial" />
                                 </StackPanel>
                                 <StackPanel
-                                    Grid.Row="6"
                                     HorizontalAlignment="Center"
                                     Orientation="Vertical"
                                     Spacing="0">
@@ -590,7 +597,6 @@
                                     </Grid>
                                 </StackPanel>
                                 <StackPanel
-                                    Grid.Row="7"
                                     HorizontalAlignment="Center"
                                     Orientation="Horizontal"
                                     Spacing="8">
@@ -609,7 +615,6 @@
                                         OnContent="Enabled" />
                                 </StackPanel>
                                 <StackPanel
-                                    Grid.Row="8"
                                     HorizontalAlignment="Center"
                                     Orientation="Horizontal"
                                     Spacing="12">
@@ -649,7 +654,6 @@
                                         <TextBlock
                                             Grid.Row="1"
                                             Grid.Column="1"
-                                            Width=""
                                             Margin="2,0,5,0"
                                             HorizontalAlignment="Right"
                                             VerticalAlignment="Center"
@@ -671,7 +675,7 @@
                                             Margin="5"
                                             HorizontalAlignment="Center"
                                             VerticalAlignment="Center"
-                                            Text="CAN ID - Sytem Config RX" />
+                                            Text="CAN ID - System Config RX" />
                                         <TextBlock
                                             Grid.Row="2"
                                             Grid.Column="1"
@@ -692,7 +696,7 @@
                                         </TextBox>
                                     </Grid>
                                 </StackPanel>
-                            </Grid>
+                            </StackPanel>
                         </Border>
                         <Border
                             Grid.Column="1"
@@ -705,27 +709,691 @@
                                 <TextBlock
                                     Margin="0,10,0,0"
                                     HorizontalAlignment="Center"
-                                    Text="Channel Settings" />
+                                    Text="Outputs" />
                                 <Grid
                                     Margin="10,10,10,10"
                                     HorizontalAlignment="Center"
-                                    ColumnDefinitions="Auto,Auto">
+                                    ColumnDefinitions="Auto,Auto,Auto,Auto">
                                     <TextBlock
                                         Grid.Column="0"
                                         Margin="0,10,0,0"
                                         Padding="0,0,10,0"
                                         HorizontalAlignment="Center"
                                         Text="Channel no.:" />
-                                    <ComboBox Grid.Column="1" Width="100" />
+                                    <ComboBox
+                                        Grid.Column="1"
+                                        Width="100"
+                                        Margin="0,0,10,0"
+                                        ItemsSource="{Binding ChannelDisplayList}"
+										SelectedItem="{Binding SelectedChannelLabel}"
+										DisplayMemberBinding="{Binding Label}"/>
+                                    <TextBlock
+                                        Grid.Column="2"
+                                        Margin="0,0,10,0"
+                                        VerticalAlignment="Center"
+                                        Text="Channel enabled" />
+                                    <ToggleSwitch
+                                        Grid.Column="3"
+                                        HorizontalAlignment="Left"
+                                        VerticalAlignment="Center"
+                                        Background="#ff15151f"
+                                        BorderBrush="#302042"
+                                        BorderThickness="1"
+                                        CornerRadius="10"
+                                        IsChecked="{Binding IsChannelGridEnabled}"
+                                        OffContent="Disabled"
+                                        OnContent="Enabled" />
                                 </Grid>
-                                <Grid ColumnDefinitions="*,*,*">
-                                    
+                                <Grid
+                                    Margin="10"
+                                    HorizontalAlignment="Center"
+                                    ColumnDefinitions="*,*"
+                                    ColumnSpacing="30"
+                                    IsEnabled="{Binding IsChannelGridEnabled}"
+                                    RowSpacing="10">
+                                    <StackPanel
+                                        Grid.Column="0"
+                                        HorizontalAlignment="Center"
+                                        Orientation="Vertical"
+                                        Spacing="9">
+                                        <Grid
+                                            HorizontalAlignment="Center"
+                                            ColumnDefinitions="Auto,*"
+                                            ColumnSpacing="10">
+                                            <TextBlock
+                                                Grid.Column="0"
+                                                VerticalAlignment="Center"
+                                                Text="Channel type" />
+                                            <ComboBox
+                                                Grid.Column="1"
+                                                Width="150"
+                                                VerticalAlignment="Center"
+                                                AutoScrollToSelectedItem="True" />
+                                        </Grid>
+                                        <Grid
+                                            HorizontalAlignment="Center"
+                                            ColumnDefinitions="Auto,*"
+                                            ColumnSpacing="10">
+                                            <TextBlock
+                                                Grid.Column="0"
+                                                VerticalAlignment="Center"
+                                                Text="Channel name (3 chars.)" />
+                                            <TextBox
+                                                Grid.Column="1"
+                                                Width="84"
+                                                MaxLength="3" />
+                                        </Grid>
+                                        <StackPanel HorizontalAlignment="Center" Orientation="Vertical">
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Text="Current limit" />
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <TextBlock
+                                                    Width="20"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    Text="{Binding #chanLimit.Value}" />
+                                                <Slider
+                                                    x:Name="chanLimit"
+                                                    Width="200"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    IsSnapToTickEnabled="True"
+                                                    Maximum="17"
+                                                    Minimum="0"
+                                                    TickFrequency="1" 
+													Value="{Binding SelectedChannel.CurrentLimitHigh}"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                        <StackPanel HorizontalAlignment="Center" Orientation="Vertical">
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Text="Current low threshold" />
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <TextBlock
+                                                    Width="20"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    Text="{Binding #chanTHLow.Value}" />
+                                                <Slider
+                                                    x:Name="chanTHLow"
+                                                    Width="200"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    IsSnapToTickEnabled="True"
+                                                    Maximum="17"
+                                                    Minimum="0"
+                                                    TickFrequency="1" />
+                                            </StackPanel>
+                                        </StackPanel>
+                                        <StackPanel HorizontalAlignment="Center" Orientation="Vertical">
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Text="Current high threshold" />
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <TextBlock
+                                                    Width="20"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    Text="{Binding #chanTHHigh.Value}" />
+                                                <Slider
+                                                    x:Name="chanTHHigh"
+                                                    Width="200"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    IsSnapToTickEnabled="True"
+                                                    Maximum="17"
+                                                    Minimum="0"
+                                                    TickFrequency="1" />
+                                            </StackPanel>
+                                        </StackPanel>
+                                        <Grid
+                                            HorizontalAlignment="Center"
+                                            ColumnDefinitions="Auto,*"
+                                            ColumnSpacing="10">
+                                            <TextBlock
+                                                Grid.Column="0"
+                                                VerticalAlignment="Center"
+                                                Text="Retry after fault" />
+                                            <ToggleSwitch
+                                                Grid.Column="1"
+                                                HorizontalAlignment="Left"
+                                                VerticalAlignment="Center"
+                                                Background="#ff15151f"
+                                                BorderBrush="#302042"
+                                                BorderThickness="1"
+                                                CornerRadius="10"
+                                                IsChecked="{Binding IsRetryEnabled}"
+                                                OffContent="Disabled"
+                                                OnContent="Enabled" />
+                                        </Grid>
+                                        <StackPanel HorizontalAlignment="Center" Orientation="Vertical">
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Text="Retry delay (seconds)" />
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <TextBlock
+                                                    Width="20"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    Text="{Binding #retryDelay.Value}" />
+                                                <Slider
+                                                    x:Name="retryDelay"
+                                                    Width="200"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    IsSnapToTickEnabled="True"
+                                                    Maximum="10"
+                                                    Minimum="0"
+                                                    TickFrequency="1" />
+                                            </StackPanel>
+                                        </StackPanel>
+                                        <StackPanel HorizontalAlignment="Center" Orientation="Vertical">
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Text="Retry attempts" />
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <TextBlock
+                                                    Width="20"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    Text="{Binding #retryAttempts.Value}" />
+                                                <Slider
+                                                    x:Name="retryAttempts"
+                                                    Width="200"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    IsSnapToTickEnabled="True"
+                                                    Maximum="10"
+                                                    Minimum="0"
+                                                    TickFrequency="1" />
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </StackPanel>
+                                    <StackPanel
+                                        Grid.Column="1"
+                                        HorizontalAlignment="Center"
+                                        Orientation="Vertical"
+                                        Spacing="9">
+                                        <StackPanel
+                                            HorizontalAlignment="Center"
+                                            IsEnabled="{Binding IsPWMChannel}"
+                                            Orientation="Vertical">
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Text="PWM Duty" />
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <TextBlock
+                                                    Width="25"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    Text="{Binding #PWMDuty.Value}" />
+                                                <Slider
+                                                    x:Name="PWMDuty"
+                                                    Width="200"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    IsSnapToTickEnabled="True"
+                                                    Maximum="100"
+                                                    Minimum="0"
+                                                    TickFrequency="1" />
+                                            </StackPanel>
+                                        </StackPanel>
+                                        <Grid
+                                            Grid.Column="1"
+                                            HorizontalAlignment="Center"
+                                            ColumnDefinitions="Auto,*"
+                                            ColumnSpacing="10">
+                                            <TextBlock
+                                                Grid.Column="0"
+                                                VerticalAlignment="Center"
+                                                Text="Control input" />
+                                            <ComboBox
+                                                Grid.Column="1"
+                                                Width="150"
+                                                VerticalAlignment="Center"
+                                                AutoScrollToSelectedItem="True" />
+                                        </Grid>
+                                        <Grid
+                                            Grid.Row="1"
+                                            Grid.Column="1"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Center"
+                                            ColumnDefinitions="Auto,*"
+                                            ColumnSpacing="10">
+                                            <TextBlock
+                                                Grid.Column="0"
+                                                VerticalAlignment="Center"
+                                                Text="Multichannel" />
+                                            <ToggleSwitch
+                                                Grid.Column="1"
+                                                HorizontalAlignment="Left"
+                                                VerticalAlignment="Center"
+                                                Background="#ff15151f"
+                                                BorderBrush="#302042"
+                                                BorderThickness="1"
+                                                CornerRadius="10"
+                                                IsChecked="{Binding IsMultichannelEnabled, Mode=TwoWay}"
+                                                OffContent="Disabled"
+                                                OnContent="Enabled" />
+                                        </Grid>
+                                        <Grid
+                                            Grid.Row="2"
+                                            Grid.Column="1"
+                                            HorizontalAlignment="Center"
+                                            ColumnDefinitions="Auto,*"
+                                            ColumnSpacing="10">
+                                            <TextBlock
+                                                Grid.Column="0"
+                                                VerticalAlignment="Center"
+                                                Text="Group number" />
+                                            <NumericUpDown
+                                                Grid.Column="1"
+                                                Width="150"
+                                                VerticalAlignment="Center"
+                                                Increment="1"
+                                                Maximum="5"
+                                                Minimum="1"
+                                                Value="1" />
+                                        </Grid>
+                                        <Grid
+                                            Grid.Row="3"
+                                            Grid.Column="1"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Center"
+                                            ColumnDefinitions="Auto,*"
+                                            ColumnSpacing="10">
+                                            <TextBlock
+                                                Grid.Column="0"
+                                                VerticalAlignment="Center"
+                                                Text="Run-on" />
+                                            <ToggleSwitch
+                                                Grid.Column="1"
+                                                HorizontalAlignment="Left"
+                                                VerticalAlignment="Center"
+                                                Background="#ff15151f"
+                                                BorderBrush="#302042"
+                                                BorderThickness="1"
+                                                CornerRadius="10"
+                                                IsChecked="{Binding IsRunOnEnabled, Mode=TwoWay}"
+                                                OffContent="Disabled"
+                                                OnContent="Enabled"
+                                                ToolTip.Tip="Keep output active after ignition-off" />
+                                        </Grid>
+                                        <StackPanel
+                                            Grid.Row="4"
+                                            Grid.Column="1"
+                                            HorizontalAlignment="Center"
+                                            Orientation="Vertical">
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Text="Run-on duration (seconds)" />
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <TextBlock
+                                                    Width="30"
+                                                    HorizontalAlignment="Right"
+                                                    VerticalAlignment="Center"
+                                                    Text="{Binding #runOn.Value}" />
+                                                <Slider
+                                                    x:Name="runOn"
+                                                    Width="200"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    IsSnapToTickEnabled="True"
+                                                    Maximum="600"
+                                                    Minimum="0"
+                                                    TickFrequency="5" />
+                                            </StackPanel>
+                                        </StackPanel>
+                                        <Grid
+                                            HorizontalAlignment="Center"
+                                            ColumnDefinitions="Auto,*"
+                                            ColumnSpacing="10">
+                                            <TextBlock
+                                                Grid.Column="0"
+                                                VerticalAlignment="Center"
+                                                Text="Soft start" />
+                                            <ToggleSwitch
+                                                Grid.Column="1"
+                                                HorizontalAlignment="Left"
+                                                VerticalAlignment="Center"
+                                                Background="#ff15151f"
+                                                BorderBrush="#302042"
+                                                BorderThickness="1"
+                                                CornerRadius="10"
+                                                IsChecked="{Binding IsSoftStartEnabled, Mode=TwoWay}"
+                                                OffContent="Disabled"
+                                                OnContent="Enabled" />
+                                        </Grid>
+                                        <StackPanel
+                                            Grid.Column="1"
+                                            HorizontalAlignment="Center"
+                                            Orientation="Vertical">
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Text="Soft start duration (milliseconds)" />
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <TextBlock
+                                                    Width="35"
+                                                    HorizontalAlignment="Right"
+                                                    VerticalAlignment="Center"
+                                                    Text="{Binding #softStart.Value}" />
+                                                <Slider
+                                                    x:Name="softStart"
+                                                    Width="200"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    IsSnapToTickEnabled="True"
+                                                    Maximum="5000"
+                                                    Minimum="0"
+                                                    TickFrequency="100" />
+                                            </StackPanel>
+                                        </StackPanel>
+                                        <StackPanel
+                                            Grid.Column="1"
+                                            HorizontalAlignment="Center"
+                                            Orientation="Vertical">
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Text="Manual override" />
+                                            <ToggleSwitch
+                                                Grid.Column="1"
+                                                HorizontalAlignment="Left"
+                                                VerticalAlignment="Center"
+                                                BorderBrush="#302042"
+                                                BorderThickness="1"
+                                                CornerRadius="10"
+                                                IsChecked="{Binding IsOverrideToggled, Mode=TwoWay}"
+                                                OffContent="Disabled"
+                                                OnContent="Enabled">
+                                                <ToolTip.Tip>
+                                                    <ToolTip Background="#B30000">
+                                                        Override output. Use with caution!
+                                                    </ToolTip>
+                                                </ToolTip.Tip>
+                                            </ToggleSwitch>
+                                        </StackPanel>
+                                    </StackPanel>
                                 </Grid>
                             </StackPanel>
                         </Border>
+                        <Grid Grid.Column="2" RowDefinitions="*,*">
+                            <Border
+                                Grid.Row="0"
+                                Grid.Column="2"
+                                Margin="5"
+                                Background="#ff15151f"
+                                BorderBrush="#302042"
+                                BorderThickness="1"
+                                CornerRadius="10">
+                                <StackPanel Orientation="Vertical" Spacing="8">
+                                    <TextBlock
+                                        Margin="0,10,0,0"
+                                        HorizontalAlignment="Center"
+                                        Text="Digital Inputs" />
+                                    <StackPanel
+                                        HorizontalAlignment="Center"
+                                        Orientation="Horizontal"
+                                        Spacing="9">
+                                        <TextBlock
+                                            Margin="5"
+                                            VerticalAlignment="Center"
+                                            Text="Input no.:" />
+                                        <ComboBox Width="100" Margin="0,0,10,0" />
+                                    </StackPanel>
+                                    <Grid ColumnDefinitions="*">
+                                        <StackPanel
+                                            Grid.Column="0"
+                                            Orientation="Vertical"
+                                            Spacing="8">
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Text="Active" />
+                                            <ToggleSwitch
+                                                Grid.Column="1"
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Background="#ff15151f"
+                                                BorderBrush="#302042"
+                                                BorderThickness="1"
+                                                CornerRadius="10"
+                                                IsChecked="{Binding ActiveLow, Mode=TwoWay}"
+                                                OffContent="Low"
+                                                OnContent="High" />
+                                        </StackPanel>
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+                            <Border
+                                Grid.Row="1"
+                                Grid.Column="2"
+                                Margin="5"
+                                Background="#ff15151f"
+                                BorderBrush="#302042"
+                                BorderThickness="1"
+                                CornerRadius="10">
+                                <StackPanel
+                                    HorizontalAlignment="Center"
+                                    Orientation="Vertical"
+                                    Spacing="8">
+                                    <TextBlock
+                                        Margin="0,10,0,0"
+                                        HorizontalAlignment="Center"
+                                        Text="Analogue Inputs" />
+                                    <StackPanel
+                                        HorizontalAlignment="Center"
+                                        Orientation="Horizontal"
+                                        Spacing="9">
+                                        <TextBlock
+                                            Margin="5"
+                                            VerticalAlignment="Center"
+                                            Text="Input no.:" />
+                                        <ComboBox Width="100" Margin="0,0,10,0" />
+                                    </StackPanel>
+                                    <Grid ColumnDefinitions="Auto,Auto" ColumnSpacing="40">
+                                        <StackPanel
+                                            Grid.Column="0"
+                                            Orientation="Vertical"
+                                            Spacing="8">
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Text="Digital / Analogue" />
+                                            <ToggleSwitch
+                                                Grid.Column="1"
+                                                Width="110"
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Background="#ff15151f"
+                                                BorderBrush="#302042"
+                                                BorderThickness="1"
+                                                CornerRadius="10"
+                                                IsChecked="{Binding IsAnalogue, Mode=TwoWay}"
+                                                OffContent="Digital"
+                                                OnContent="Analogue" />
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Text="Pull-up" />
+                                            <ToggleSwitch
+                                                Grid.Column="1"
+                                                Width="110"
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Background="#ff15151f"
+                                                BorderBrush="#302042"
+                                                BorderThickness="1"
+                                                CornerRadius="10"
+                                                IsChecked="{Binding PullUpEnabled, Mode=TwoWay}"
+                                                OffContent="Disabled"
+                                                OnContent="Enabled" />
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Text="Pull-down" />
+                                            <ToggleSwitch
+                                                Grid.Column="1"
+                                                Width="110"
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Background="#ff15151f"
+                                                BorderBrush="#302042"
+                                                BorderThickness="1"
+                                                CornerRadius="10"
+                                                IsChecked="{Binding PullDownEnabled, Mode=TwoWay}"
+                                                OffContent="Disabled"
+                                                OnContent="Enabled" />
+                                        </StackPanel>
+                                        <StackPanel
+                                            Grid.Column="1"
+                                            IsEnabled="{Binding IsAnalogue}"
+                                            Orientation="Vertical"
+                                            Spacing="8">
+                                            <TextBlock HorizontalAlignment="Center">Mode</TextBlock>
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <RadioButton
+                                                    Content="Threshold"
+                                                    GroupName="G1"
+                                                    IsChecked="{Binding IsThresholdMode}" />
+                                                <RadioButton
+                                                    Content="Scaled (PWM duty)"
+                                                    GroupName="G1"
+                                                    IsChecked="{Binding IsScaledMode}" />
+                                            </StackPanel>
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                IsEnabled="{Binding IsThresholdMode}"
+                                                IsVisible="{Binding IsThresholdMode}"
+                                                Text="On threshold (volts)" />
+                                            <StackPanel
+                                                HorizontalAlignment="Center"
+                                                IsEnabled="{Binding IsThresholdMode}"
+                                                IsVisible="{Binding IsThresholdMode}"
+                                                Orientation="Horizontal"
+                                                Spacing="8">
+                                                <TextBlock
+                                                    Width="25"
+                                                    HorizontalAlignment="Right"
+                                                    VerticalAlignment="Center"
+                                                    Text="{Binding #thLow.Value, StringFormat=F1}" />
+                                                <Slider
+                                                    x:Name="thLow"
+                                                    Width="180"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    IsSnapToTickEnabled="True"
+                                                    Maximum="5.0"
+                                                    Minimum="0.0"
+                                                    TickFrequency="0.1" />
+                                            </StackPanel>
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                IsEnabled="{Binding IsThresholdMode}"
+                                                IsVisible="{Binding IsThresholdMode}"
+                                                Text="Off threshold (volts)" />
+                                            <StackPanel
+                                                HorizontalAlignment="Center"
+                                                IsEnabled="{Binding IsThresholdMode}"
+                                                IsVisible="{Binding IsThresholdMode}"
+                                                Orientation="Horizontal"
+                                                Spacing="8">
+                                                <TextBlock
+                                                    Width="25"
+                                                    HorizontalAlignment="Right"
+                                                    VerticalAlignment="Center"
+                                                    Text="{Binding #thHigh.Value, StringFormat=F1}" />
+                                                <Slider
+                                                    x:Name="thHigh"
+                                                    Width="180"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    IsSnapToTickEnabled="True"
+                                                    Maximum="5.0"
+                                                    Minimum="0.0"
+                                                    TickFrequency="0.1" />
+                                            </StackPanel>
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                IsEnabled="{Binding !IsThresholdMode}"
+                                                IsVisible="{Binding !IsThresholdMode}"
+                                                Text="Analogue input range (volts)" />
+                                            <StackPanel
+                                                HorizontalAlignment="Center"
+                                                IsEnabled="{Binding !IsThresholdMode}"
+                                                IsVisible="{Binding !IsThresholdMode}"
+                                                Orientation="Horizontal"
+                                                Spacing="8">
+                                                <TextBlock
+                                                    Width="25"
+                                                    HorizontalAlignment="Right"
+                                                    VerticalAlignment="Center"
+                                                    Text="{Binding LowerAnalogueTH, StringFormat=F1}" />
+                                                <rs:RangeSlider
+                                                    x:Name="thRange"
+                                                    Width="180"
+                                                    IsThumbOverlap="True"
+                                                    LowerSelectedValue="{Binding LowerAnalogueTH}"
+                                                    Maximum="5.0"
+                                                    Minimum="0.0"
+                                                    UpperSelectedValue="{Binding UpperAnalogueTH}" />
+                                                <TextBlock
+                                                    Width="25"
+                                                    HorizontalAlignment="Right"
+                                                    VerticalAlignment="Center"
+                                                    Text="{Binding UpperAnalogueTH, StringFormat=F1}" />
+                                            </StackPanel>
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                IsEnabled="{Binding !IsThresholdMode}"
+                                                IsVisible="{Binding !IsThresholdMode}"
+                                                Text="PWM output range (% duty)" />
+                                            <StackPanel
+                                                HorizontalAlignment="Center"
+                                                IsEnabled="{Binding !IsThresholdMode}"
+                                                IsVisible="{Binding !IsThresholdMode}"
+                                                Orientation="Horizontal"
+                                                Spacing="8">
+                                                <TextBlock
+                                                    Width="25"
+                                                    HorizontalAlignment="Right"
+                                                    VerticalAlignment="Center"
+                                                    Text="{Binding LowerPWMRange, StringFormat=F0}" />
+                                                <rs:RangeSlider
+                                                    x:Name="pwmRange"
+                                                    Width="180"
+                                                    IsThumbOverlap="True"
+                                                    LowerSelectedValue="{Binding LowerPWMRange}"
+                                                    Maximum="100"
+                                                    Minimum="0"
+                                                    UpperSelectedValue="{Binding UpperPWMRange}" />
+                                                <TextBlock
+                                                    Width="25"
+                                                    HorizontalAlignment="Right"
+                                                    VerticalAlignment="Center"
+                                                    Text="{Binding UpperPWMRange, StringFormat=F0}" />
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+                        </Grid>
                         <StackPanel
                             Grid.Row="2"
-                            Grid.ColumnSpan="2"
+                            Grid.ColumnSpan="3"
                             HorizontalAlignment="Right"
                             Orientation="Horizontal">
                             <Button
