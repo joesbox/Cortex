@@ -15,6 +15,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO.Ports;
 using System.Linq;
+using System.Text.Json;
 using System.Timers;
 using static System.Runtime.InteropServices.JavaScript.JSType;
 
@@ -23,7 +24,10 @@ namespace Cortex.ViewModels
     public partial class MainWindowViewModel : ObservableObject
     {
         [ObservableProperty]
-        private DataStructures dataStructuresView = new();
+        private DataStructures liveDataView = new(); // For live/status data
+
+        [ObservableProperty]
+        private DataStructures settingsDataView = new(); // For settings (user editable)        
 
         [ObservableProperty]
         private bool isConnected;
@@ -63,15 +67,6 @@ namespace Cortex.ViewModels
 
         [ObservableProperty]
         private bool isChannelGridEnabled = true;
-
-        [ObservableProperty]
-        private bool isRetryEnabled;
-
-        [ObservableProperty]
-        private bool isMultichannelEnabled;
-
-        [ObservableProperty]
-        private bool isRunOnEnabled;
 
         [ObservableProperty]
         private bool isOverrideToggled;
@@ -121,6 +116,29 @@ namespace Cortex.ViewModels
         [ObservableProperty]
         private OutputChannel? selectedChannel;
 
+        [ObservableProperty]
+        private ObservableCollection<InputLabel> inputDisplayList;
+
+        [ObservableProperty]
+        private InputLabel? selectedInputLabel;
+
+        [ObservableProperty]
+        private byte selectedPinNumber;
+
+        [ObservableProperty]
+        private string? selectedChannelName;
+
+        [ObservableProperty]
+        private ChannelTypeDisplay? selectedChannelTypeDisplay;
+
+        [ObservableProperty]
+        private DigitalInput? selectedDigitalInput;
+
+        [ObservableProperty]
+        private AnalogueInput? _selectedAnalogueInput;
+
+        private InputDisplayItem? _selectedInputItem;
+
         public bool IsScaledMode => !IsThresholdMode;
 
         private SerialPortService? _portService;
@@ -131,17 +149,54 @@ namespace Cortex.ViewModels
 
         private readonly IAppCloser _appCloser;
 
+        // STM32 pin definitions
+        private static readonly byte[] DIChannelInputPins = { 79, 78, 77, 76, 75, 74, 73, 72 };
+
+        private static readonly byte[] ANAChannelInputPins = { 208, 209, 210, 211, 212, 213, 214, 215 };
+
+        private static readonly byte[] AllInputPins = DIChannelInputPins.Concat(ANAChannelInputPins).ToArray();
+
         public RelayCommand ExitCommand { get; }
 
         public ObservableCollection<string> LogEntries { get; } = new();
 
-        public ObservableCollection<int> ChannelIndices { get; }        
+        public ObservableCollection<int> ChannelIndices { get; }
+
+        public ObservableCollection<ChannelTypeDisplay> ChannelTypes { get; }
+
+        private bool refreshStaticData = true;
+
+        public InputDisplayItem? SelectedInputItem
+        {
+            get => _selectedInputItem;
+            set
+            {
+                if (SetProperty(ref _selectedInputItem, value) && value != null)
+                {
+                    // Keep SelectedChannel.ControlPin in sync
+                    SelectedChannel.InputControlPin = value.Pin;
+                }
+            }
+        }
+
+        partial void OnSelectedPinNumberChanged(byte value)
+        {
+            var index = Array.IndexOf(AllInputPins, value);
+            SelectedInputLabel = index >= 0 ? InputDisplayList.ElementAtOrDefault(index) : null;
+        }
 
         partial void OnSelectedChannelIndexChanged(int oldValue, int newValue)
         {
             OnPropertyChanged(nameof(SelectedChannel));
             SelectedChannelLabel = ChannelDisplayList.FirstOrDefault(c => c.Index == newValue);
-            SelectedChannel = DataStructuresView.Channels.ElementAtOrDefault(SelectedChannelIndex);
+            SelectedChannel = SettingsDataView.ChannelsStaticData.ElementAtOrDefault(SelectedChannelIndex);
+
+            if (SelectedChannel != null)
+            {
+                SelectedPinNumber = SelectedChannel.InputControlPin;
+                SelectedChannelTypeDisplay = ChannelTypes.FirstOrDefault(ctd => ctd.ChannelType == SelectedChannel.ChanType);
+                SelectedChannelName = new string(SelectedChannel.Name).TrimEnd('\0');
+            }
         }
 
         partial void OnSelectedChannelLabelChanged(ChannelLabel value)
@@ -149,7 +204,36 @@ namespace Cortex.ViewModels
             SelectedChannelIndex = value?.Index ?? 0;
             if (SelectedChannel != null)
             {
-                SelectedChannel = DataStructuresView.Channels.ElementAtOrDefault(SelectedChannelIndex);
+                SelectedChannel = SettingsDataView.ChannelsStaticData.ElementAtOrDefault(SelectedChannelIndex);
+            }
+        }
+
+        partial void OnSelectedChannelTypeDisplayChanged(ChannelTypeDisplay? value)
+        {
+            // Check that both the selected channel and the new value are not null
+            if (SelectedChannel != null && value != null)
+            {
+                // Update the ChanType property of the SelectedChannel with the new enum value
+                SelectedChannel.ChanType = value.ChannelType;
+            }
+        }
+
+        partial void OnSelectedChannelNameChanged(string? value)
+        {
+            if (SelectedChannel != null && value != null)
+            {
+                // Update the channel name in the data model
+                var charArray = new char[Constants.CHANNEL_NAME_LENGTH];
+                value.CopyTo(0, charArray, 0, Math.Min(value.Length, charArray.Length));
+                SelectedChannel.Name = charArray;
+            }
+        }
+
+        partial void OnSelectedInputLabelChanged(InputLabel? value)
+        {
+            if (SelectedChannel != null && value != null)
+            {
+                SelectedChannel.InputControlPin = AllInputPins[value.Index];
             }
         }
 
@@ -164,13 +248,31 @@ namespace Cortex.ViewModels
             isPWMChannel = false;
 
             ChannelIndices = new ObservableCollection<int>(
-            Enumerable.Range(0, DataStructuresView.Channels.Count));
+            Enumerable.Range(0, SettingsDataView.ChannelsStaticData.Count));
 
             ChannelDisplayList = new ObservableCollection<ChannelLabel>(
-    Enumerable.Range(0, DataStructuresView.Channels.Count)
+    Enumerable.Range(0, SettingsDataView.ChannelsStaticData.Count)
     .Select(i => new ChannelLabel(i)));
 
+            InputDisplayList = new ObservableCollection<InputLabel>(
+    Enumerable.Range(0, Constants.NUM_DIGITAL_INPUTS + Constants.NUM_ANALOGUE_INPUTS)
+    .Select(i => new InputLabel(i)));
+
+            ChannelTypes = new ObservableCollection<ChannelTypeDisplay>
+    {
+        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.DIG, Label = "Digital Input" },
+        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.DIG_PWM, Label = "Digital PWM" },
+        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.ANA, Label = "Analogue threshold" },
+        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.ANA_PWM, Label = "Analogue scaled PWM" },
+        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.CAN_DIGITAL, Label = "CAN Digital" },
+        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.CAN_PWM, Label = "CAN PWM" }
+    };
+
             SelectedChannelLabel = ChannelDisplayList.FirstOrDefault();
+
+            SelectedDigitalInput = SettingsDataView.DigitalInputs.FirstOrDefault();
+
+            SelectedAnalogueInput = SettingsDataView.AnalogueInputsStaticData.FirstOrDefault();
 
             UpperAnalogueTH = 5.0;
             UpperPWMRange = 100;
@@ -193,7 +295,27 @@ namespace Cortex.ViewModels
 
             _commsTimer.Elapsed += (s, e) => HandleComms();
             _commsTimer.Start();
+            SettingsDataView.PropertyChanged += SettingsDataView_PropertyChanged;
+        }
 
+        
+
+        private void SettingsDataView_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+        {
+            if (SelectedChannel == null)
+            {
+                SelectedChannel = SettingsDataView.ChannelsStaticData.ElementAtOrDefault(SelectedChannelIndex);
+            }
+
+            if (SelectedAnalogueInput == null)
+            {
+                SelectedAnalogueInput = SettingsDataView.AnalogueInputsStaticData.FirstOrDefault();
+            }
+
+            if (SelectedDigitalInput == null)
+            {
+                SelectedDigitalInput = SettingsDataView.DigitalInputs.FirstOrDefault();
+            }
         }
 
         public ISeries[] Series { get; set; }
@@ -333,7 +455,7 @@ namespace Cortex.ViewModels
 
             if (IsConnected)
             {
-                AddLog("Connecting to ECU on " + selectedPort + "...");
+                AddLog("Connecting to PDM on " + selectedPort + "...");
             }
             _portService.InitComms();
         }
@@ -342,8 +464,22 @@ namespace Cortex.ViewModels
         {
             Avalonia.Threading.Dispatcher.UIThread.Post(() =>
             {
-                DataStructuresView = obj;
+                LiveDataView = obj;
+                // Only update settings data on initial load or when user requests refresh
+                if (refreshStaticData)
+                {
+                    // Initial load - copy data to settings
+                    refreshStaticData = false;
+                    SettingsDataView = DeepCopyDataStructures(obj);
+                    OnSelectedChannelIndexChanged(SelectedChannelIndex, SelectedChannelIndex);
+                }
             });
+        }
+
+        private DataStructures DeepCopyDataStructures(DataStructures source)
+        {
+            var json = JsonSerializer.Serialize(source);
+            return JsonSerializer.Deserialize<DataStructures>(json) ?? new DataStructures();
         }
 
         private void HandleComms()
@@ -376,7 +512,7 @@ namespace Cortex.ViewModels
             }
 
             IsConnected = false;
-            AddLog("Disconnected from ECU.");
+            AddLog("Disconnected from PDM.");
         }
 
         public void AddLog(string message)
@@ -409,3 +545,27 @@ public partial class ChannelLabel : ObservableObject
         Index = index;
     }
 }
+
+public partial class InputLabel : ObservableObject
+{
+    public int Index { get; }
+    public string Label => Index < 8 ? $"Digital {Index + 1}" : $"Ana/Dig {(Index - 8) + 1}";
+
+    public InputLabel(int index)
+    {
+        Index = index;
+    }
+}
+
+public class InputDisplayItem
+{
+    public byte Pin { get; set; }
+    public string Label { get; set; } = "";
+}
+
+public class ChannelTypeDisplay
+{
+    public OutputChannel.ChannelType ChannelType { get; set; }
+    public string Label { get; set; }
+}
+

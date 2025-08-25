@@ -28,7 +28,7 @@ namespace Cortex.Behaviours
 
         private void OnTextInput(object? sender, TextInputEventArgs e)
         {
-            TextBox? textBox = (TextBox)sender;
+            TextBox? textBox = sender as TextBox;
             string? proposed = textBox.Text?.Remove(textBox.SelectionStart, textBox.SelectionEnd - textBox.SelectionStart);
             proposed = proposed?.Insert(textBox.CaretIndex, e.Text);
 

@@ -14,38 +14,43 @@ namespace Cortex.Models
     public partial class DataStructures : ObservableObject
     {
         [ObservableProperty]
-        public List<OutputChannel> channels;
+        public List<OutputChannel> channelsLiveData;
+
+        [ObservableProperty]
+        public List<OutputChannel> channelsStaticData;
 
         [ObservableProperty]
         public List<DigitalInput> digitalInputs;
 
         [ObservableProperty]
-        public List<AnalogueInput> analogueInputs;
+        public List<AnalogueInput> analogueInputsStaticData;
 
         [ObservableProperty]
         public SystemParameters parameters;
 
         public DataStructures()
         {
-            channels = new List<OutputChannel>();
+            channelsLiveData = new List<OutputChannel>();
+            channelsStaticData = new List<OutputChannel>();
 
             for (int i = 0; i < Constants.NUM_OUTPUT_CHANNELS; i++)
             {
-                channels.Add(new OutputChannel());
+                channelsLiveData.Add(new OutputChannel());
+                channelsStaticData.Add(new OutputChannel());
             }
 
             digitalInputs = new List<DigitalInput>();
 
             for (int i = 0; i < Constants.NUM_DIGITAL_INPUTS; i++)
             {
-                digitalInputs.Add(new DigitalInput());
+                digitalInputs.Add(new DigitalInput(i + 1, true));
             }
 
-            analogueInputs = new List<AnalogueInput>();
+            analogueInputsStaticData = new List<AnalogueInput>();
 
             for (int i = 0; i < Constants.NUM_ANALOGUE_INPUTS; i++)
             {
-                analogueInputs.Add(new AnalogueInput());
+                analogueInputsStaticData.Add(new AnalogueInput(i + 1, false, false, true, true, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0));
             }
 
             parameters = new SystemParameters();

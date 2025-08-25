@@ -575,19 +575,20 @@
                                     Orientation="Vertical"
                                     Spacing="0">
                                     <TextBlock
-                                        Margin="5,5,5,0"
+                                        Margin="25,5,5,0"
                                         VerticalAlignment="Center"
                                         Text="System current limit" />
-                                    <Grid ColumnDefinitions="Auto, *">
+                                    <Grid ColumnDefinitions="Auto, Auto">
                                         <TextBlock
                                             Grid.Column="0"
+                                            Width="35"
                                             HorizontalAlignment="Right"
                                             VerticalAlignment="Center"
                                             Text="{Binding #slider.Value}" />
                                         <Slider
                                             x:Name="slider"
                                             Grid.Column="1"
-                                            Width="100"
+                                            Width="140"
                                             HorizontalAlignment="Right"
                                             VerticalAlignment="Center"
                                             IsSnapToTickEnabled="True"
@@ -722,11 +723,11 @@
                                         Text="Channel no.:" />
                                     <ComboBox
                                         Grid.Column="1"
-                                        Width="100"
+                                        Width="120"
                                         Margin="0,0,10,0"
+                                        DisplayMemberBinding="{Binding Label}"
                                         ItemsSource="{Binding ChannelDisplayList}"
-										SelectedItem="{Binding SelectedChannelLabel}"
-										DisplayMemberBinding="{Binding Label}"/>
+                                        SelectedItem="{Binding SelectedChannelLabel}" />
                                     <TextBlock
                                         Grid.Column="2"
                                         Margin="0,0,10,0"
@@ -766,9 +767,12 @@
                                                 Text="Channel type" />
                                             <ComboBox
                                                 Grid.Column="1"
-                                                Width="150"
+                                                Width="170"
                                                 VerticalAlignment="Center"
-                                                AutoScrollToSelectedItem="True" />
+                                                AutoScrollToSelectedItem="True"
+                                                DisplayMemberBinding="{Binding Label}"
+                                                ItemsSource="{Binding ChannelTypes}"
+                                                SelectedItem="{Binding SelectedChannelTypeDisplay}" />
                                         </Grid>
                                         <Grid
                                             HorizontalAlignment="Center"
@@ -781,7 +785,8 @@
                                             <TextBox
                                                 Grid.Column="1"
                                                 Width="84"
-                                                MaxLength="3" />
+                                                MaxLength="3"
+                                                Text="{Binding SelectedChannelName}" />
                                         </Grid>
                                         <StackPanel HorizontalAlignment="Center" Orientation="Vertical">
                                             <TextBlock
@@ -802,8 +807,9 @@
                                                     IsSnapToTickEnabled="True"
                                                     Maximum="17"
                                                     Minimum="0"
-                                                    TickFrequency="1" 
-													Value="{Binding SelectedChannel.CurrentLimitHigh}"/>
+                                                    TickFrequency="1"
+                                                    ToolTip.Tip="Absolute maximum current"
+                                                    Value="{Binding SelectedChannel.CurrentLimitHigh}" />
                                             </StackPanel>
                                         </StackPanel>
                                         <StackPanel HorizontalAlignment="Center" Orientation="Vertical">
@@ -825,7 +831,9 @@
                                                     IsSnapToTickEnabled="True"
                                                     Maximum="17"
                                                     Minimum="0"
-                                                    TickFrequency="1" />
+                                                    TickFrequency="1"
+                                                    ToolTip.Tip="Turn off threshold low (open circuit detection)"
+                                                    Value="{Binding SelectedChannel.CurrentThresholdLow}" />
                                             </StackPanel>
                                         </StackPanel>
                                         <StackPanel HorizontalAlignment="Center" Orientation="Vertical">
@@ -847,7 +855,9 @@
                                                     IsSnapToTickEnabled="True"
                                                     Maximum="17"
                                                     Minimum="0"
-                                                    TickFrequency="1" />
+                                                    TickFrequency="1"
+                                                    ToolTip.Tip="Turn off threshold high"
+                                                    Value="{Binding SelectedChannel.CurrentThresholdHigh}" />
                                             </StackPanel>
                                         </StackPanel>
                                         <Grid
@@ -859,6 +869,7 @@
                                                 VerticalAlignment="Center"
                                                 Text="Retry after fault" />
                                             <ToggleSwitch
+                                                x:Name="RetryTS"
                                                 Grid.Column="1"
                                                 HorizontalAlignment="Left"
                                                 VerticalAlignment="Center"
@@ -866,7 +877,7 @@
                                                 BorderBrush="#302042"
                                                 BorderThickness="1"
                                                 CornerRadius="10"
-                                                IsChecked="{Binding IsRetryEnabled}"
+                                                IsChecked="{Binding SelectedChannel.Retry}"
                                                 OffContent="Disabled"
                                                 OnContent="Enabled" />
                                         </Grid>
@@ -886,10 +897,12 @@
                                                     Width="200"
                                                     HorizontalAlignment="Center"
                                                     VerticalAlignment="Center"
+                                                    IsEnabled="{Binding #RetryTS.IsChecked}"
                                                     IsSnapToTickEnabled="True"
                                                     Maximum="10"
                                                     Minimum="0"
-                                                    TickFrequency="1" />
+                                                    TickFrequency="1"
+                                                    Value="{Binding SelectedChannel.RetryDelay}" />
                                             </StackPanel>
                                         </StackPanel>
                                         <StackPanel HorizontalAlignment="Center" Orientation="Vertical">
@@ -908,10 +921,12 @@
                                                     Width="200"
                                                     HorizontalAlignment="Center"
                                                     VerticalAlignment="Center"
+                                                    IsEnabled="{Binding #RetryTS.IsChecked}"
                                                     IsSnapToTickEnabled="True"
                                                     Maximum="10"
                                                     Minimum="0"
-                                                    TickFrequency="1" />
+                                                    TickFrequency="1"
+                                                    Value="{Binding SelectedChannel.RetryCount}" />
                                             </StackPanel>
                                         </StackPanel>
                                     </StackPanel>
@@ -939,10 +954,12 @@
                                                     Width="200"
                                                     HorizontalAlignment="Center"
                                                     VerticalAlignment="Center"
+                                                    IsEnabled="{Binding IsPWMChannel}"
                                                     IsSnapToTickEnabled="True"
                                                     Maximum="100"
                                                     Minimum="0"
-                                                    TickFrequency="1" />
+                                                    TickFrequency="1"
+                                                    Value="{Binding SelectedChannel.PWMSetDuty}" />
                                             </StackPanel>
                                         </StackPanel>
                                         <Grid
@@ -958,7 +975,10 @@
                                                 Grid.Column="1"
                                                 Width="150"
                                                 VerticalAlignment="Center"
-                                                AutoScrollToSelectedItem="True" />
+                                                AutoScrollToSelectedItem="True"
+                                                DisplayMemberBinding="{Binding Label}"
+                                                ItemsSource="{Binding InputDisplayList}"
+                                                SelectedItem="{Binding SelectedInputLabel}" />
                                         </Grid>
                                         <Grid
                                             Grid.Row="1"
@@ -972,6 +992,7 @@
                                                 VerticalAlignment="Center"
                                                 Text="Multichannel" />
                                             <ToggleSwitch
+                                                x:Name="MultiEn"
                                                 Grid.Column="1"
                                                 HorizontalAlignment="Left"
                                                 VerticalAlignment="Center"
@@ -979,7 +1000,7 @@
                                                 BorderBrush="#302042"
                                                 BorderThickness="1"
                                                 CornerRadius="10"
-                                                IsChecked="{Binding IsMultichannelEnabled, Mode=TwoWay}"
+                                                IsChecked="{Binding SelectedChannel.MultiChannel, Mode=TwoWay}"
                                                 OffContent="Disabled"
                                                 OnContent="Enabled" />
                                         </Grid>
@@ -998,9 +1019,10 @@
                                                 Width="150"
                                                 VerticalAlignment="Center"
                                                 Increment="1"
+                                                IsEnabled="{Binding #MultiEn.IsChecked}"
                                                 Maximum="5"
                                                 Minimum="1"
-                                                Value="1" />
+                                                Value="{Binding SelectedChannel.GroupNumber}" />
                                         </Grid>
                                         <Grid
                                             Grid.Row="3"
@@ -1014,6 +1036,7 @@
                                                 VerticalAlignment="Center"
                                                 Text="Run-on" />
                                             <ToggleSwitch
+                                                x:Name="RunONTS"
                                                 Grid.Column="1"
                                                 HorizontalAlignment="Left"
                                                 VerticalAlignment="Center"
@@ -1021,7 +1044,7 @@
                                                 BorderBrush="#302042"
                                                 BorderThickness="1"
                                                 CornerRadius="10"
-                                                IsChecked="{Binding IsRunOnEnabled, Mode=TwoWay}"
+                                                IsChecked="{Binding SelectedChannel.RunOn, Mode=TwoWay}"
                                                 OffContent="Disabled"
                                                 OnContent="Enabled"
                                                 ToolTip.Tip="Keep output active after ignition-off" />
@@ -1046,6 +1069,7 @@
                                                     Width="200"
                                                     HorizontalAlignment="Center"
                                                     VerticalAlignment="Center"
+                                                    IsEnabled="{Binding #RunONTS.IsChecked}"
                                                     IsSnapToTickEnabled="True"
                                                     Maximum="600"
                                                     Minimum="0"
@@ -1061,6 +1085,7 @@
                                                 VerticalAlignment="Center"
                                                 Text="Soft start" />
                                             <ToggleSwitch
+                                                x:Name="SSTS"
                                                 Grid.Column="1"
                                                 HorizontalAlignment="Left"
                                                 VerticalAlignment="Center"
@@ -1068,7 +1093,6 @@
                                                 BorderBrush="#302042"
                                                 BorderThickness="1"
                                                 CornerRadius="10"
-                                                IsChecked="{Binding IsSoftStartEnabled, Mode=TwoWay}"
                                                 OffContent="Disabled"
                                                 OnContent="Enabled" />
                                         </Grid>
@@ -1091,6 +1115,7 @@
                                                     Width="200"
                                                     HorizontalAlignment="Center"
                                                     VerticalAlignment="Center"
+                                                    IsEnabled="{Binding #SSTS.IsChecked}"
                                                     IsSnapToTickEnabled="True"
                                                     Maximum="5000"
                                                     Minimum="0"
@@ -1148,7 +1173,12 @@
                                             Margin="5"
                                             VerticalAlignment="Center"
                                             Text="Input no.:" />
-                                        <ComboBox Width="100" Margin="0,0,10,0" />
+                                        <ComboBox
+                                            Width="100"
+                                            Margin="0,0,10,0"
+                                            DisplayMemberBinding="{Binding InputNumber}"
+                                            ItemsSource="{Binding SettingsDataView.DigitalInputs}"
+                                            SelectedItem="{Binding SelectedDigitalInput, Mode=TwoWay}" />
                                     </StackPanel>
                                     <Grid ColumnDefinitions="*">
                                         <StackPanel
@@ -1167,7 +1197,7 @@
                                                 BorderBrush="#302042"
                                                 BorderThickness="1"
                                                 CornerRadius="10"
-                                                IsChecked="{Binding ActiveLow, Mode=TwoWay}"
+                                                IsChecked="{Binding SelectedDigitalInput.IsActiveHigh}"
                                                 OffContent="Low"
                                                 OnContent="High" />
                                         </StackPanel>
@@ -1198,17 +1228,23 @@
                                             Margin="5"
                                             VerticalAlignment="Center"
                                             Text="Input no.:" />
-                                        <ComboBox Width="100" Margin="0,0,10,0" />
+                                        <ComboBox
+                                            Width="100"
+                                            Margin="0,0,10,0"
+                                            DisplayMemberBinding="{Binding InputNumber}"
+                                            ItemsSource="{Binding SettingsDataView.AnalogueInputsStaticData}"
+                                            SelectedItem="{Binding SelectedAnalogueInput, Mode=TwoWay}" />
                                     </StackPanel>
-                                    <Grid ColumnDefinitions="Auto,Auto" ColumnSpacing="40">
+                                    <Grid ColumnDefinitions="*,*" ColumnSpacing="70">
                                         <StackPanel
                                             Grid.Column="0"
                                             Orientation="Vertical"
-                                            Spacing="8">
+                                            Spacing="8"
+											Width="140">
                                             <TextBlock
                                                 HorizontalAlignment="Center"
                                                 VerticalAlignment="Center"
-                                                Text="Digital / Analogue" />
+                                                Text="Analogue / Digital" />
                                             <ToggleSwitch
                                                 Grid.Column="1"
                                                 Width="110"
@@ -1218,9 +1254,9 @@
                                                 BorderBrush="#302042"
                                                 BorderThickness="1"
                                                 CornerRadius="10"
-                                                IsChecked="{Binding IsAnalogue, Mode=TwoWay}"
-                                                OffContent="Digital"
-                                                OnContent="Analogue" />
+                                                IsChecked="{Binding SelectedAnalogueInput.IsDigital}"
+                                                OffContent="Analogue"
+                                                OnContent="Digital" />
                                             <TextBlock
                                                 HorizontalAlignment="Center"
                                                 VerticalAlignment="Center"
@@ -1234,7 +1270,7 @@
                                                 BorderBrush="#302042"
                                                 BorderThickness="1"
                                                 CornerRadius="10"
-                                                IsChecked="{Binding PullUpEnabled, Mode=TwoWay}"
+                                                IsChecked="{Binding SelectedAnalogueInput.PullUpEnable}"
                                                 OffContent="Disabled"
                                                 OnContent="Enabled" />
                                             <TextBlock
@@ -1250,36 +1286,39 @@
                                                 BorderBrush="#302042"
                                                 BorderThickness="1"
                                                 CornerRadius="10"
-                                                IsChecked="{Binding PullDownEnabled, Mode=TwoWay}"
+                                                IsChecked="{Binding SelectedAnalogueInput.PullDownEnable}"
                                                 OffContent="Disabled"
                                                 OnContent="Enabled" />
                                         </StackPanel>
                                         <StackPanel
                                             Grid.Column="1"
-                                            IsEnabled="{Binding IsAnalogue}"
+                                            IsEnabled="{Binding !SelectedAnalogueInput.IsDigital}"
                                             Orientation="Vertical"
                                             Spacing="8">
                                             <TextBlock HorizontalAlignment="Center">Mode</TextBlock>
-                                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                                <RadioButton
-                                                    Content="Threshold"
-                                                    GroupName="G1"
-                                                    IsChecked="{Binding IsThresholdMode}" />
-                                                <RadioButton
-                                                    Content="Scaled (PWM duty)"
-                                                    GroupName="G1"
-                                                    IsChecked="{Binding IsScaledMode}" />
-                                            </StackPanel>
+
+                                            <ToggleSwitch
+                                                Grid.Column="1"
+                                                Width="120"
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Background="#ff15151f"
+                                                BorderBrush="#302042"
+                                                BorderThickness="1"
+                                                CornerRadius="10"
+                                                IsChecked="{Binding SelectedAnalogueInput.IsThreshold}"
+                                                OffContent="PWM Scaled"
+                                                OnContent="Threshold" />
                                             <TextBlock
                                                 HorizontalAlignment="Center"
                                                 VerticalAlignment="Center"
-                                                IsEnabled="{Binding IsThresholdMode}"
-                                                IsVisible="{Binding IsThresholdMode}"
+                                                IsEnabled="{Binding SelectedAnalogueInput.IsThreshold}"
+                                                IsVisible="{Binding SelectedAnalogueInput.IsThreshold}"
                                                 Text="On threshold (volts)" />
                                             <StackPanel
                                                 HorizontalAlignment="Center"
-                                                IsEnabled="{Binding IsThresholdMode}"
-                                                IsVisible="{Binding IsThresholdMode}"
+                                                IsEnabled="{Binding SelectedAnalogueInput.IsThreshold}"
+                                                IsVisible="{Binding SelectedAnalogueInput.IsThreshold}"
                                                 Orientation="Horizontal"
                                                 Spacing="8">
                                                 <TextBlock
@@ -1295,18 +1334,19 @@
                                                     IsSnapToTickEnabled="True"
                                                     Maximum="5.0"
                                                     Minimum="0.0"
-                                                    TickFrequency="0.1" />
+                                                    TickFrequency="0.1"
+													Value="{Binding SelectedAnalogueInput.OnThreshold, Mode=TwoWay}"/>
                                             </StackPanel>
                                             <TextBlock
                                                 HorizontalAlignment="Center"
                                                 VerticalAlignment="Center"
-                                                IsEnabled="{Binding IsThresholdMode}"
-                                                IsVisible="{Binding IsThresholdMode}"
+                                                IsEnabled="{Binding SelectedAnalogueInput.IsThreshold}"
+                                                IsVisible="{Binding SelectedAnalogueInput.IsThreshold}"
                                                 Text="Off threshold (volts)" />
                                             <StackPanel
                                                 HorizontalAlignment="Center"
-                                                IsEnabled="{Binding IsThresholdMode}"
-                                                IsVisible="{Binding IsThresholdMode}"
+                                                IsEnabled="{Binding SelectedAnalogueInput.IsThreshold}"
+                                                IsVisible="{Binding SelectedAnalogueInput.IsThreshold}"
                                                 Orientation="Horizontal"
                                                 Spacing="8">
                                                 <TextBlock
@@ -1322,69 +1362,70 @@
                                                     IsSnapToTickEnabled="True"
                                                     Maximum="5.0"
                                                     Minimum="0.0"
-                                                    TickFrequency="0.1" />
+                                                    TickFrequency="0.1" 
+													Value="{Binding SelectedAnalogueInput.OffThreshold, Mode=TwoWay}"/>
                                             </StackPanel>
                                             <TextBlock
                                                 HorizontalAlignment="Center"
                                                 VerticalAlignment="Center"
-                                                IsEnabled="{Binding !IsThresholdMode}"
-                                                IsVisible="{Binding !IsThresholdMode}"
+                                                IsEnabled="{Binding !SelectedAnalogueInput.IsThreshold}"
+                                                IsVisible="{Binding !SelectedAnalogueInput.IsThreshold}"
                                                 Text="Analogue input range (volts)" />
                                             <StackPanel
                                                 HorizontalAlignment="Center"
-                                                IsEnabled="{Binding !IsThresholdMode}"
-                                                IsVisible="{Binding !IsThresholdMode}"
+                                                IsEnabled="{Binding !SelectedAnalogueInput.IsThreshold}"
+                                                IsVisible="{Binding !SelectedAnalogueInput.IsThreshold}"
                                                 Orientation="Horizontal"
                                                 Spacing="8">
                                                 <TextBlock
                                                     Width="25"
                                                     HorizontalAlignment="Right"
                                                     VerticalAlignment="Center"
-                                                    Text="{Binding LowerAnalogueTH, StringFormat=F1}" />
+                                                    Text="{Binding SelectedAnalogueInput.InputScaleLow, StringFormat=F1, Mode=TwoWay}" />
                                                 <rs:RangeSlider
                                                     x:Name="thRange"
                                                     Width="180"
                                                     IsThumbOverlap="True"
-                                                    LowerSelectedValue="{Binding LowerAnalogueTH}"
+                                                    LowerSelectedValue="{Binding SelectedAnalogueInput.InputScaleLow, Mode=TwoWay}"
                                                     Maximum="5.0"
                                                     Minimum="0.0"
-                                                    UpperSelectedValue="{Binding UpperAnalogueTH}" />
+                                                    UpperSelectedValue="{Binding SelectedAnalogueInput.InputScaleHigh, Mode=TwoWay}" />
                                                 <TextBlock
                                                     Width="25"
                                                     HorizontalAlignment="Right"
                                                     VerticalAlignment="Center"
-                                                    Text="{Binding UpperAnalogueTH, StringFormat=F1}" />
+                                                    Text="{Binding SelectedAnalogueInput.InputScaleHigh, StringFormat=F1, Mode=TwoWay}" />
                                             </StackPanel>
                                             <TextBlock
                                                 HorizontalAlignment="Center"
                                                 VerticalAlignment="Center"
-                                                IsEnabled="{Binding !IsThresholdMode}"
-                                                IsVisible="{Binding !IsThresholdMode}"
+                                                IsEnabled="{Binding !SelectedAnalogueInput.IsThreshold}"
+                                                IsVisible="{Binding !SelectedAnalogueInput.IsThreshold}"
                                                 Text="PWM output range (% duty)" />
                                             <StackPanel
                                                 HorizontalAlignment="Center"
-                                                IsEnabled="{Binding !IsThresholdMode}"
-                                                IsVisible="{Binding !IsThresholdMode}"
+                                                IsEnabled="{Binding !SelectedAnalogueInput.IsThreshold}"
+                                                IsVisible="{Binding !SelectedAnalogueInput.IsThreshold}"
                                                 Orientation="Horizontal"
                                                 Spacing="8">
                                                 <TextBlock
                                                     Width="25"
                                                     HorizontalAlignment="Right"
                                                     VerticalAlignment="Center"
-                                                    Text="{Binding LowerPWMRange, StringFormat=F0}" />
+                                                    Text="{Binding SelectedAnalogueInput.PwmLowValue, StringFormat=F0, Mode=TwoWay}" />
                                                 <rs:RangeSlider
                                                     x:Name="pwmRange"
                                                     Width="180"
                                                     IsThumbOverlap="True"
-                                                    LowerSelectedValue="{Binding LowerPWMRange}"
+                                                    LowerSelectedValue="{Binding SelectedAnalogueInput.PwmLowValue, Mode=TwoWay}"
                                                     Maximum="100"
                                                     Minimum="0"
-                                                    UpperSelectedValue="{Binding UpperPWMRange}" />
+                                                    UpperSelectedValue="{Binding SelectedAnalogueInput.PwmHighValue, Mode=TwoWay}" />
                                                 <TextBlock
                                                     Width="25"
                                                     HorizontalAlignment="Right"
                                                     VerticalAlignment="Center"
-                                                    Text="{Binding UpperPWMRange, StringFormat=F0}" />
+                                                    Text="{Binding SelectedAnalogueInput.PwmHighValue, StringFormat=F0, Mode=TwoWay}" />
                                             </StackPanel>
                                         </StackPanel>
                                     </Grid>

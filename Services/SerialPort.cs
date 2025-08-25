@@ -1,15 +1,10 @@
-﻿using System;
+﻿using Cortex.Models;
+using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using System.IO.Ports;
-using Cortex.Models;
-using static Cortex.Models.OutputChannel;
 using System.Diagnostics;
-using System.Threading;
-using HarfBuzzSharp;
-using static System.Runtime.InteropServices.JavaScript.JSType;
+using System.IO.Ports;
+using System.Linq;
+using static Cortex.Models.OutputChannel;
 
 
 public class SerialPortService
@@ -26,7 +21,9 @@ public class SerialPortService
     private bool foundTrailer2;
     private UInt32 pdmCheckSum;
 
-    private bool foundECU;
+    public bool foundECU;
+
+    public bool UpdateStaticData = false;
 
     public SerialPortService(string portName, int baudRate = 921600)
     {
@@ -63,7 +60,7 @@ public class SerialPortService
 
         // Checksums match. Continue.
         if (checkSum == pdmCheckSum)
-        {           
+        {
             // Header check
             if (header == 0x1984)
             {
@@ -74,10 +71,103 @@ public class SerialPortService
                         // Data 3 contains number of channels
                         if (Constants.NUM_OUTPUT_CHANNELS == dataBytes[3])
                         {
+                            int dataIndex = 4; // Start after header, command, and num_channels
+
                             for (int i = 0; i < dataBytes[3]; i++)
                             {
-                                dataStructures.Channels[i].ChanType = (ChannelType)dataBytes[4 + (30 * i)];
-                                dataStructures.Channels[i].CurrentLimitHigh = BitConverter.ToSingle(dataBytes, 5 + (30 * i));
+                                // Parse each channel's data based on the order sent by microcontroller
+
+                                // Channel Type (1 byte)
+                                dataStructures.ChannelsLiveData[i].ChanType = (ChannelType)dataBytes[dataIndex];
+                                dataIndex += 1;
+
+                                // CurrentLimitHigh (4 bytes float)
+                                dataStructures.ChannelsLiveData[i].CurrentLimitHigh = BitConverter.ToSingle(dataBytes, dataIndex);
+                                dataIndex += 4;
+
+                                // CurrentSensePin (1 byte)
+                                dataStructures.ChannelsLiveData[i].CurrentSensePin = dataBytes[dataIndex];
+                                dataIndex += 1;
+
+                                // CurrentThresholdHigh (4 bytes float)
+                                dataStructures.ChannelsLiveData[i].CurrentThresholdHigh = BitConverter.ToSingle(dataBytes, dataIndex);
+                                dataIndex += 4;
+
+                                // CurrentThresholdLow (4 bytes float)
+                                dataStructures.ChannelsLiveData[i].CurrentThresholdLow = BitConverter.ToSingle(dataBytes, dataIndex);
+                                dataIndex += 4;
+
+                                // CurrentValue (4 bytes float)
+                                dataStructures.ChannelsLiveData[i].CurrentValue = BitConverter.ToSingle(dataBytes, dataIndex);
+                                dataIndex += 4;
+
+                                // Enabled (1 byte)
+                                dataStructures.ChannelsLiveData[i].Enabled = dataBytes[dataIndex];
+                                dataIndex += 1;
+
+                                // ErrorFlags (1 byte)
+                                dataStructures.ChannelsLiveData[i].ErrorFlags = dataBytes[dataIndex];
+                                dataIndex += 1;
+
+                                // GroupNumber (1 byte)
+                                dataStructures.ChannelsLiveData[i].GroupNumber = dataBytes[dataIndex];
+                                dataIndex += 1;
+
+                                // InputControlPin (1 byte)
+                                dataStructures.ChannelsLiveData[i].InputControlPin = dataBytes[dataIndex];
+                                dataIndex += 1;
+
+                                // MultiChannel (1 byte)
+                                dataStructures.ChannelsLiveData[i].MultiChannel = dataBytes[dataIndex];
+                                dataIndex += 1;
+
+                                // Retry (1 byte)
+                                dataStructures.ChannelsLiveData[i].Retry = dataBytes[dataIndex];
+                                dataIndex += 1;
+
+                                // RetryCount (1 byte)
+                                dataStructures.ChannelsLiveData[i].RetryCount = dataBytes[dataIndex];
+                                dataIndex += 1;
+
+                                // RetryDelay (4 bytes float)
+                                dataStructures.ChannelsLiveData[i].RetryDelay = BitConverter.ToSingle(dataBytes, dataIndex);
+                                dataIndex += 4;
+                            }
+
+                            int numAnalogueChannels = dataBytes[dataIndex];
+                            dataIndex += 1;
+
+                            Debug.WriteLine($"Num analogue channels: {numAnalogueChannels}");
+                            Debug.WriteLine($"Data index: {dataIndex}");
+
+
+                            for (int i = 0; i < numAnalogueChannels; i++) // Analogue input channel data coming in
+                            {
+                                dataStructures.AnalogueInputsStaticData[i].PullUpEnable = Convert.ToBoolean(dataBytes[dataIndex]);
+                                dataIndex += 1;
+                                dataStructures.AnalogueInputsStaticData[i].PullDownEnable = Convert.ToBoolean(dataBytes[dataIndex]);
+                                dataIndex += 1;
+                                dataStructures.AnalogueInputsStaticData[i].IsDigital = Convert.ToBoolean(dataBytes[dataIndex]);
+                                dataIndex += 1;
+                                dataStructures.AnalogueInputsStaticData[i].OnThreshold = BitConverter.ToSingle(dataBytes, dataIndex);
+                                dataIndex += 4;
+                                dataStructures.AnalogueInputsStaticData[i].OffThreshold = BitConverter.ToSingle(dataBytes, dataIndex);
+                                dataIndex += 4;
+                                dataStructures.AnalogueInputsStaticData[i].InputScaleLow = BitConverter.ToSingle(dataBytes, dataIndex);
+                                dataIndex += 4;
+                                dataStructures.AnalogueInputsStaticData[i].InputScaleHigh = BitConverter.ToSingle(dataBytes, dataIndex);
+                                dataIndex += 4;
+                                dataStructures.AnalogueInputsStaticData[i].PwmLowValue = dataBytes[dataIndex];
+                                dataIndex += 1;
+                                dataStructures.AnalogueInputsStaticData[i].PwmHighValue = dataBytes[dataIndex];
+                                dataIndex += 1;
+                            }
+
+                            if (UpdateStaticData)
+                            {
+                                // Copy live data to static data
+                                dataStructures.ChannelsStaticData = dataStructures.ChannelsLiveData;
+                                UpdateStaticData = false;
                             }
                         }
                         break;
@@ -99,38 +189,40 @@ public class SerialPortService
     }
 
     private void OnDataReceived(object sender, SerialDataReceivedEventArgs e)
-    {        
-        while (_serialPort.BytesToRead > 0)
+    {
+        if (_serialPort.IsOpen)
         {
-            byte readByte = (byte)_serialPort.ReadByte();
-
-            receivedDataBuffer.Add(readByte);
-
-            Debug.WriteLine(readByte);
-
-            if (readByte == Constants.SERIAL_TRAILER1 || foundTrailer1)
+            while (_serialPort.BytesToRead > 0)
             {
-                foundTrailer1 = true;
-                if (readByte == Constants.SERIAL_TRAILER2 || foundTrailer2)
+                byte readByte = (byte)_serialPort.ReadByte();
+
+                receivedDataBuffer.Add(readByte);
+
+                Debug.WriteLine(readByte);
+
+                if (readByte == Constants.SERIAL_TRAILER1 || foundTrailer1)
                 {
-                    foundTrailer2 = true;
-                    // Trailer found and we've read all the bytes. Process data
-                    if (_serialPort.BytesToRead == 0)
+                    foundTrailer1 = true;
+                    if (readByte == Constants.SERIAL_TRAILER2 || foundTrailer2)
                     {
-                        processData();
+                        foundTrailer2 = true;
+                        // Trailer found and we've read all the bytes. Process data
+                        if (_serialPort.BytesToRead == 0)
+                        {
+                            UpdateStaticData = true;
+                            processData();
+                        }
                     }
                 }
-            }
 
-            if (readByte == Constants.COMMAND_ID_CONFIM)
-            {
-                foundECU = true;
-                receivedDataBuffer.Clear();
-                SendCommand(Constants.COMMAND_ID_REQUEST);
+                if (readByte == Constants.COMMAND_ID_CONFIM)
+                {
+                    foundECU = true;
+                    receivedDataBuffer.Clear();
+                    SendCommand(Constants.COMMAND_ID_REQUEST);
+                }
             }
         }
-
-        
     }
 
     public bool InitComms()

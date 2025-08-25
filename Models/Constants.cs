@@ -16,7 +16,9 @@ namespace Cortex.Models
 
         public const int SERIAL_TRAILER1 = 0x24;
 
-        public const int SERIAL_TRAILER2 = 0x20;              
+        public const int SERIAL_TRAILER2 = 0x20;
+        
+        public const int CHANNEL_NAME_LENGTH = 3;
 
         public const char COMMAND_ID_BEGIN = 'b';
         
@@ -34,6 +36,6 @@ namespace Cortex.Models
 
         public const char COMMAND_ID_FW_VER = 'v';
 
-        public const char COMMAND_ID_BUILD_DATE = 'd';
+        public const char COMMAND_ID_BUILD_DATE = 'd';        
     }
 }
