@@ -26,7 +26,7 @@ namespace Cortex.Models
         public List<AnalogueInput> analogueInputsStaticData;
 
         [ObservableProperty]
-        public SystemParameters parameters;
+        public SystemParameters systemParams;
 
         public DataStructures()
         {
@@ -53,7 +53,7 @@ namespace Cortex.Models
                 analogueInputsStaticData.Add(new AnalogueInput(i + 1, false, false, true, true, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0));
             }
 
-            parameters = new SystemParameters();
+            systemParams = new SystemParameters();
 
         }
     }

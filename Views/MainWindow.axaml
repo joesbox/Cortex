@@ -3,6 +3,7 @@
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:behaviors="clr-namespace:Cortex.Behaviours"
+    xmlns:converters="clr-namespace:Cortex.Converters"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:i="using:Avalonia.Xaml.Interactivity"
     xmlns:local="using:AvaloniaSample"
@@ -18,6 +19,10 @@
     x:DataType="vm:MainWindowViewModel"
     Icon="/Assets/cortex.ico"
     mc:Ignorable="d">
+
+    <Window.Resources>
+        <converters:HexStringToInt16Converter x:Key="HexStringToInt16Converter" />
+    </Window.Resources>
     <!--  Main Grid  -->
     <Grid RowDefinitions="Auto, *, Auto">
         <Grid Grid.Row="0">
@@ -513,6 +518,7 @@
                                         BorderBrush="#302042"
                                         BorderThickness="1"
                                         CornerRadius="10"
+                                        IsChecked="{Binding SettingsDataView.SystemParams.AllowData}"
                                         OffContent="Disabled"
                                         OnContent="Enabled" />
                                 </StackPanel>
@@ -531,6 +537,7 @@
                                         BorderBrush="#302042"
                                         BorderThickness="1"
                                         CornerRadius="10"
+                                        IsChecked="{Binding SettingsDataView.SystemParams.AllowGPS}"
                                         OffContent="Disabled"
                                         OnContent="Enabled" />
                                 </StackPanel>
@@ -549,6 +556,7 @@
                                         BorderBrush="#302042"
                                         BorderThickness="1"
                                         CornerRadius="10"
+                                        IsChecked="{Binding SettingsDataView.SystemParams.DistanceUnitPref}"
                                         OffContent="Metric"
                                         OnContent="Imperial" />
                                 </StackPanel>
@@ -567,6 +575,7 @@
                                         BorderBrush="#302042"
                                         BorderThickness="1"
                                         CornerRadius="10"
+                                        IsChecked="{Binding SettingsDataView.SystemParams.SpeedUnitPref}"
                                         OffContent="Metric"
                                         OnContent="Imperial" />
                                 </StackPanel>
@@ -594,7 +603,8 @@
                                             IsSnapToTickEnabled="True"
                                             Maximum="240"
                                             Minimum="0"
-                                            TickFrequency="1" />
+                                            TickFrequency="1"
+                                            Value="{Binding SettingsDataView.SystemParams.SystemCurrentLimit}" />
                                     </Grid>
                                 </StackPanel>
                                 <StackPanel
@@ -612,6 +622,7 @@
                                         BorderBrush="#302042"
                                         BorderThickness="1"
                                         CornerRadius="10"
+                                        IsChecked="{Binding SettingsDataView.SystemParams.CANResEnabled}"
                                         OffContent="Disabled"
                                         OnContent="Enabled" />
                                 </StackPanel>
@@ -640,7 +651,8 @@
                                             Grid.Column="2"
                                             Width="50"
                                             Margin="0,5,0,0"
-                                            HorizontalAlignment="Left">
+                                            HorizontalAlignment="Left"
+                                            Text="{Binding SettingsDataView.SystemParams.SystemDataCANID, Converter={StaticResource HexStringToInt16Converter}}">
                                             <i:Interaction.Behaviors>
                                                 <behaviors:Hex11BitInputBehavior />
                                             </i:Interaction.Behaviors>
@@ -665,7 +677,8 @@
                                             Grid.Column="2"
                                             Width="50"
                                             Margin="0,5,0,0"
-                                            HorizontalAlignment="Right">
+                                            HorizontalAlignment="Right"
+                                            Text="{Binding SettingsDataView.SystemParams.ChannelDataCANID, Converter={StaticResource HexStringToInt16Converter}}">
                                             <i:Interaction.Behaviors>
                                                 <behaviors:Hex11BitInputBehavior />
                                             </i:Interaction.Behaviors>
@@ -690,7 +703,8 @@
                                             Grid.Column="2"
                                             Width="50"
                                             Margin="-8,5,0,0"
-                                            HorizontalAlignment="Right">
+                                            HorizontalAlignment="Right"
+                                            Text="{Binding SettingsDataView.SystemParams.ConfigDataCANID, Converter={StaticResource HexStringToInt16Converter}}">
                                             <i:Interaction.Behaviors>
                                                 <behaviors:Hex11BitInputBehavior />
                                             </i:Interaction.Behaviors>
@@ -1238,9 +1252,9 @@
                                     <Grid ColumnDefinitions="*,*" ColumnSpacing="70">
                                         <StackPanel
                                             Grid.Column="0"
+                                            Width="140"
                                             Orientation="Vertical"
-                                            Spacing="8"
-											Width="140">
+                                            Spacing="8">
                                             <TextBlock
                                                 HorizontalAlignment="Center"
                                                 VerticalAlignment="Center"
@@ -1335,7 +1349,7 @@
                                                     Maximum="5.0"
                                                     Minimum="0.0"
                                                     TickFrequency="0.1"
-													Value="{Binding SelectedAnalogueInput.OnThreshold, Mode=TwoWay}"/>
+                                                    Value="{Binding SelectedAnalogueInput.OnThreshold, Mode=TwoWay}" />
                                             </StackPanel>
                                             <TextBlock
                                                 HorizontalAlignment="Center"
@@ -1362,8 +1376,8 @@
                                                     IsSnapToTickEnabled="True"
                                                     Maximum="5.0"
                                                     Minimum="0.0"
-                                                    TickFrequency="0.1" 
-													Value="{Binding SelectedAnalogueInput.OffThreshold, Mode=TwoWay}"/>
+                                                    TickFrequency="0.1"
+                                                    Value="{Binding SelectedAnalogueInput.OffThreshold, Mode=TwoWay}" />
                                             </StackPanel>
                                             <TextBlock
                                                 HorizontalAlignment="Center"

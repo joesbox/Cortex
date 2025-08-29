@@ -274,6 +274,8 @@ namespace Cortex.ViewModels
 
             SelectedAnalogueInput = SettingsDataView.AnalogueInputsStaticData.FirstOrDefault();
 
+            SelectedChannel = new OutputChannel();
+
             UpperAnalogueTH = 5.0;
             UpperPWMRange = 100;
 
@@ -472,6 +474,8 @@ namespace Cortex.ViewModels
                     refreshStaticData = false;
                     SettingsDataView = DeepCopyDataStructures(obj);
                     OnSelectedChannelIndexChanged(SelectedChannelIndex, SelectedChannelIndex);
+                    SelectedAnalogueInput = SettingsDataView.AnalogueInputsStaticData.FirstOrDefault();
+                    SelectedDigitalInput = SettingsDataView.DigitalInputs.FirstOrDefault();
                 }
             });
         }

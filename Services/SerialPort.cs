@@ -20,6 +20,7 @@ public class SerialPortService
     private bool foundTrailer1;
     private bool foundTrailer2;
     private UInt32 pdmCheckSum;
+    private char lastCommandSent;
 
     public bool foundECU;
 
@@ -39,6 +40,10 @@ public class SerialPortService
         dataBytes = [];
     }
 
+    /// <summary>
+    /// Process incoming data from the serial port
+    /// </summary>
+    /// <returns>True if a full data packet received and processed</returns>
     private bool processData()
     {
         bool retVal = false;
@@ -138,7 +143,6 @@ public class SerialPortService
                             dataIndex += 1;
 
                             Debug.WriteLine($"Num analogue channels: {numAnalogueChannels}");
-                            Debug.WriteLine($"Data index: {dataIndex}");
 
 
                             for (int i = 0; i < numAnalogueChannels; i++) // Analogue input channel data coming in
@@ -163,6 +167,54 @@ public class SerialPortService
                                 dataIndex += 1;
                             }
 
+                            dataStructures.SystemParams.SystemTemperature = BitConverter.ToInt32(dataBytes, dataIndex);
+                            dataIndex += 4;
+
+                            dataStructures.SystemParams.CANResEnabled = dataBytes[dataIndex];
+                            dataIndex += 1;
+
+                            dataStructures.SystemParams.VBatt = BitConverter.ToSingle(dataBytes, dataIndex);
+                            dataIndex += 4;
+
+                            dataStructures.SystemParams.SystemCurrent = BitConverter.ToSingle(dataBytes, dataIndex);
+                            dataIndex += 4;
+
+                            dataStructures.SystemParams.SystemCurrentLimit = dataBytes[dataIndex];
+                            dataIndex += 1;
+
+                            dataStructures.SystemParams.ErrorFlags = BitConverter.ToUInt16(dataBytes, dataIndex);
+                            dataIndex += 2;
+
+                            dataStructures.SystemParams.ChannelDataCANID = BitConverter.ToUInt16(dataBytes, dataIndex);
+                            dataIndex += 2;
+
+                            dataStructures.SystemParams.SystemDataCANID = BitConverter.ToUInt16(dataBytes, dataIndex);
+                            dataIndex += 2;
+
+                            dataStructures.SystemParams.ConfigDataCANID = BitConverter.ToUInt16(dataBytes, dataIndex);
+                            dataIndex += 2;
+
+                            dataStructures.SystemParams.IMUWakeWindow = BitConverter.ToUInt32(dataBytes, dataIndex);
+                            dataIndex += 4;
+
+                            dataStructures.SystemParams.SpeedUnitPref = dataBytes[dataIndex];
+                            dataIndex += 1;
+
+                            dataStructures.SystemParams.DistanceUnitPref = dataBytes[dataIndex];
+                            dataIndex += 1;
+
+                            dataStructures.SystemParams.AllowData = dataBytes[dataIndex];
+                            dataIndex += 1;
+
+                            dataStructures.SystemParams.AllowGPS = dataBytes[dataIndex];
+                            dataIndex += 1;
+
+                            dataStructures.SystemParams.BattSOC = BitConverter.ToInt32(dataBytes, dataIndex);
+                            dataIndex += 4;
+
+                            dataStructures.SystemParams.BattSOH = BitConverter.ToInt32(dataBytes, dataIndex);
+                            dataIndex += 4;
+
                             if (UpdateStaticData)
                             {
                                 // Copy live data to static data
@@ -177,13 +229,18 @@ public class SerialPortService
             DataUpdated?.Invoke(dataStructures);
 
             float limit = BitConverter.ToSingle(dataBytes, 4);
-            Debug.WriteLine(header);
-            Debug.WriteLine(dataBytes[2]);
-            Debug.WriteLine(dataBytes[3]);
-            Debug.WriteLine(limit);
+      
         }
 
         SendCommand(Constants.COMMAND_ID_REQUEST);
+
+        return retVal;
+    }
+
+    private bool SendConfig()
+    {
+        bool retVal = false;
+
 
         return retVal;
     }
@@ -198,28 +255,44 @@ public class SerialPortService
 
                 receivedDataBuffer.Add(readByte);
 
-                Debug.WriteLine(readByte);
-
                 if (readByte == Constants.SERIAL_TRAILER1 || foundTrailer1)
                 {
                     foundTrailer1 = true;
                     if (readByte == Constants.SERIAL_TRAILER2 || foundTrailer2)
                     {
                         foundTrailer2 = true;
-                        // Trailer found and we've read all the bytes. Process data
-                        if (_serialPort.BytesToRead == 0)
+                        switch (lastCommandSent)
                         {
-                            UpdateStaticData = true;
-                            processData();
+                            case Constants.COMMAND_ID_REQUEST:
+                                // Trailer found and we've read all the bytes. Process data
+                                if (_serialPort.BytesToRead == 0)
+                                {
+                                    UpdateStaticData = true;
+                                    processData();
+                                }
+                                break;
+                            case Constants.COMMAND_ID_NEWCONFIG:
+                                if (_serialPort.BytesToRead == 0)
+                                {
+                                    SendConfig();
+                                }
+                                break;
                         }
+
                     }
                 }
 
                 if (readByte == Constants.COMMAND_ID_CONFIM)
                 {
-                    foundECU = true;
-                    receivedDataBuffer.Clear();
-                    SendCommand(Constants.COMMAND_ID_REQUEST);
+                    switch (lastCommandSent)
+                    {
+                        case Constants.COMMAND_ID_BEGIN:
+                            foundECU = true;
+                            receivedDataBuffer.Clear();
+                            SendCommand(Constants.COMMAND_ID_REQUEST);
+                            break;
+                    }
+
                 }
             }
         }
@@ -282,7 +355,7 @@ public class SerialPortService
             byte[] data = new byte[1];
             data[0] = (byte)commandId;
             _serialPort.Write(data, 0, data.Length);
-            Debug.WriteLine(data[0].ToString());
+            lastCommandSent = commandId;
         }
     }
 }
