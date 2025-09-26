@@ -38,13 +38,10 @@ namespace Cortex.Models
         public float _CurrentThresholdLow;      // Turn off threshold low (open circuit detection)
 
         [ObservableProperty]
-        public byte _Retry;                     // Retry after current threshold reached
-
-        [ObservableProperty]
         public byte _RetryCount;                // Number of retries
 
         [ObservableProperty]
-        public float _RetryDelay;               // Retry delay in seconds
+        public float _InrushDelay;              // Inrush delay in seconds
 
         [ObservableProperty]
         public byte _MultiChannel;              // Grouped with other channels. Allows higher current loads

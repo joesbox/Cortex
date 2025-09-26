@@ -518,7 +518,7 @@
                                         BorderBrush="#302042"
                                         BorderThickness="1"
                                         CornerRadius="10"
-                                        IsChecked="{Binding SettingsDataView.SystemParams.AllowData}"
+                                        IsChecked="{Binding SettingsDataView.SystemParamsStaticData.AllowData}"
                                         OffContent="Disabled"
                                         OnContent="Enabled" />
                                 </StackPanel>
@@ -537,7 +537,7 @@
                                         BorderBrush="#302042"
                                         BorderThickness="1"
                                         CornerRadius="10"
-                                        IsChecked="{Binding SettingsDataView.SystemParams.AllowGPS}"
+                                        IsChecked="{Binding SettingsDataView.SystemParamsStaticData.AllowGPS}"
                                         OffContent="Disabled"
                                         OnContent="Enabled" />
                                 </StackPanel>
@@ -556,7 +556,7 @@
                                         BorderBrush="#302042"
                                         BorderThickness="1"
                                         CornerRadius="10"
-                                        IsChecked="{Binding SettingsDataView.SystemParams.DistanceUnitPref}"
+                                        IsChecked="{Binding SettingsDataView.SystemParamsStaticData.DistanceUnitPref}"
                                         OffContent="Metric"
                                         OnContent="Imperial" />
                                 </StackPanel>
@@ -575,7 +575,7 @@
                                         BorderBrush="#302042"
                                         BorderThickness="1"
                                         CornerRadius="10"
-                                        IsChecked="{Binding SettingsDataView.SystemParams.SpeedUnitPref}"
+                                        IsChecked="{Binding SettingsDataView.SystemParamsStaticData.SpeedUnitPref}"
                                         OffContent="Metric"
                                         OnContent="Imperial" />
                                 </StackPanel>
@@ -604,7 +604,7 @@
                                             Maximum="240"
                                             Minimum="0"
                                             TickFrequency="1"
-                                            Value="{Binding SettingsDataView.SystemParams.SystemCurrentLimit}" />
+                                            Value="{Binding SettingsDataView.SystemParamsStaticData.SystemCurrentLimit}" />
                                     </Grid>
                                 </StackPanel>
                                 <StackPanel
@@ -622,7 +622,7 @@
                                         BorderBrush="#302042"
                                         BorderThickness="1"
                                         CornerRadius="10"
-                                        IsChecked="{Binding SettingsDataView.SystemParams.CANResEnabled}"
+                                        IsChecked="{Binding SettingsDataView.SystemParamsStaticData.CANResEnabled}"
                                         OffContent="Disabled"
                                         OnContent="Enabled" />
                                 </StackPanel>
@@ -652,7 +652,7 @@
                                             Width="50"
                                             Margin="0,5,0,0"
                                             HorizontalAlignment="Left"
-                                            Text="{Binding SettingsDataView.SystemParams.SystemDataCANID, Converter={StaticResource HexStringToInt16Converter}}">
+                                            Text="{Binding SettingsDataView.SystemParamsStaticData.SystemDataCANID, Converter={StaticResource HexStringToInt16Converter}}">
                                             <i:Interaction.Behaviors>
                                                 <behaviors:Hex11BitInputBehavior />
                                             </i:Interaction.Behaviors>
@@ -678,7 +678,7 @@
                                             Width="50"
                                             Margin="0,5,0,0"
                                             HorizontalAlignment="Right"
-                                            Text="{Binding SettingsDataView.SystemParams.ChannelDataCANID, Converter={StaticResource HexStringToInt16Converter}}">
+                                            Text="{Binding SettingsDataView.SystemParamsStaticData.ChannelDataCANID, Converter={StaticResource HexStringToInt16Converter}}">
                                             <i:Interaction.Behaviors>
                                                 <behaviors:Hex11BitInputBehavior />
                                             </i:Interaction.Behaviors>
@@ -704,7 +704,7 @@
                                             Width="50"
                                             Margin="-8,5,0,0"
                                             HorizontalAlignment="Right"
-                                            Text="{Binding SettingsDataView.SystemParams.ConfigDataCANID, Converter={StaticResource HexStringToInt16Converter}}">
+                                            Text="{Binding SettingsDataView.SystemParamsStaticData.ConfigDataCANID, Converter={StaticResource HexStringToInt16Converter}}">
                                             <i:Interaction.Behaviors>
                                                 <behaviors:Hex11BitInputBehavior />
                                             </i:Interaction.Behaviors>
@@ -874,49 +874,28 @@
                                                     Value="{Binding SelectedChannel.CurrentThresholdHigh}" />
                                             </StackPanel>
                                         </StackPanel>
-                                        <Grid
-                                            HorizontalAlignment="Center"
-                                            ColumnDefinitions="Auto,*"
-                                            ColumnSpacing="10">
-                                            <TextBlock
-                                                Grid.Column="0"
-                                                VerticalAlignment="Center"
-                                                Text="Retry after fault" />
-                                            <ToggleSwitch
-                                                x:Name="RetryTS"
-                                                Grid.Column="1"
-                                                HorizontalAlignment="Left"
-                                                VerticalAlignment="Center"
-                                                Background="#ff15151f"
-                                                BorderBrush="#302042"
-                                                BorderThickness="1"
-                                                CornerRadius="10"
-                                                IsChecked="{Binding SelectedChannel.Retry}"
-                                                OffContent="Disabled"
-                                                OnContent="Enabled" />
-                                        </Grid>
+           
                                         <StackPanel HorizontalAlignment="Center" Orientation="Vertical">
                                             <TextBlock
                                                 HorizontalAlignment="Center"
                                                 VerticalAlignment="Center"
-                                                Text="Retry delay (seconds)" />
+                                                Text="Inrush delay (seconds)" />
                                             <StackPanel Orientation="Horizontal" Spacing="8">
                                                 <TextBlock
                                                     Width="20"
                                                     HorizontalAlignment="Center"
                                                     VerticalAlignment="Center"
-                                                    Text="{Binding #retryDelay.Value}" />
+                                                    Text="{Binding #inrushDelay.Value}" />
                                                 <Slider
-                                                    x:Name="retryDelay"
+                                                    x:Name="inrushDelay"
                                                     Width="200"
                                                     HorizontalAlignment="Center"
-                                                    VerticalAlignment="Center"
-                                                    IsEnabled="{Binding #RetryTS.IsChecked}"
+                                                    VerticalAlignment="Center"                                                    
                                                     IsSnapToTickEnabled="True"
-                                                    Maximum="10"
+                                                    Maximum="2.0"
                                                     Minimum="0"
-                                                    TickFrequency="1"
-                                                    Value="{Binding SelectedChannel.RetryDelay}" />
+                                                    TickFrequency="0.1"
+                                                    Value="{Binding SelectedChannel.InrushDelay}" />
                                             </StackPanel>
                                         </StackPanel>
                                         <StackPanel HorizontalAlignment="Center" Orientation="Vertical">
@@ -934,8 +913,7 @@
                                                     x:Name="retryAttempts"
                                                     Width="200"
                                                     HorizontalAlignment="Center"
-                                                    VerticalAlignment="Center"
-                                                    IsEnabled="{Binding #RetryTS.IsChecked}"
+                                                    VerticalAlignment="Center"                                                    
                                                     IsSnapToTickEnabled="True"
                                                     Maximum="10"
                                                     Minimum="0"
@@ -1465,6 +1443,7 @@
                                 VerticalAlignment="Top"
                                 HorizontalContentAlignment="Center"
                                 Background="#B30000"
+								Command="{Binding SendConfigCommand}"
                                 Content="SAVE CHANGES" />
                         </StackPanel>
                     </Grid>

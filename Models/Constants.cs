@@ -17,7 +17,11 @@ namespace Cortex.Models
         public const int SERIAL_TRAILER1 = 0x24;
 
         public const int SERIAL_TRAILER2 = 0x20;
-        
+
+        public const byte SERIAL_HEADER1 = 0x84;
+
+        public const byte SERIAL_HEADER2 = 0x19;
+
         public const int CHANNEL_NAME_LENGTH = 3;
 
         public const char COMMAND_ID_BEGIN = 'b';
@@ -29,6 +33,8 @@ namespace Cortex.Models
         public const char COMMAND_ID_NEWCONFIG = 'n';
 
         public const char COMMAND_ID_SEND = 's';
+
+        public const char COMMAND_ID_SENDING = 't';
 
         public const char COMMAND_ID_CHECKSUM_FAIL = 'f';
 

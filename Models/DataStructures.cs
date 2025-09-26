@@ -28,10 +28,14 @@ namespace Cortex.Models
         [ObservableProperty]
         public SystemParameters systemParams;
 
+        [ObservableProperty]
+        public SystemParameters systemParamsStaticData;
+
         public DataStructures()
         {
             channelsLiveData = new List<OutputChannel>();
             channelsStaticData = new List<OutputChannel>();
+            systemParamsStaticData = new SystemParameters();
 
             for (int i = 0; i < Constants.NUM_OUTPUT_CHANNELS; i++)
             {

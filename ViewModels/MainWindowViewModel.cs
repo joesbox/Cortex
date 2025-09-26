@@ -442,6 +442,13 @@ namespace Cortex.ViewModels
 
         private void OnExit() => _appCloser.CloseApp();
 
+        private void OnClosing()
+        {
+            _pollTimer.Stop();
+            _commsTimer.Stop();
+            Disconnect();
+        }
+
         [RelayCommand]
         private void RefreshSerialPorts()
         {
@@ -460,6 +467,15 @@ namespace Cortex.ViewModels
                 AddLog("Connecting to PDM on " + selectedPort + "...");
             }
             _portService.InitComms();
+        }
+
+        [RelayCommand]
+        private void SendConfig()
+        {
+            if (IsConnected && _portService != null)
+            {
+                _portService.StartSendConfig();
+            }
         }
 
         private void _portService_DataUpdated(DataStructures obj)

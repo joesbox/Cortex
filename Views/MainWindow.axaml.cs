@@ -53,7 +53,7 @@ namespace Cortex.Views
         }
 
         public void CloseApp()
-        {
+        {            
             this.Close();
         }
 
