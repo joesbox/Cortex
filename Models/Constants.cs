@@ -32,9 +32,9 @@ namespace Cortex.Models
 
         public const char COMMAND_ID_NEWCONFIG = 'n';
 
-        public const char COMMAND_ID_SEND = 's';
+        public const char COMMAND_ID_SKIP = 'k';
 
-        public const char COMMAND_ID_SENDING = 't';
+        public const char COMMAND_ID_SEND = 's';
 
         public const char COMMAND_ID_CHECKSUM_FAIL = 'f';
 
@@ -42,6 +42,12 @@ namespace Cortex.Models
 
         public const char COMMAND_ID_FW_VER = 'v';
 
-        public const char COMMAND_ID_BUILD_DATE = 'd';        
+        public const char COMMAND_ID_BUILD_DATE = 'd';
+
+        public const int NUMBER_CHANNEL_PARAMETERS = 10;
+
+        public const int NUMBER_ANALOGUE_PARAMETERS = 9;
+
+        public const int NUMBER_SYSTEM_PARAMETERS = 9;
     }
 }

@@ -823,7 +823,7 @@
                                                     Minimum="0"
                                                     TickFrequency="1"
                                                     ToolTip.Tip="Absolute maximum current"
-                                                    Value="{Binding SelectedChannel.CurrentLimitHigh}" />
+                                                    Value="{Binding SelectedChannel.CurrentLimitHigh, Mode=TwoWay}" />
                                             </StackPanel>
                                         </StackPanel>
                                         <StackPanel HorizontalAlignment="Center" Orientation="Vertical">

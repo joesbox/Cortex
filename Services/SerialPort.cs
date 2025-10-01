@@ -1,10 +1,12 @@
 ﻿using Cortex.Models;
 using Cortex.Services;
+using Cortex.ViewModels;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO.Ports;
 using System.Linq;
+using System.Xml;
 using static Cortex.Models.OutputChannel;
 
 
@@ -16,6 +18,8 @@ public class SerialPortService
 
     private DataStructures dataStructures;
 
+    private DataStructures settingsData;
+
     private byte[] dataBytes;
     private List<byte> receivedDataBuffer;
     private bool foundTrailer1;
@@ -23,9 +27,24 @@ public class SerialPortService
     private UInt32 pdmCheckSum;
     private char lastCommandSent;
     private bool sendingConfig;
+    private bool saveToEEPROM;
     public bool foundECU;
     private int totalBytesSent;
-    private int checkSumSend;    
+    private int checkSumSend;
+
+    /// <summary>
+    /// Setting index: 0 = channel, 1 = analogue input, 2 = system
+    /// </summary>
+    private int settingIndex;
+
+    /// <summary>
+    /// Parameter index within setting: e.g. for channel data, 0 = type, 1 = current limit high, etc.
+    /// </summary>
+    private int parameterIndex;
+
+    private int channelIndex;
+    private int analogueIndex;
+
 
     public bool UpdateStaticData = false;
 
@@ -42,7 +61,13 @@ public class SerialPortService
         _serialPort.DataReceived += OnDataReceived;
         receivedDataBuffer = new List<byte>();
         dataStructures = new DataStructures();
+        settingsData = new DataStructures();
         dataBytes = [];
+    }
+
+    public void UpdateSettingsData(DataStructures newSettingsData)
+    {
+        this.settingsData = newSettingsData;
     }
 
     /// <summary>
@@ -169,57 +194,162 @@ public class SerialPortService
         bool retVal = false;
         totalBytesSent = 0;
         checkSumSend = 0;
-        SendCommand(Constants.COMMAND_ID_SENDING);
+        _sendBuffer.Clear();
+        bool configChanged = false;
         AddData(Constants.SERIAL_HEADER1, true);
         AddData(Constants.SERIAL_HEADER2, true);
-        for (int i = 0; i < Constants.NUM_OUTPUT_CHANNELS; i++)
+
+        switch (settingIndex)
         {
-            AddData((byte)dataStructures.ChannelsStaticData[i].ChanType, true);
-            byte[] floatBytes = BitConverter.GetBytes(dataStructures.ChannelsStaticData[i].CurrentLimitHigh);
-            foreach (byte b in floatBytes) AddData(b, true);
-            floatBytes = BitConverter.GetBytes(dataStructures.ChannelsStaticData[i].CurrentThresholdHigh);
-            foreach (byte b in floatBytes) AddData(b, true);
-            floatBytes = BitConverter.GetBytes(dataStructures.ChannelsStaticData[i].CurrentThresholdLow);
-            foreach (byte b in floatBytes) AddData(b, true);
-            AddData(dataStructures.ChannelsStaticData[i].Enabled, true);
-            AddData(dataStructures.ChannelsStaticData[i].GroupNumber, true);
-            AddData(dataStructures.ChannelsStaticData[i].InputControlPin, true);
-            AddData(dataStructures.ChannelsStaticData[i].MultiChannel, true);
-            AddData(dataStructures.ChannelsStaticData[i].RetryCount, true);
-            floatBytes = BitConverter.GetBytes(dataStructures.ChannelsStaticData[i].InrushDelay * 1000.0F);
-            foreach (byte b in floatBytes) AddData(b, true);
+            case 0: // Channel data
+                switch (parameterIndex)
+                {
+                    case 0: // Channel type
+                        if (dataStructures.ChannelsLiveData[channelIndex].ChanType != settingsData.ChannelsStaticData[channelIndex].ChanType)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData((byte)settingsData.ChannelsStaticData[channelIndex].ChanType, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                        }
+                        break;
+                    case 1: // Current limit high
+                        if (dataStructures.ChannelsLiveData[channelIndex].CurrentLimitHigh != settingsData.ChannelsStaticData[channelIndex].CurrentLimitHigh)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            byte[] floatBytes = BitConverter.GetBytes(settingsData.ChannelsStaticData[channelIndex].CurrentLimitHigh);
+                            foreach (byte b in floatBytes) AddData(b, true);
+                        }
+                        break;
+                    case 2: // Current threshold high
+                        if (dataStructures.ChannelsLiveData[channelIndex].CurrentThresholdHigh != settingsData.ChannelsStaticData[channelIndex].CurrentThresholdHigh)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            byte[] floatBytes = BitConverter.GetBytes(settingsData.ChannelsStaticData[channelIndex].CurrentThresholdHigh);
+                            foreach (byte b in floatBytes) AddData(b, true);
+                        }
+                        break;
+                    case 3: // Current threshold low
+                        if (dataStructures.ChannelsLiveData[channelIndex].CurrentThresholdLow != settingsData.ChannelsStaticData[channelIndex].CurrentThresholdLow)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            byte[] floatBytes = BitConverter.GetBytes(settingsData.ChannelsStaticData[channelIndex].CurrentThresholdLow);
+                            foreach (byte b in floatBytes) AddData(b, true);
+                        }
+                        break;
+                    case 4: // Enabled
+                        if (dataStructures.ChannelsLiveData[channelIndex].Enabled != settingsData.ChannelsStaticData[channelIndex].Enabled)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].Enabled, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                        }
+                        break;
+                    case 5: // Group number
+                        if (dataStructures.ChannelsLiveData[channelIndex].GroupNumber != settingsData.ChannelsStaticData[channelIndex].GroupNumber)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].GroupNumber, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                        }
+                        break;
+                    case 6: // Input control pin
+                        if (dataStructures.ChannelsLiveData[channelIndex].InputControlPin != settingsData.ChannelsStaticData[channelIndex].InputControlPin)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].InputControlPin, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                        }
+                        break;
+                    case 7: // Multi channel
+                        if (dataStructures.ChannelsLiveData[channelIndex].MultiChannel != settingsData.ChannelsStaticData[channelIndex].MultiChannel)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].MultiChannel, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                        }
+                        break;
+                    case 8: // Retry count
+                        if (dataStructures.ChannelsLiveData[channelIndex].RetryCount != settingsData.ChannelsStaticData[channelIndex].RetryCount)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].RetryCount, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                        }
+                        break;
+                    case 9: // Inrush delay
+                        if (dataStructures.ChannelsLiveData[channelIndex].InrushDelay != settingsData.ChannelsStaticData[channelIndex].InrushDelay)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            byte[] floatBytes = BitConverter.GetBytes(settingsData.ChannelsStaticData[channelIndex].InrushDelay * 1000.0F);
+                            foreach (byte b in floatBytes) AddData(b, true);
+                        }
+                        break;
+                    case 10: // Name
+                        if (!(dataStructures.ChannelsLiveData[channelIndex].Name ?? Array.Empty<char>())
+                              .SequenceEqual(settingsData.ChannelsStaticData[channelIndex].Name ?? Array.Empty<char>()))
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            foreach (char c in settingsData.ChannelsStaticData[channelIndex].Name)
+                            {
+                                AddData((byte)c, true);
+                            }
+                            AddData(0, true); // Padding
+                        }
+                        break;
+                }
+
+                break;
+            case 1: // Analogue input data
+                break;
+            case 2: // System data
+                break;
         }
 
-        for (int i = 0; i < Constants.NUM_ANALOGUE_INPUTS; i++)
-        {
-            AddData(dataStructures.AnalogueInputsStaticData[i].PullUpEnable ? (byte)1 : (byte)0, true);
-            AddData(dataStructures.AnalogueInputsStaticData[i].PullDownEnable ? (byte)1 : (byte)0, true);
-            AddData(dataStructures.AnalogueInputsStaticData[i].IsDigital ? (byte)1 : (byte)0, true);
-            byte[] floatBytes = BitConverter.GetBytes(dataStructures.AnalogueInputsStaticData[i].OnThreshold);
-            foreach (byte b in floatBytes) AddData(b, true);
-            floatBytes = BitConverter.GetBytes(dataStructures.AnalogueInputsStaticData[i].OffThreshold);
-            foreach (byte b in floatBytes) AddData(b, true);
-            floatBytes = BitConverter.GetBytes(dataStructures.AnalogueInputsStaticData[i].InputScaleLow);
-            foreach (byte b in floatBytes) AddData(b, true);
-            floatBytes = BitConverter.GetBytes(dataStructures.AnalogueInputsStaticData[i].InputScaleHigh);
-            foreach (byte b in floatBytes) AddData(b, true);
-            AddData(dataStructures.AnalogueInputsStaticData[i].PwmLowValue, true);
-            AddData(dataStructures.AnalogueInputsStaticData[i].PwmHighValue, true);
-        }
-
-        AddData(dataStructures.SystemParamsStaticData.CANResEnabled, true);
-        byte[] floatBytes2 = BitConverter.GetBytes(dataStructures.SystemParamsStaticData.ChannelDataCANID);
-        foreach (byte b in floatBytes2) AddData(b, true);
-        floatBytes2 = BitConverter.GetBytes(dataStructures.SystemParamsStaticData.SystemDataCANID);
-        foreach (byte b in floatBytes2) AddData(b, true);
-        floatBytes2 = BitConverter.GetBytes(dataStructures.SystemParamsStaticData.ConfigDataCANID);
-        foreach (byte b in floatBytes2) AddData(b, true);
-        byte[] floatBytes4 = BitConverter.GetBytes(dataStructures.SystemParamsStaticData.IMUWakeWindow);
-        foreach (byte b in floatBytes4) AddData(b, true);
-        AddData(dataStructures.SystemParamsStaticData.SpeedUnitPref, true);
-        AddData(dataStructures.SystemParamsStaticData.DistanceUnitPref, true);
-        AddData(dataStructures.SystemParamsStaticData.AllowData, true);
-        AddData(dataStructures.SystemParamsStaticData.AllowGPS, true);
         AddData(Constants.SERIAL_TRAILER1, true);
         AddData(Constants.SERIAL_TRAILER2, true);
         AddData((byte)(checkSumSend & 0xFF), false);
@@ -227,12 +357,32 @@ public class SerialPortService
         AddData((byte)((checkSumSend >> 16) & 0xFF), false);
         AddData((byte)((checkSumSend >> 24) & 0xFF), false);
 
-        if (_serialPort.IsOpen && _serialPort != null)
+        if (configChanged)
         {
-            _serialPort.Write(_sendBuffer.ToArray(), 0, _sendBuffer.Count);
+            Debug.Write("Setting, parameter, channel: ");
+            Debug.Write(settingIndex);
+            Debug.Write(", ");
+            Debug.Write(parameterIndex);
+            Debug.Write(", ");
+            Debug.WriteLine(channelIndex);
+            if (_serialPort.IsOpen && _serialPort != null)
+            {
+                SendCommand(Constants.COMMAND_ID_NEWCONFIG);
+                _serialPort.Write(_sendBuffer.ToArray(), 0, _sendBuffer.Count);
+
+                Debug.Write("Wrote ");
+                Debug.Write(_sendBuffer.Count);
+                Debug.WriteLine(" bytes.");
+                _sendBuffer.Clear();
+            }
+        }
+        else
+        {
+            _sendBuffer.Clear();
+            SendCommand(Constants.COMMAND_ID_SKIP);
         }
 
-        return retVal;
+            return retVal;
     }
 
     private void AddData(byte data, bool addToCheck)
@@ -249,7 +399,7 @@ public class SerialPortService
     {
         if (_serialPort.IsOpen)
         {
-            Debug.WriteLine(DateTime.Now.ToString("HH:mm:ss.fff") + " Serial data received");
+            //Debug.WriteLine(DateTime.Now.ToString("HH:mm:ss.fff") + " Serial data received");
             while (_serialPort.BytesToRead > 0 && _serialPort.IsOpen)
             {
                 byte readByte = (byte)_serialPort.ReadByte();
@@ -282,19 +432,86 @@ public class SerialPortService
                     switch (lastCommandSent)
                     {
                         case Constants.COMMAND_ID_BEGIN:
-                            foundECU = true;
-                            receivedDataBuffer.Clear();
-                            SendCommand(Constants.COMMAND_ID_REQUEST);
+                            if (!sendingConfig)
+                            {
+                                foundECU = true;
+                                receivedDataBuffer.Clear();
+                                SendCommand(Constants.COMMAND_ID_REQUEST);
+                            }
                             break;
                         case Constants.COMMAND_ID_NEWCONFIG:
-                            SendConfig();
-                            break;
-                        case Constants.COMMAND_ID_SENDING:
-                            sendingConfig = false; // Back to periodic updates
+                        case Constants.COMMAND_ID_SKIP:
+                            switch (settingIndex)
+                            {
+                                case 0: // Channel data
+                                    parameterIndex++;
+                                    if (parameterIndex > Constants.NUMBER_CHANNEL_PARAMETERS)
+                                    {
+                                        parameterIndex = 0;
+                                        channelIndex++;
+                                        if (channelIndex >= Constants.NUM_OUTPUT_CHANNELS)
+                                        {
+                                            channelIndex = 0;
+                                            settingIndex++;
+                                        }
+                                    }
+                                    break;
+                                case 1: // Analogue input data
+                                    parameterIndex++;
+                                    if (parameterIndex > Constants.NUMBER_ANALOGUE_PARAMETERS)
+                                    {
+                                        parameterIndex = 0;
+                                        analogueIndex++;
+                                        if (analogueIndex >= Constants.NUM_ANALOGUE_INPUTS)
+                                        {
+                                            analogueIndex = 0;
+                                            settingIndex++;
+                                        }
+                                    }
+                                    break;
+                                case 2: // System data
+                                    parameterIndex++;
+                                    if (parameterIndex > Constants.NUMBER_SYSTEM_PARAMETERS)
+                                    {
+                                        sendingConfig = false;
+                                        saveToEEPROM = true;
+                                        // That's it. Finished sending config.
+                                    }
+                                    break;
+                            }
+
+                            if (sendingConfig)
+                            {
+                                SendConfig();
+                            }
+                            else
+                            {
+                                parameterIndex = channelIndex = analogueIndex = settingIndex = 0;
+                            }
+
+                            if (saveToEEPROM)
+                            {
+                                saveToEEPROM = false;
+                                SendCommand(Constants.COMMAND_ID_SAVECHANGES);
+                            }
                             break;
 
+                        case Constants.COMMAND_ID_SAVECHANGES:
+                            Debug.WriteLine("Configuration saved to EEPROM.");
+                            break;
                     }
+                }
+                else if (readByte == Constants.COMMAND_ID_CHECKSUM_FAIL)
+                {                    
+                    switch (lastCommandSent)
+                    {                        
+                        case Constants.COMMAND_ID_NEWCONFIG:
+                            //SendConfig();
+                            break;
+                        case Constants.COMMAND_ID_SAVECHANGES:
 
+                            break;
+                    }
                 }
             }
         }
@@ -353,8 +570,12 @@ public class SerialPortService
     public void StartSendConfig()
     {
         sendingConfig = true;
-        SendCommand(Constants.COMMAND_ID_NEWCONFIG);
-   }   
+        settingIndex = 0;
+        channelIndex = 0;
+        analogueIndex = 0;
+        parameterIndex = 0;
+        SendConfig();
+    }   
 
     private void SendCommand(char commandId)
     {

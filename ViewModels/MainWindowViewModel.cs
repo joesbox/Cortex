@@ -13,6 +13,7 @@ using SkiaSharp;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.IO.Ports;
 using System.Linq;
 using System.Text.Json;
@@ -174,7 +175,10 @@ namespace Cortex.ViewModels
                 if (SetProperty(ref _selectedInputItem, value) && value != null)
                 {
                     // Keep SelectedChannel.ControlPin in sync
-                    SelectedChannel.InputControlPin = value.Pin;
+                    if (SelectedChannel != null)
+                    {
+                        SelectedChannel.InputControlPin = value.Pin;
+                    }
                 }
             }
         }
@@ -188,6 +192,7 @@ namespace Cortex.ViewModels
         partial void OnSelectedChannelIndexChanged(int oldValue, int newValue)
         {
             OnPropertyChanged(nameof(SelectedChannel));
+
             SelectedChannelLabel = ChannelDisplayList.FirstOrDefault(c => c.Index == newValue);
             SelectedChannel = SettingsDataView.ChannelsStaticData.ElementAtOrDefault(SelectedChannelIndex);
 
@@ -298,9 +303,13 @@ namespace Cortex.ViewModels
             _commsTimer.Elapsed += (s, e) => HandleComms();
             _commsTimer.Start();
             SettingsDataView.PropertyChanged += SettingsDataView_PropertyChanged;
+            SelectedChannel.PropertyChanged += SelectedChannel_PropertyChanged;
         }
 
-        
+        private void SelectedChannel_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+        {
+            Debug.WriteLine("Channel property changed: " + e.PropertyName);
+        }
 
         private void SettingsDataView_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
         {
@@ -489,6 +498,7 @@ namespace Cortex.ViewModels
                     // Initial load - copy data to settings
                     refreshStaticData = false;
                     SettingsDataView = DeepCopyDataStructures(obj);
+                    _portService?.UpdateSettingsData(SettingsDataView);
                     OnSelectedChannelIndexChanged(SelectedChannelIndex, SelectedChannelIndex);
                     SelectedAnalogueInput = SettingsDataView.AnalogueInputsStaticData.FirstOrDefault();
                     SelectedDigitalInput = SettingsDataView.DigitalInputs.FirstOrDefault();
@@ -586,6 +596,6 @@ public class InputDisplayItem
 public class ChannelTypeDisplay
 {
     public OutputChannel.ChannelType ChannelType { get; set; }
-    public string Label { get; set; }
+    public required string Label { get; set; }
 }
 

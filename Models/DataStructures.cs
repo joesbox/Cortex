@@ -2,6 +2,7 @@
 using Microsoft.VisualBasic;
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Linq;
 using System.Text;
 using System.Threading.Channels;
@@ -14,16 +15,16 @@ namespace Cortex.Models
     public partial class DataStructures : ObservableObject
     {
         [ObservableProperty]
-        public List<OutputChannel> channelsLiveData;
+        public ObservableCollection<OutputChannel> channelsLiveData;
 
         [ObservableProperty]
-        public List<OutputChannel> channelsStaticData;
+        public ObservableCollection<OutputChannel> channelsStaticData;
 
         [ObservableProperty]
-        public List<DigitalInput> digitalInputs;
+        public ObservableCollection<DigitalInput> digitalInputs;
 
         [ObservableProperty]
-        public List<AnalogueInput> analogueInputsStaticData;
+        public ObservableCollection<AnalogueInput> analogueInputsStaticData;
 
         [ObservableProperty]
         public SystemParameters systemParams;
@@ -33,8 +34,8 @@ namespace Cortex.Models
 
         public DataStructures()
         {
-            channelsLiveData = new List<OutputChannel>();
-            channelsStaticData = new List<OutputChannel>();
+            channelsLiveData = new ObservableCollection<OutputChannel>();
+            channelsStaticData = new ObservableCollection<OutputChannel>();
             systemParamsStaticData = new SystemParameters();
 
             for (int i = 0; i < Constants.NUM_OUTPUT_CHANNELS; i++)
@@ -43,14 +44,14 @@ namespace Cortex.Models
                 channelsStaticData.Add(new OutputChannel());
             }
 
-            digitalInputs = new List<DigitalInput>();
+            digitalInputs = new ObservableCollection<DigitalInput>();
 
             for (int i = 0; i < Constants.NUM_DIGITAL_INPUTS; i++)
             {
                 digitalInputs.Add(new DigitalInput(i + 1, true));
             }
 
-            analogueInputsStaticData = new List<AnalogueInput>();
+            analogueInputsStaticData = new ObservableCollection<AnalogueInput>();
 
             for (int i = 0; i < Constants.NUM_ANALOGUE_INPUTS; i++)
             {
