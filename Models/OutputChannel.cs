@@ -59,13 +59,41 @@ namespace Cortex.Models
         public byte _InputControlPin;           // Digital input control pin (digital channels only)
 
         [ObservableProperty]
-        public bool _RunOn;                     // Run channel after ignition off
+        public byte _RunOn;                     // Run channel after ignition off
 
         [ObservableProperty]
-        int _RunOnTime;                         // Run channel time after ignition off in milliseconds
+        public int _RunOnTime;                         // Run channel time after ignition off in milliseconds
 
         [ObservableProperty]
         public byte _ErrorFlags;                // Bitmask for channel error flags
+
+        // Error flag constants
+        private const byte CHN_OVERCURRENT_RANGE = 0x01;
+        private const byte CHN_OVERCURRENT_LIMIT = 0x02;
+        private const byte CHN_UNDERCURRENT_RANGE = 0x04;
+        private const byte IS_FAULT = 0x08;
+        private const byte RETRY_LOCKOUT = 0x10;
+
+        // Individual error bit properties
+        public bool HasOvercurrentRange => (ErrorFlags & CHN_OVERCURRENT_RANGE) != 0;
+        public bool HasOvercurrentLimit => (ErrorFlags & CHN_OVERCURRENT_LIMIT) != 0;
+        public bool HasUndercurrentRange => (ErrorFlags & CHN_UNDERCURRENT_RANGE) != 0;
+        public bool HasISFault => (ErrorFlags & IS_FAULT) != 0;
+        public bool HasRetryLockout => (ErrorFlags & RETRY_LOCKOUT) != 0;
+
+        // Overall status check
+        public bool HasAnyError => ErrorFlags != 0;
+
+        // Notify property changes when ErrorFlags changes
+        partial void OnErrorFlagsChanged(byte value)
+        {
+            OnPropertyChanged(nameof(HasOvercurrentRange));
+            OnPropertyChanged(nameof(HasOvercurrentLimit));
+            OnPropertyChanged(nameof(HasUndercurrentRange));
+            OnPropertyChanged(nameof(HasISFault));
+            OnPropertyChanged(nameof(HasRetryLockout));
+            OnPropertyChanged(nameof(HasAnyError));
+        }
 
         public enum ChannelType
         {

@@ -1,19 +1,24 @@
-﻿using Avalonia.Media;
+﻿using Avalonia.Data.Converters;
+using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Cortex.Models;
 using Cortex.Services;
 using LiveChartsCore;
+using LiveChartsCore.Defaults;
+using LiveChartsCore.Kernel.Sketches;
 using LiveChartsCore.Measure;
 using LiveChartsCore.SkiaSharpView;
 using LiveChartsCore.SkiaSharpView.Extensions;
 using LiveChartsCore.SkiaSharpView.Painting;
+using LiveChartsCore.SkiaSharpView.Painting.Effects;
 using SkiaSharp;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO.Ports;
 using System.Linq;
 using System.Text.Json;
@@ -35,9 +40,6 @@ namespace Cortex.ViewModels
 
         [ObservableProperty]
         private bool commsEstablished;
-
-        [ObservableProperty]
-        private List<Tuple<int, int>> testData;
 
         [ObservableProperty]
         private string systemDateTime;
@@ -138,6 +140,15 @@ namespace Cortex.ViewModels
         [ObservableProperty]
         private AnalogueInput? _selectedAnalogueInput;
 
+        [ObservableProperty]
+        private ObservableCollection<ISeries> seriesCollection = new();
+
+        [ObservableProperty]
+        private int selectedTimeWindowSeconds = 60;
+
+        private readonly Timer updateTimer;
+        private readonly DateTime startTime = DateTime.UtcNow;
+
         private InputDisplayItem? _selectedInputItem;
 
         public bool IsScaledMode => !IsThresholdMode;
@@ -159,13 +170,15 @@ namespace Cortex.ViewModels
 
         public RelayCommand ExitCommand { get; }
 
-        public ObservableCollection<string> LogEntries { get; } = new();
+        public ObservableCollection<string> LogEntries => LoggingService.LogEntries;
 
         public ObservableCollection<int> ChannelIndices { get; }
 
         public ObservableCollection<ChannelTypeDisplay> ChannelTypes { get; }
 
         private bool refreshStaticData = true;
+
+        private readonly object _chartLock = new();
 
         public InputDisplayItem? SelectedInputItem
         {
@@ -289,12 +302,6 @@ namespace Cortex.ViewModels
 
             SystemDateTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 
-            testData = new List<Tuple<int, int>>();
-            for (int i = 0; i < 14; i++)
-            {
-                testData.Add(new Tuple<int, int>(i, i * i));
-            }
-
             LoadSerialPorts();
 
             _pollTimer.Elapsed += (s, e) => LoadSerialPorts();
@@ -304,7 +311,124 @@ namespace Cortex.ViewModels
             _commsTimer.Start();
             SettingsDataView.PropertyChanged += SettingsDataView_PropertyChanged;
             SelectedChannel.PropertyChanged += SelectedChannel_PropertyChanged;
+
+            // Create a LineSeries for each channel
+            int channelNumber = 1;
+            foreach (var ch in LiveDataView.ChannelsLiveData)
+            {
+                var points = new ObservableCollection<ObservablePoint>();
+
+                var series = new LineSeries<ObservablePoint>
+                {
+                    Values = points,
+                    Name = "CH" + channelNumber++,
+                    GeometrySize = 0,
+                    GeometryStroke = null,
+                    GeometryFill = null,
+                    Fill = null,
+                    
+                };               
+
+                seriesCollection.Add(series);
+
+                foreach (var srs in seriesCollection)
+                {
+                    if (srs is LineSeries<ObservablePoint> lineSeries)
+                    {
+                        if (lineSeries.Stroke is SolidColorPaint paint)
+                        {
+                            paint.StrokeThickness = 1.0f;
+                        }
+                    }
+                }
+
+                // Keep updating points as values change
+                ch.PropertyChanged += (s, e) =>
+                {
+                    if (e.PropertyName == nameof(ch.CurrentValue))
+                    {
+                        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        points.Add(new ObservablePoint(now, ch.CurrentValue));
+                    }
+                };
+            }
+
+        }        
+
+        public ICartesianAxis[] YAxes { get; set; } = [
+        new Axis
+        {
+            Name = "Current (Amps)",
+            Labeler = value => value.ToString("F2"),
+            SubseparatorsPaint = new SolidColorPaint
+            {
+                Color = new SKColor(50, 50, 50),
+                StrokeThickness = 0.5f
+            },
+            SubseparatorsCount = 9,
+            ZeroPaint = new SolidColorPaint
+            {
+                Color = new SKColor(200, 200, 200),
+                StrokeThickness = 2
+            },
+            TicksPaint = new SolidColorPaint
+            {
+                Color = new SKColor(200, 200, 200),
+                StrokeThickness = 1.5f
+            },
+            SubticksPaint = new SolidColorPaint
+            {
+                Color = new SKColor(50, 50, 50),
+                StrokeThickness = 1
+            }
         }
+    ];
+
+        public ICartesianAxis[] XAxes { get; set; } = [
+        new Axis
+        {
+            Name = "Time",
+            Labeler = value =>
+            {
+                try
+                {
+                    // Convert Unix timestamp (seconds since epoch) to DateTime
+                    var timestamp = DateTimeOffset.FromUnixTimeMilliseconds((long)value).LocalDateTime;
+                    return timestamp.ToString("HH:mm:ss");
+                }
+                catch
+                {
+                    return string.Empty;
+                }
+            },
+            SeparatorsPaint = new SolidColorPaint
+            {
+                StrokeThickness = 1,
+                Color = new SKColor(200, 200, 200),                
+            },
+            SubseparatorsPaint = new SolidColorPaint
+            {
+                Color = new SKColor(50, 50, 50),
+                StrokeThickness = 0.5f
+            },
+            SubseparatorsCount = 9,
+            ZeroPaint = new SolidColorPaint
+            {
+                Color = new SKColor(200, 200, 200),
+                StrokeThickness = 2
+            },
+            TicksPaint = new SolidColorPaint
+            {
+                Color = new SKColor(200, 200, 200),
+                StrokeThickness = 1.5f
+            },
+            SubticksPaint = new SolidColorPaint
+            {
+                Color = new SKColor(50, 50, 50),
+                StrokeThickness = 1
+            }
+        }
+    ];
 
         private void SelectedChannel_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
         {
@@ -342,107 +466,8 @@ namespace Cortex.ViewModels
                         Values = new double[] { 20, 10, 30, 50, 30, 40, 60 },
                         Fill = null
                     }
+
             };
-
-        public IEnumerable<ISeries> SysTemp { get; set; } =
-        GaugeGenerator.BuildSolidGauge(
-            new GaugeItem(30, series =>
-            {
-                series.Fill = new SolidColorPaint(SKColor.Parse("#800071"));
-                series.DataLabelsSize = 30;
-                series.DataLabelsPaint = new SolidColorPaint(SKColors.White);
-                series.DataLabelsPosition = PolarLabelsPosition.ChartCenter;
-                series.InnerRadius = 50;
-                series.CornerRadius = 0;
-            }),
-            new GaugeItem(GaugeItem.Background, series =>
-            {
-                series.InnerRadius = 50;
-                series.Fill = new SolidColorPaint(SKColor.Parse("#30303b"));
-            }));
-
-        public IEnumerable<ISeries> SysCurrent { get; set; } =
-        GaugeGenerator.BuildSolidGauge(
-            new GaugeItem(125, series =>
-            {
-                series.Fill = new SolidColorPaint(SKColor.Parse("#800071"));
-                series.DataLabelsSize = 30;
-                series.DataLabelsPaint = new SolidColorPaint(SKColors.White);
-                series.DataLabelsPosition = PolarLabelsPosition.ChartCenter;
-                series.InnerRadius = 50;
-                series.CornerRadius = 0;
-            }),
-            new GaugeItem(GaugeItem.Background, series =>
-            {
-                series.InnerRadius = 50;
-                series.Fill = new SolidColorPaint(SKColor.Parse("#30303b"));
-            }));
-
-        public IEnumerable<ISeries> BattV { get; set; } =
-        GaugeGenerator.BuildSolidGauge(
-            new GaugeItem(14.2, series =>
-            {
-                series.Fill = new SolidColorPaint(SKColor.Parse("#800071"));
-                series.DataLabelsSize = 30;
-                series.DataLabelsPaint = new SolidColorPaint(SKColors.White);
-                series.DataLabelsPosition = PolarLabelsPosition.ChartCenter;
-                series.InnerRadius = 50;
-                series.CornerRadius = 0;
-            }),
-            new GaugeItem(GaugeItem.Background, series =>
-            {
-                series.InnerRadius = 50;
-                series.Fill = new SolidColorPaint(SKColor.Parse("#30303b"));
-            }));
-
-        public IEnumerable<ISeries> BattSoC { get; set; } =
-        GaugeGenerator.BuildSolidGauge(
-            new GaugeItem(95, series =>
-            {
-                series.Fill = new SolidColorPaint(SKColor.Parse("#800071"));
-                series.DataLabelsSize = 30;
-                series.DataLabelsPaint = new SolidColorPaint(SKColors.White);
-                series.DataLabelsPosition = PolarLabelsPosition.ChartCenter;
-                series.InnerRadius = 50;
-                series.CornerRadius = 0;
-            }),
-            new GaugeItem(GaugeItem.Background, series =>
-            {
-                series.InnerRadius = 50;
-                series.Fill = new SolidColorPaint(SKColor.Parse("#30303b"));
-            }));
-        public IEnumerable<ISeries> BattSoH { get; set; } =
-        GaugeGenerator.BuildSolidGauge(
-            new GaugeItem(95, series =>
-            {
-                series.Fill = new SolidColorPaint(SKColor.Parse("#800071"));
-                series.DataLabelsSize = 30;
-                series.DataLabelsPaint = new SolidColorPaint(SKColors.White);
-                series.DataLabelsPosition = PolarLabelsPosition.ChartCenter;
-                series.InnerRadius = 50;
-                series.CornerRadius = 0;
-            }),
-            new GaugeItem(GaugeItem.Background, series =>
-            {
-                series.InnerRadius = 50;
-                series.Fill = new SolidColorPaint(SKColor.Parse("#30303b"));
-            }));
-        public IEnumerable<ISeries> MobileSS { get; set; } =
-        GaugeGenerator.BuildSolidGauge(
-           new GaugeItem(75, series =>
-           {
-               series.Fill = new SolidColorPaint(SKColor.Parse("#800071"));
-               series.DataLabelsSize = 30;
-               series.DataLabelsPaint = new SolidColorPaint(SKColors.White);
-               series.DataLabelsPosition = PolarLabelsPosition.ChartCenter;
-               series.InnerRadius = 50;
-               series.CornerRadius = 0;
-           }),
-           new GaugeItem(GaugeItem.Background, series =>
-           {
-               series.InnerRadius = 50;
-               series.Fill = new SolidColorPaint(SKColor.Parse("#30303b"));
-           }));
 
         private void LoadSerialPorts()
         {
@@ -487,11 +512,57 @@ namespace Cortex.ViewModels
             }
         }
 
+        [RelayCommand]
+        private void RevertChanges()
+        {
+            refreshStaticData = true;
+        }
+
         private void _portService_DataUpdated(DataStructures obj)
         {
             Avalonia.Threading.Dispatcher.UIThread.Post(() =>
             {
                 LiveDataView = obj;
+                lock (_chartLock)
+                {
+                    for (int i = 0; i < LiveDataView.ChannelsLiveData.Count; i++)
+                    {
+                        if (SeriesCollection[i] is not LineSeries<ObservablePoint> series)
+                            continue;
+                        var ch = LiveDataView.ChannelsLiveData[i];
+
+                        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        var cutoff = now - (SelectedTimeWindowSeconds * 1000);
+
+                        if (series.Values is not ObservableCollection<ObservablePoint> values)
+                        {
+                            values = new ObservableCollection<ObservablePoint>();
+                            series.Values = values;
+                        }
+
+                        if (series.Stroke is SolidColorPaint paint)
+                        {
+                            paint.StrokeThickness = 1.0f;
+                        }
+                        YAxes[0].MinLimit = null;
+                        YAxes[0].MaxLimit = null;
+
+                        values.Add(new ObservablePoint(now, ch.CurrentValue));
+
+                        while (values.Count > 0 && values[0].X < cutoff)
+                            values.RemoveAt(0);
+                    }
+
+                    if (XAxes is { Length: > 0 })
+                    {
+                        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        XAxes[0].MinLimit = now - (SelectedTimeWindowSeconds * 1000);
+                        XAxes[0].MaxLimit = now;
+                    }
+
+
+                }
+
                 // Only update settings data on initial load or when user requests refresh
                 if (refreshStaticData)
                 {
@@ -547,8 +618,9 @@ namespace Cortex.ViewModels
 
         public void AddLog(string message)
         {
-            var timestamp = DateTime.Now.ToString("HH:mm:ss");
-            LogEntries.Add($"[{timestamp}] {message}");
+            //var timestamp = DateTime.Now.ToString("HH:mm:ss");
+            //LogEntries.Add($"[{timestamp}] {message}");
+            LoggingService.AddLog(message);
         }
 
         partial void OnPullUpEnabledChanged(bool value)

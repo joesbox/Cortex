@@ -50,6 +50,11 @@ namespace Cortex.Views
             UpdateCurrentStatus(vm.OverCurrent);
             UpdateTempStatus(vm.OverTemperature);
             UpdateVoltStatus(vm.UnderVoltage);
+
+            ChannelChart.SizeChanged += (s, e) =>
+            {
+                ChannelChart?.CoreChart?.Update();
+            };
         }
 
         public void CloseApp()

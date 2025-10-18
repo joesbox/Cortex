@@ -35,6 +35,10 @@
         <Style Selector="lvc|CartesianChart">
             <Setter Property="FontFamily" Value="avares://Cortex/Assets/BellotaText-Light.ttf#Bellota Text Light" />
         </Style>
+
+        <Style Selector="TextBlock.log">
+            <Setter Property="FontFamily" Value="avares://Cortex/Assets/Lekton-Regular.ttf#Lekton" />
+        </Style>
         <FluentTheme>
             <FluentTheme.Palettes>
                 <ColorPaletteResources

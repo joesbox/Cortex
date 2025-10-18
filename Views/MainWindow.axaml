@@ -11,6 +11,7 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:rs="using:RangeSlider.Avalonia.Controls"
     xmlns:vm="using:Cortex.ViewModels"
+    xmlns:vms="using:ViewModelsSamples.Pies.AngularGauge"
     Title="C O R T E X"
     MinWidth="1500"
     MinHeight="700"
@@ -22,6 +23,14 @@
 
     <Window.Resources>
         <converters:HexStringToInt16Converter x:Key="HexStringToInt16Converter" />
+        <converters:OneDecimalConverter x:Key="OneDecimalConverter" />
+        <converters:CharArrayToStringConverter x:Key="CharArrayConverter" />
+        <converters:ChannelInputConverter x:Key="ChannelInputConverter" />
+        <converters:BoolToColorConverter x:Key="BoolToColorConverter" />
+        <converters:BoolToStatusConverter x:Key="BoolToStatusConverter" />
+        <converters:BoolToBackgroundConverter x:Key="BoolToBackgroundConverter" />
+        <converters:ByteToStatusConverter x:Key="ByteToStatusConverter" />
+        <converters:ByteToBackgroundConverter x:Key="ByteToBackgroundConverter" />
     </Window.Resources>
     <!--  Main Grid  -->
     <Grid RowDefinitions="Auto, *, Auto">
@@ -135,26 +144,36 @@
                                 BorderThickness="1"
                                 CornerRadius="10">
                                 <Grid
-                                    Margin="10,10,10,20"
+                                    Margin="10,0,10,20"
                                     HorizontalAlignment="Stretch"
                                     VerticalAlignment="Stretch"
                                     RowDefinitions="Auto, *">
+                                    <Rectangle
+                                        Grid.Row="0"
+                                        Height="35"
+                                        RadiusX="5"
+                                        RadiusY="5"
+                                        Margin="0"                                        
+                                        Fill="#ff302042" />
                                     <TextBlock
                                         Grid.Row="0"
                                         Margin="5"
+                                        Padding="10"
                                         HorizontalAlignment="Center"
                                         VerticalAlignment="Top"
+                                        FontSize="17"
                                         Text="System Log" />
-                                    <ScrollViewer
+                                    <ScrollViewer                                    
                                         Name="LogScrollViewer"
                                         Grid.Row="1"
+                                        Margin="0,20,0,0"
                                         Height="{Binding $parent.Bounds.Height}"
                                         HorizontalScrollBarVisibility="Disabled"
                                         VerticalScrollBarVisibility="Auto">
                                         <ItemsControl ItemsSource="{Binding LogEntries}">
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate>
-                                                    <TextBlock Margin="2" Text="{Binding}" />
+                                                    <TextBlock Margin="4" FontSize="16" FontWeight="Light" Classes="log" Text="{Binding}" />
                                                 </DataTemplate>
                                             </ItemsControl.ItemTemplate>
                                         </ItemsControl>
@@ -183,7 +202,7 @@
                         <Grid.RowDefinitions>
                             <RowDefinition Height="*" MinHeight="300" />
                             <RowDefinition Height="Auto" />
-                            <RowDefinition Height="1.5*" />
+                            <RowDefinition Height="1.4*" />
                         </Grid.RowDefinitions>
                         <Grid.Styles>
                             <!--  Style for pointer over  -->
@@ -233,15 +252,31 @@
                                                 Stretch="Uniform">
                                                 <StackPanel Orientation="Vertical">
                                                     <lvc:PieChart
-                                                        Width="200"
-                                                        Height="200"
+                                                        Width="220"
+                                                        Height="220"
                                                         HorizontalAlignment="Stretch"
                                                         VerticalAlignment="Stretch"
                                                         InitialRotation="-225"
                                                         MaxAngle="270"
                                                         MaxValue="100"
-                                                        MinValue="0"
-                                                        Series="{Binding SysTemp}" />
+                                                        MinValue="0">
+
+                                                        <lvc:PieChart.Series>
+
+                                                            <lvc:XamlGaugeSeries
+                                                                CornerRadius="0"
+                                                                DataLabelsPosition="ChartCenter"
+                                                                DataLabelsSize="30"
+                                                                Fill="#ff800071"
+                                                                GaugeValue="{Binding LiveDataView.SystemParams.SystemTemperature}"
+                                                                InnerRadius="30"
+                                                                MaxRadialColumnWidth="20"
+                                                                SeriesName="Temp" />
+                                                        </lvc:PieChart.Series>
+
+
+                                                    </lvc:PieChart>
+
                                                     <TextBlock
                                                         Margin="0,0,0,0"
                                                         HorizontalAlignment="Center"
@@ -264,15 +299,30 @@
                                                 Stretch="Uniform">
                                                 <StackPanel>
                                                     <lvc:PieChart
-                                                        Width="200"
-                                                        Height="200"
+                                                        Width="220"
+                                                        Height="220"
                                                         HorizontalAlignment="Stretch"
                                                         VerticalAlignment="Stretch"
                                                         InitialRotation="-225"
                                                         MaxAngle="270"
-                                                        MaxValue="240"
-                                                        MinValue="0"
-                                                        Series="{Binding SysCurrent}" />
+                                                        MaxValue="100"
+                                                        MinValue="0">
+
+                                                        <lvc:PieChart.Series>
+
+                                                            <lvc:XamlGaugeSeries
+                                                                CornerRadius="0"
+                                                                DataLabelsPosition="ChartCenter"
+                                                                DataLabelsSize="30"
+                                                                Fill="#ff800071"
+                                                                GaugeValue="{Binding LiveDataView.SystemParams.SystemCurrent, Converter={StaticResource OneDecimalConverter}}"
+                                                                InnerRadius="30"
+                                                                MaxRadialColumnWidth="20"
+                                                                SeriesName="Amps" />
+                                                        </lvc:PieChart.Series>
+
+
+                                                    </lvc:PieChart>
                                                     <TextBlock
                                                         Margin="0,0,0,0"
                                                         HorizontalAlignment="Center"
@@ -295,15 +345,30 @@
                                                 Stretch="Uniform">
                                                 <StackPanel>
                                                     <lvc:PieChart
-                                                        Width="200"
-                                                        Height="200"
+                                                        Width="220"
+                                                        Height="220"
                                                         HorizontalAlignment="Stretch"
                                                         VerticalAlignment="Stretch"
                                                         InitialRotation="-225"
                                                         MaxAngle="270"
-                                                        MaxValue="18"
-                                                        MinValue="0"
-                                                        Series="{Binding BattV}" />
+                                                        MaxValue="100"
+                                                        MinValue="0">
+
+                                                        <lvc:PieChart.Series>
+
+                                                            <lvc:XamlGaugeSeries
+                                                                CornerRadius="0"
+                                                                DataLabelsPosition="ChartCenter"
+                                                                DataLabelsSize="30"
+                                                                Fill="#ff800071"
+                                                                GaugeValue="{Binding LiveDataView.SystemParams.VBatt, Converter={StaticResource OneDecimalConverter}}"
+                                                                InnerRadius="30"
+                                                                MaxRadialColumnWidth="20"
+                                                                SeriesName="Voltage" />
+                                                        </lvc:PieChart.Series>
+
+
+                                                    </lvc:PieChart>
                                                     <TextBlock
                                                         Margin="0,0,0,0"
                                                         HorizontalAlignment="Center"
@@ -332,15 +397,30 @@
                                                 Stretch="Uniform">
                                                 <StackPanel>
                                                     <lvc:PieChart
-                                                        Width="200"
-                                                        Height="200"
+                                                        Width="220"
+                                                        Height="220"
                                                         HorizontalAlignment="Stretch"
                                                         VerticalAlignment="Stretch"
                                                         InitialRotation="-225"
                                                         MaxAngle="270"
                                                         MaxValue="100"
-                                                        MinValue="0"
-                                                        Series="{Binding BattSoC}" />
+                                                        MinValue="0">
+
+                                                        <lvc:PieChart.Series>
+
+                                                            <lvc:XamlGaugeSeries
+                                                                CornerRadius="0"
+                                                                DataLabelsPosition="ChartCenter"
+                                                                DataLabelsSize="30"
+                                                                Fill="#ff800071"
+                                                                GaugeValue="{Binding LiveDataView.SystemParams.BattSOC}"
+                                                                InnerRadius="30"
+                                                                MaxRadialColumnWidth="20"
+                                                                SeriesName="Percent" />
+                                                        </lvc:PieChart.Series>
+
+
+                                                    </lvc:PieChart>
                                                     <TextBlock
                                                         Margin="0,0,0,0"
                                                         HorizontalAlignment="Center"
@@ -364,15 +444,30 @@
                                                 Stretch="Uniform">
                                                 <StackPanel>
                                                     <lvc:PieChart
-                                                        Width="200"
-                                                        Height="200"
+                                                        Width="220"
+                                                        Height="220"
                                                         HorizontalAlignment="Stretch"
                                                         VerticalAlignment="Stretch"
                                                         InitialRotation="-225"
                                                         MaxAngle="270"
                                                         MaxValue="100"
-                                                        MinValue="0"
-                                                        Series="{Binding BattSoC}" />
+                                                        MinValue="0">
+
+                                                        <lvc:PieChart.Series>
+
+                                                            <lvc:XamlGaugeSeries
+                                                                CornerRadius="0"
+                                                                DataLabelsPosition="ChartCenter"
+                                                                DataLabelsSize="30"
+                                                                Fill="#ff800071"
+                                                                GaugeValue="{Binding LiveDataView.SystemParams.BattSOH}"
+                                                                InnerRadius="30"
+                                                                MaxRadialColumnWidth="20"
+                                                                SeriesName="Percent" />
+                                                        </lvc:PieChart.Series>
+
+
+                                                    </lvc:PieChart>
                                                     <TextBlock
                                                         Margin="0,0,0,0"
                                                         HorizontalAlignment="Center"
@@ -396,15 +491,30 @@
                                                 Stretch="Uniform">
                                                 <StackPanel>
                                                     <lvc:PieChart
-                                                        Width="200"
-                                                        Height="200"
+                                                        Width="220"
+                                                        Height="220"
                                                         HorizontalAlignment="Stretch"
                                                         VerticalAlignment="Stretch"
                                                         InitialRotation="-225"
                                                         MaxAngle="270"
                                                         MaxValue="100"
-                                                        MinValue="0"
-                                                        Series="{Binding MobileSS}" />
+                                                        MinValue="0">
+
+                                                        <lvc:PieChart.Series>
+
+                                                            <lvc:XamlGaugeSeries
+                                                                CornerRadius="0"
+                                                                DataLabelsPosition="ChartCenter"
+                                                                DataLabelsSize="30"
+                                                                Fill="#ff800071"
+                                                                GaugeValue="{Binding LiveDataView.SystemParams.SystemTemperature}"
+                                                                InnerRadius="30"
+                                                                MaxRadialColumnWidth="20"
+                                                                SeriesName="Percent" />
+                                                        </lvc:PieChart.Series>
+
+
+                                                    </lvc:PieChart>
                                                     <TextBlock
                                                         Margin="0,0,0,0"
                                                         HorizontalAlignment="Center"
@@ -431,12 +541,253 @@
                                     BorderThickness="1"
                                     CornerRadius="10">
                                     <DataGrid
-                                        Grid.Row="0"
-                                        Margin="10"
-                                        AutoGenerateColumns="True"
+                                        AutoGenerateColumns="False"
+                                        CanUserReorderColumns="False"
+                                        CanUserResizeColumns="True"
+                                        CanUserSortColumns="False"
                                         GridLinesVisibility="All"
                                         IsReadOnly="True"
-                                        ItemsSource="{Binding TestData}" />
+                                        ItemsSource="{Binding LiveDataView.ChannelsLiveData}">
+                                        <DataGrid.Styles>
+                                            <Style Selector="DataGridColumnHeader">
+                                                <Setter Property="FontSize" Value="18" />
+                                                <Setter Property="FontWeight" Value="ExtraBold" />
+                                                <Setter Property="HorizontalContentAlignment" Value="Center" />
+                                                <Setter Property="VerticalContentAlignment" Value="Center" />
+                                                <Setter Property="Padding" Value="8,4,-26,4" />
+                                                <Setter Property="Margin" Value="0,0,0,0" />
+                                                <Setter Property="Foreground" Value="White" />
+                                            </Style>
+                                            <Style Selector="DataGridCell">
+                                                <Setter Property="HorizontalContentAlignment" Value="Center" />
+                                            </Style>
+                                        </DataGrid.Styles>
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn
+                                                Width="Auto"
+                                                Binding="{Binding Name, Converter={StaticResource CharArrayConverter}}"
+                                                Header="Name" />
+                                            <DataGridTextColumn
+                                                Width="Auto"
+                                                Binding="{Binding ChanType}"
+                                                Header="Type" />
+                                            <DataGridTemplateColumn Width="Auto">
+                                                <DataGridTemplateColumn.Header>
+                                                    <Border HorizontalAlignment="Stretch">
+                                                        <TextBlock
+                                                            HorizontalAlignment="Center"
+                                                            VerticalAlignment="Center"
+                                                            Text="Input"
+                                                            TextAlignment="Center"
+                                                            TextWrapping="Wrap" />
+                                                    </Border>
+                                                </DataGridTemplateColumn.Header>
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <Border
+                                                            Width="100"
+                                                            Padding="10,0"
+															Margin="15,0"
+                                                            HorizontalAlignment="Center"
+                                                            VerticalAlignment="Center"
+                                                            Background="{Binding Enabled, Converter={StaticResource ByteToBackgroundConverter}}"
+                                                            CornerRadius="4">
+                                                            <TextBlock
+                                                                HorizontalAlignment="Center"
+                                                                FontWeight="Bold"
+                                                                Foreground="White"
+                                                                Text="{Binding Enabled, Converter={StaticResource ByteToStatusConverter}}" />
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
+                                            <DataGridTextColumn
+                                                Width="Auto"
+                                                Binding="{Binding PWMSetDuty}"
+                                                Header="PWM %" />
+                                            <DataGridTextColumn
+                                                Width="Auto"
+                                                Binding="{Binding CurrentValue, StringFormat='{}{0:F2}'}"
+                                                Header="Current (A)" />
+                                            <DataGridTextColumn
+                                                Width="Auto"
+                                                Binding="{Binding CurrentLimitHigh, StringFormat='{}{0:F2}'}"
+                                                Header="Limit High" />
+                                            <DataGridTextColumn
+                                                Width="Auto"
+                                                Binding="{Binding CurrentThresholdHigh, StringFormat='{}{0:F2}'}"
+                                                Header="Threshold High" />
+                                            <DataGridTextColumn
+                                                Width="Auto"
+                                                Binding="{Binding CurrentThresholdLow, StringFormat='{}{0:F2}'}"
+                                                Header="Threshold Low" />
+                                            <DataGridTemplateColumn Width="Auto">
+                                                <DataGridTemplateColumn.Header>
+                                                    <Border HorizontalAlignment="Stretch">
+                                                        <TextBlock
+                                                            HorizontalAlignment="Center"
+                                                            VerticalAlignment="Center"
+                                                            Text="Overcurrent&#10;Range"
+                                                            TextAlignment="Center"
+                                                            TextWrapping="Wrap" />
+                                                    </Border>
+                                                </DataGridTemplateColumn.Header>
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <Border
+                                                            Width="90"
+                                                            Padding="20,0"
+															Margin="15,0"
+                                                            HorizontalAlignment="Center"
+                                                            VerticalAlignment="Center"
+                                                            Background="{Binding HasOvercurrentRange, Converter={StaticResource BoolToBackgroundConverter}}"
+                                                            CornerRadius="4">
+                                                            <TextBlock
+                                                                HorizontalAlignment="Center"
+                                                                FontWeight="Bold"
+                                                                Foreground="White"
+                                                                Text="{Binding HasOvercurrentRange, Converter={StaticResource BoolToStatusConverter}}" />
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
+                                            <DataGridTemplateColumn Width="Auto">
+                                                <DataGridTemplateColumn.Header>
+                                                    <Border HorizontalAlignment="Stretch">
+                                                        <TextBlock
+                                                            HorizontalAlignment="Center"
+                                                            VerticalAlignment="Center"
+                                                            Text="Overcurrent&#10;Limit"
+                                                            TextAlignment="Center"
+                                                            TextWrapping="Wrap" />
+                                                    </Border>
+                                                </DataGridTemplateColumn.Header>
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <Border
+                                                            Width="90"
+                                                            Padding="20,0"
+															Margin="15,0"
+                                                            HorizontalAlignment="Center"
+                                                            VerticalAlignment="Center"
+                                                            Background="{Binding HasOvercurrentLimit, Converter={StaticResource BoolToBackgroundConverter}}"
+                                                            CornerRadius="4">
+                                                            <TextBlock
+                                                                HorizontalAlignment="Center"
+                                                                FontWeight="Bold"
+                                                                Foreground="White"
+                                                                Text="{Binding HasOvercurrentLimit, Converter={StaticResource BoolToStatusConverter}}" />
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
+
+                                            <DataGridTemplateColumn Width="Auto">
+                                                <DataGridTemplateColumn.Header>
+                                                    <Border HorizontalAlignment="Stretch">
+                                                        <TextBlock
+                                                            HorizontalAlignment="Center"
+                                                            VerticalAlignment="Center"
+                                                            Text="Undercurrent&#10;Range"
+                                                            TextAlignment="Center"
+                                                            TextWrapping="Wrap" />
+                                                    </Border>
+                                                </DataGridTemplateColumn.Header>
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <Border
+                                                            Width="90"
+                                                            Padding="20,0"
+															Margin="15,0"
+                                                            HorizontalAlignment="Center"
+                                                            VerticalAlignment="Center"
+                                                            Background="{Binding HasUndercurrentRange, Converter={StaticResource BoolToBackgroundConverter}}"
+                                                            CornerRadius="4">
+                                                            <TextBlock
+                                                                HorizontalAlignment="Center"
+                                                                FontWeight="Bold"
+                                                                Foreground="White"
+                                                                Text="{Binding HasUndercurrentRange, Converter={StaticResource BoolToStatusConverter}}" />
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
+
+                                            <DataGridTemplateColumn Width="Auto">
+                                                <DataGridTemplateColumn.Header>
+                                                    <Border HorizontalAlignment="Stretch">
+                                                        <TextBlock
+                                                            HorizontalAlignment="Center"
+                                                            VerticalAlignment="Center"
+                                                            Text="HSD Fault"
+                                                            TextAlignment="Center"
+                                                            TextWrapping="Wrap" />
+                                                    </Border>
+                                                </DataGridTemplateColumn.Header>
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <Border
+                                                            Width="90"
+                                                            Padding="20,0"
+															Margin="15,0"
+                                                            HorizontalAlignment="Center"
+                                                            VerticalAlignment="Center"
+                                                            Background="{Binding HasISFault, Converter={StaticResource BoolToBackgroundConverter}}"
+                                                            CornerRadius="4">
+                                                            <TextBlock
+                                                                HorizontalAlignment="Center"
+                                                                FontWeight="Bold"
+                                                                Foreground="White"
+                                                                Text="{Binding HasISFault, Converter={StaticResource BoolToStatusConverter}}" />
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
+
+                                            <DataGridTemplateColumn Width="Auto">
+                                                <DataGridTemplateColumn.Header>
+                                                    <Border HorizontalAlignment="Stretch">
+                                                        <TextBlock
+                                                            HorizontalAlignment="Center"
+                                                            VerticalAlignment="Center"
+                                                            Text="Retry&#10;Lockout"
+                                                            TextAlignment="Center"
+                                                            TextWrapping="Wrap" />
+                                                    </Border>
+                                                </DataGridTemplateColumn.Header>
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <Border
+                                                            Width="90"
+                                                            Padding="20,0"
+															Margin="15,0"
+                                                            HorizontalAlignment="Center"
+                                                            VerticalAlignment="Center"
+                                                            Background="{Binding HasRetryLockout, Converter={StaticResource BoolToBackgroundConverter}}"
+                                                            CornerRadius="4">
+                                                            <TextBlock
+                                                                HorizontalAlignment="Center"
+                                                                FontWeight="Bold"
+                                                                Foreground="White"
+                                                                Text="{Binding HasRetryLockout, Converter={StaticResource BoolToStatusConverter}}" />
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
+                                            <DataGridTextColumn
+                                                Width="Auto"
+                                                Binding="{Binding InputControlPin, Converter={StaticResource ChannelInputConverter}}"
+                                                Header="Control Input" />
+                                            <DataGridCheckBoxColumn
+                                                Width="Auto"
+                                                Binding="{Binding RunOn}"
+                                                Header="Run On" />
+                                            <DataGridTextColumn
+                                                Width="Auto"
+                                                Binding="{Binding RunOnTime}"
+                                                Header="Run on time (seconds)" />
+                                        </DataGrid.Columns>
+                                    </DataGrid>
                                 </Border>
                             </Grid>
                         </Grid>
@@ -448,7 +799,13 @@
                                 BorderBrush="#302042"
                                 BorderThickness="1"
                                 CornerRadius="10">
-                                <lvc:CartesianChart Series="{Binding Series}" ZoomMode="Both" />
+                                <lvc:CartesianChart
+                                    x:Name="ChannelChart"
+                                    LegendPosition="Bottom"
+                                    Series="{Binding SeriesCollection}"
+                                    XAxes="{Binding XAxes}"
+                                    YAxes="{Binding YAxes}"
+                                    ZoomMode="Both" />
                             </Border>
                         </Grid>
                     </Grid>
@@ -874,7 +1231,7 @@
                                                     Value="{Binding SelectedChannel.CurrentThresholdHigh}" />
                                             </StackPanel>
                                         </StackPanel>
-           
+
                                         <StackPanel HorizontalAlignment="Center" Orientation="Vertical">
                                             <TextBlock
                                                 HorizontalAlignment="Center"
@@ -890,7 +1247,7 @@
                                                     x:Name="inrushDelay"
                                                     Width="200"
                                                     HorizontalAlignment="Center"
-                                                    VerticalAlignment="Center"                                                    
+                                                    VerticalAlignment="Center"
                                                     IsSnapToTickEnabled="True"
                                                     Maximum="2.0"
                                                     Minimum="0"
@@ -913,7 +1270,7 @@
                                                     x:Name="retryAttempts"
                                                     Width="200"
                                                     HorizontalAlignment="Center"
-                                                    VerticalAlignment="Center"                                                    
+                                                    VerticalAlignment="Center"
                                                     IsSnapToTickEnabled="True"
                                                     Maximum="10"
                                                     Minimum="0"
@@ -972,50 +1329,7 @@
                                                 ItemsSource="{Binding InputDisplayList}"
                                                 SelectedItem="{Binding SelectedInputLabel}" />
                                         </Grid>
-                                        <Grid
-                                            Grid.Row="1"
-                                            Grid.Column="1"
-                                            HorizontalAlignment="Center"
-                                            VerticalAlignment="Center"
-                                            ColumnDefinitions="Auto,*"
-                                            ColumnSpacing="10">
-                                            <TextBlock
-                                                Grid.Column="0"
-                                                VerticalAlignment="Center"
-                                                Text="Multichannel" />
-                                            <ToggleSwitch
-                                                x:Name="MultiEn"
-                                                Grid.Column="1"
-                                                HorizontalAlignment="Left"
-                                                VerticalAlignment="Center"
-                                                Background="#ff15151f"
-                                                BorderBrush="#302042"
-                                                BorderThickness="1"
-                                                CornerRadius="10"
-                                                IsChecked="{Binding SelectedChannel.MultiChannel, Mode=TwoWay}"
-                                                OffContent="Disabled"
-                                                OnContent="Enabled" />
-                                        </Grid>
-                                        <Grid
-                                            Grid.Row="2"
-                                            Grid.Column="1"
-                                            HorizontalAlignment="Center"
-                                            ColumnDefinitions="Auto,*"
-                                            ColumnSpacing="10">
-                                            <TextBlock
-                                                Grid.Column="0"
-                                                VerticalAlignment="Center"
-                                                Text="Group number" />
-                                            <NumericUpDown
-                                                Grid.Column="1"
-                                                Width="150"
-                                                VerticalAlignment="Center"
-                                                Increment="1"
-                                                IsEnabled="{Binding #MultiEn.IsChecked}"
-                                                Maximum="5"
-                                                Minimum="1"
-                                                Value="{Binding SelectedChannel.GroupNumber}" />
-                                        </Grid>
+
                                         <Grid
                                             Grid.Row="3"
                                             Grid.Column="1"
@@ -1065,7 +1379,8 @@
                                                     IsSnapToTickEnabled="True"
                                                     Maximum="600"
                                                     Minimum="0"
-                                                    TickFrequency="5" />
+                                                    TickFrequency="5"
+                                                    Value="{Binding SelectedChannel.RunOnTime}" />
                                             </StackPanel>
                                         </StackPanel>
                                         <Grid
@@ -1435,6 +1750,7 @@
                                 HorizontalAlignment="Right"
                                 VerticalAlignment="Top"
                                 HorizontalContentAlignment="Center"
+                                Command="{Binding RevertChanges}"
                                 Content="REVERT CHANGES" />
                             <Button
                                 Width="150"
@@ -1443,7 +1759,7 @@
                                 VerticalAlignment="Top"
                                 HorizontalContentAlignment="Center"
                                 Background="#B30000"
-								Command="{Binding SendConfigCommand}"
+                                Command="{Binding SendConfigCommand}"
                                 Content="SAVE CHANGES" />
                         </StackPanel>
                     </Grid>

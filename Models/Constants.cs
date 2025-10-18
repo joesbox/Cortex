@@ -44,7 +44,7 @@ namespace Cortex.Models
 
         public const char COMMAND_ID_BUILD_DATE = 'd';
 
-        public const int NUMBER_CHANNEL_PARAMETERS = 10;
+        public const int NUMBER_CHANNEL_PARAMETERS = 13;
 
         public const int NUMBER_ANALOGUE_PARAMETERS = 9;
 

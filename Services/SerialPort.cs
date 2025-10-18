@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.IO.Ports;
 using System.Linq;
 using System.Xml;
+using System.Timers;
 using static Cortex.Models.OutputChannel;
 
 
@@ -50,7 +51,12 @@ public class SerialPortService
 
     private List<byte> _sendBuffer = new List<byte>();
 
-    public SerialPortService(string portName, int baudRate = 9600)
+    // Timer to process received packets off the serial thread at a 100ms interval
+    private readonly Timer _processTimer;
+    private readonly object _bufferLock = new object();
+    private volatile bool _packetReady = false;
+
+    public SerialPortService(string portName, int baudRate = 115200)
     {
         _serialPort = new SerialPort(portName, baudRate);
         _serialPort.Parity = Parity.Even;
@@ -62,7 +68,34 @@ public class SerialPortService
         receivedDataBuffer = new List<byte>();
         dataStructures = new DataStructures();
         settingsData = new DataStructures();
-        dataBytes = [];
+        dataBytes = Array.Empty<byte>();
+
+        // create and start the processing timer (100ms)
+        _processTimer = new Timer(100);
+        _processTimer.AutoReset = true;
+        _processTimer.Elapsed += (s, e) =>
+        {
+            // if a full packet has been flagged, process it on timer thread
+            if (_packetReady)
+            {
+                // ensure only one thread processes the buffer
+                lock (_bufferLock)
+                {
+                    // clear flag before processing to avoid re-entrancy
+                    _packetReady = false;
+                    // processData will internally copy and clear the buffer
+                    try
+                    {
+                        processData();
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"Error in processData: {ex.Message}");
+                    }
+                }
+            }
+        };
+        _processTimer.Start();
     }
 
     public void UpdateSettingsData(DataStructures newSettingsData)
@@ -75,13 +108,24 @@ public class SerialPortService
     /// </summary>
     /// <returns>True if a full data packet received and processed</returns>
     private bool processData()
-    {        
+    {
         bool retVal = false;
         byte[] checkSumArray = new byte[4];
         // Reset trailer flag
         foundTrailer1 = foundTrailer2 = false;
-        dataBytes = receivedDataBuffer.ToArray();
-        receivedDataBuffer.Clear();
+
+        // copy buffer to local array under lock
+        lock (_bufferLock)
+        {
+            dataBytes = receivedDataBuffer.ToArray();
+            receivedDataBuffer.Clear();
+        }
+
+        if (dataBytes == null || dataBytes.Length < 6)
+        {
+            return false;
+        }
+
         int checkSum = 0;
 
         checkSum = dataBytes.Take(dataBytes.Length - 4).Sum(b => (int)b);
@@ -124,14 +168,14 @@ public class SerialPortService
                                 dataStructures.ChannelsLiveData[i].InputControlPin = reader.ReadByte();
                                 dataStructures.ChannelsLiveData[i].MultiChannel = reader.ReadByte();
                                 dataStructures.ChannelsLiveData[i].RetryCount = reader.ReadByte();
-                                dataStructures.ChannelsLiveData[i].InrushDelay = reader.ReadSingle() / 1000.0F;
+                                dataStructures.ChannelsLiveData[i].InrushDelay = reader.ReadInt32() / 1000.0F;
                                 dataStructures.ChannelsLiveData[i].Name = reader.ReadChars(3);
+                                dataStructures.ChannelsLiveData[i].RunOn = reader.ReadByte();
+                                dataStructures.ChannelsLiveData[i].RunOnTime = reader.ReadInt32() / 1000;
                             }
 
                             int numAnalogueChannels = reader.ReadByte();
-
-                            Debug.WriteLine($"Num analogue channels: {numAnalogueChannels}");
-
+                            
 
                             for (int i = 0; i < numAnalogueChannels; i++) // Analogue input channel data coming in
                             {
@@ -148,7 +192,7 @@ public class SerialPortService
 
                             dataStructures.SystemParams.SystemTemperature = reader.ReadInt32();
                             dataStructures.SystemParams.CANResEnabled = reader.ReadByte();
-                            dataStructures.SystemParams.VBatt = reader.ReadSingle();
+                            dataStructures.SystemParams.VBatt = (float)Math.Round(reader.ReadSingle(), 1);
                             dataStructures.SystemParams.SystemCurrent = reader.ReadSingle();
                             dataStructures.SystemParams.SystemCurrentLimit = reader.ReadByte();
                             dataStructures.SystemParams.ErrorFlags = reader.ReadUInt16();
@@ -178,7 +222,7 @@ public class SerialPortService
             DataUpdated?.Invoke(dataStructures);
 
             float limit = BitConverter.ToSingle(dataBytes, 4);
-      
+
         }
         if (!sendingConfig)
         {
@@ -322,7 +366,7 @@ public class SerialPortService
                             AddData((byte)settingIndex, true);
                             AddData((byte)parameterIndex, true);
                             AddData((byte)channelIndex, true);
-                            byte[] floatBytes = BitConverter.GetBytes(settingsData.ChannelsStaticData[channelIndex].InrushDelay * 1000.0F);
+                            byte[] floatBytes = BitConverter.GetBytes((int)settingsData.ChannelsStaticData[channelIndex].InrushDelay * 1000);
                             foreach (byte b in floatBytes) AddData(b, true);
                         }
                         break;
@@ -339,6 +383,33 @@ public class SerialPortService
                                 AddData((byte)c, true);
                             }
                             AddData(0, true); // Padding
+                        }
+                        break;
+                    case 11: // Run on
+                        if (dataStructures.ChannelsLiveData[channelIndex].RunOn != settingsData.ChannelsStaticData[channelIndex].RunOn)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].RunOn, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                        }
+                        break;
+
+                    case 12: // Run on time
+                        if (dataStructures.ChannelsLiveData[channelIndex].RunOnTime != settingsData.ChannelsStaticData[channelIndex].RunOnTime)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+
+                            Debug.WriteLine("Setting run on time to " + settingsData.ChannelsStaticData[channelIndex].RunOnTime + " seconds.");
+                            byte[] floatBytes = BitConverter.GetBytes((int)settingsData.ChannelsStaticData[channelIndex].RunOnTime * 1000);
+                            foreach (byte b in floatBytes) AddData(b, true);
                         }
                         break;
                 }
@@ -404,7 +475,10 @@ public class SerialPortService
             {
                 byte readByte = (byte)_serialPort.ReadByte();
 
-                receivedDataBuffer.Add(readByte);
+                lock (_bufferLock)
+                {
+                    receivedDataBuffer.Add(readByte);
+                }
 
                 if (readByte == Constants.SERIAL_TRAILER1 || foundTrailer1)
                 {
@@ -415,11 +489,11 @@ public class SerialPortService
                         switch (lastCommandSent)
                         {
                             case Constants.COMMAND_ID_REQUEST:
-                                // Trailer found and we've read all the bytes. Process data
+                                // Trailer found and we've read all the bytes. Flag packet ready for processing by timer
                                 if (_serialPort.BytesToRead == 0)
                                 {
                                     UpdateStaticData = true;
-                                    processData();
+                                    _packetReady = true;
                                 }
                                 break;
                         }
@@ -435,7 +509,10 @@ public class SerialPortService
                             if (!sendingConfig)
                             {
                                 foundECU = true;
-                                receivedDataBuffer.Clear();
+                                lock (_bufferLock)
+                                {
+                                    receivedDataBuffer.Clear();
+                                }
                                 SendCommand(Constants.COMMAND_ID_REQUEST);
                             }
                             break;
@@ -493,22 +570,30 @@ public class SerialPortService
                             {
                                 saveToEEPROM = false;
                                 SendCommand(Constants.COMMAND_ID_SAVECHANGES);
+                                
                             }
                             break;
 
                         case Constants.COMMAND_ID_SAVECHANGES:
+                            lock (_bufferLock) 
+                            { 
+                                receivedDataBuffer.Clear(); 
+                            }
+                            SendCommand(Constants.COMMAND_ID_REQUEST);
                             Debug.WriteLine("Configuration saved to EEPROM.");
+                            LoggingService.AddLog("PDM updated.");
                             break;
                     }
                 }
                 else if (readByte == Constants.COMMAND_ID_CHECKSUM_FAIL)
-                {                    
+                {
                     switch (lastCommandSent)
-                    {                        
+                    {
                         case Constants.COMMAND_ID_NEWCONFIG:
-                            //SendConfig();
+                            LoggingService.AddLog("PDM reported checksum failure for config data. Try again.");
                             break;
                         case Constants.COMMAND_ID_SAVECHANGES:
+                            LoggingService.AddLog("PDM reported checksum failure when saving changes. Try again.");
 
                             break;
                     }
@@ -527,8 +612,8 @@ public class SerialPortService
                 if (!foundECU)
                 {
                     try
-                    {                        
-                        SendCommand(Constants.COMMAND_ID_BEGIN);                        
+                    {
+                        SendCommand(Constants.COMMAND_ID_BEGIN);
 
                         if (_serialPort.BytesToRead > 0)
                         {
@@ -536,7 +621,7 @@ public class SerialPortService
                         }
                     }
                     catch (Exception ex)
-                    {                        
+                    {
                         Debug.WriteLine($"Error sending request: {ex.Message}");
                     }
                 }
@@ -575,6 +660,7 @@ public class SerialPortService
         analogueIndex = 0;
         parameterIndex = 0;
         SendConfig();
+        LoggingService.AddLog("Sending config to PDM...");
     }   
 
     private void SendCommand(char commandId)
