@@ -1,6 +1,9 @@
-﻿using Avalonia.Data.Converters;
-using Avalonia.Media;
-using Avalonia.Media.Imaging;
+﻿using System;
+using System.Collections.ObjectModel;
+using System.Diagnostics;
+using System.IO.Ports;
+using System.Linq;
+using System.Text.Json;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Cortex.Models;
@@ -8,22 +11,9 @@ using Cortex.Services;
 using LiveChartsCore;
 using LiveChartsCore.Defaults;
 using LiveChartsCore.Kernel.Sketches;
-using LiveChartsCore.Measure;
 using LiveChartsCore.SkiaSharpView;
-using LiveChartsCore.SkiaSharpView.Extensions;
 using LiveChartsCore.SkiaSharpView.Painting;
-using LiveChartsCore.SkiaSharpView.Painting.Effects;
 using SkiaSharp;
-using System;
-using System.Collections.Generic;
-using System.Collections.ObjectModel;
-using System.Diagnostics;
-using System.Globalization;
-using System.IO.Ports;
-using System.Linq;
-using System.Text.Json;
-using System.Timers;
-using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace Cortex.ViewModels
 {
@@ -33,7 +23,7 @@ namespace Cortex.ViewModels
         private DataStructures liveDataView = new(); // For live/status data
 
         [ObservableProperty]
-        private DataStructures settingsDataView = new(); // For settings (user editable)        
+        private DataStructures settingsDataView = new(); // For settings (user editable)
 
         [ObservableProperty]
         private bool isConnected;
@@ -58,6 +48,9 @@ namespace Cortex.ViewModels
 
         [ObservableProperty]
         private bool crcFailed;
+
+        [ObservableProperty]
+        private bool gpsOK;
 
         [ObservableProperty]
         private ObservableCollection<string> serialPorts = new();
@@ -146,7 +139,7 @@ namespace Cortex.ViewModels
         [ObservableProperty]
         private int selectedTimeWindowSeconds = 60;
 
-        private readonly Timer updateTimer;
+        private readonly System.Timers.Timer updateTimer;
         private readonly DateTime startTime = DateTime.UtcNow;
 
         private InputDisplayItem? _selectedInputItem;
@@ -155,9 +148,9 @@ namespace Cortex.ViewModels
 
         private SerialPortService? _portService;
 
-        private readonly Timer _pollTimer = new(3000); // Every 3 seconds
+        private readonly System.Timers.Timer _pollTimer = new(3000); // Every 3 seconds
 
-        private readonly Timer _commsTimer = new(1000); // Every 1000 millis
+        private readonly System.Timers.Timer _commsTimer = new(1000); // Every 1000 millis
 
         private readonly IAppCloser _appCloser;
 
@@ -264,6 +257,7 @@ namespace Cortex.ViewModels
             UnderVoltage = true;
             CrcFailed = false;
             isPWMChannel = false;
+            GpsOK = false;
 
             ChannelIndices = new ObservableCollection<int>(
             Enumerable.Range(0, SettingsDataView.ChannelsStaticData.Count));
@@ -283,7 +277,7 @@ namespace Cortex.ViewModels
         new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.ANA, Label = "Analogue threshold" },
         new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.ANA_PWM, Label = "Analogue scaled PWM" },
         new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.CAN_DIGITAL, Label = "CAN Digital" },
-        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.CAN_PWM, Label = "CAN PWM" }
+        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.CAN_PWM, Label = "CAN PWM" },
     };
 
             SelectedChannelLabel = ChannelDisplayList.FirstOrDefault();
@@ -326,8 +320,7 @@ namespace Cortex.ViewModels
                     GeometryStroke = null,
                     GeometryFill = null,
                     Fill = null,
-                    
-                };               
+                };
 
                 seriesCollection.Add(series);
 
@@ -352,8 +345,7 @@ namespace Cortex.ViewModels
                     }
                 };
             }
-
-        }        
+        }
 
         public ICartesianAxis[] YAxes { get; set; } = [
         new Axis
@@ -363,24 +355,24 @@ namespace Cortex.ViewModels
             SubseparatorsPaint = new SolidColorPaint
             {
                 Color = new SKColor(50, 50, 50),
-                StrokeThickness = 0.5f
+                StrokeThickness = 0.5f,
             },
             SubseparatorsCount = 9,
             ZeroPaint = new SolidColorPaint
             {
                 Color = new SKColor(200, 200, 200),
-                StrokeThickness = 2
+                StrokeThickness = 2,
             },
             TicksPaint = new SolidColorPaint
             {
                 Color = new SKColor(200, 200, 200),
-                StrokeThickness = 1.5f
+                StrokeThickness = 1.5f,
             },
             SubticksPaint = new SolidColorPaint
             {
                 Color = new SKColor(50, 50, 50),
                 StrokeThickness = 1
-            }
+            },
         }
     ];
 
@@ -404,29 +396,29 @@ namespace Cortex.ViewModels
             SeparatorsPaint = new SolidColorPaint
             {
                 StrokeThickness = 1,
-                Color = new SKColor(200, 200, 200),                
+                Color = new SKColor(200, 200, 200),
             },
             SubseparatorsPaint = new SolidColorPaint
             {
                 Color = new SKColor(50, 50, 50),
-                StrokeThickness = 0.5f
+                StrokeThickness = 0.5f,
             },
             SubseparatorsCount = 9,
             ZeroPaint = new SolidColorPaint
             {
                 Color = new SKColor(200, 200, 200),
-                StrokeThickness = 2
+                StrokeThickness = 2,
             },
             TicksPaint = new SolidColorPaint
             {
                 Color = new SKColor(200, 200, 200),
-                StrokeThickness = 1.5f
+                StrokeThickness = 1.5f,
             },
             SubticksPaint = new SolidColorPaint
             {
                 Color = new SKColor(50, 50, 50),
                 StrokeThickness = 1
-            }
+            },
         }
     ];
 
@@ -459,14 +451,13 @@ namespace Cortex.ViewModels
                     new LineSeries<double>
                     {
                         Values = new double[] { 2, 1, 3, 5, 3, 4, 6 },
-                        Fill = null
+                        Fill = null,
                     },
                     new LineSeries<double>
                     {
                         Values = new double[] { 20, 10, 30, 50, 30, 40, 60 },
                         Fill = null
-                    }
-
+                    },
             };
 
         private void LoadSerialPorts()
@@ -513,7 +504,7 @@ namespace Cortex.ViewModels
         }
 
         [RelayCommand]
-        private void RevertChanges()
+        public void RevertChanges()
         {
             refreshStaticData = true;
         }
@@ -528,7 +519,10 @@ namespace Cortex.ViewModels
                     for (int i = 0; i < LiveDataView.ChannelsLiveData.Count; i++)
                     {
                         if (SeriesCollection[i] is not LineSeries<ObservablePoint> series)
+                        {
                             continue;
+                        }
+
                         var ch = LiveDataView.ChannelsLiveData[i];
 
                         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -550,7 +544,9 @@ namespace Cortex.ViewModels
                         values.Add(new ObservablePoint(now, ch.CurrentValue));
 
                         while (values.Count > 0 && values[0].X < cutoff)
+                        {
                             values.RemoveAt(0);
+                        }
                     }
 
                     if (XAxes is { Length: > 0 })
@@ -559,8 +555,6 @@ namespace Cortex.ViewModels
                         XAxes[0].MinLimit = now - (SelectedTimeWindowSeconds * 1000);
                         XAxes[0].MaxLimit = now;
                     }
-
-
                 }
 
                 // Only update settings data on initial load or when user requests refresh
@@ -574,8 +568,22 @@ namespace Cortex.ViewModels
                     SelectedAnalogueInput = SettingsDataView.AnalogueInputsStaticData.FirstOrDefault();
                     SelectedDigitalInput = SettingsDataView.DigitalInputs.FirstOrDefault();
                 }
+                UpdateErrorFlags();
             });
         }
+
+        private void UpdateErrorFlags()
+        {
+            ushort errorFlags = LiveDataView.SystemParams.ErrorFlags;
+
+            OverCurrent = (errorFlags & 0x0001) == 0;
+            OverTemperature = (errorFlags & 0x0002) == 0;
+            UnderVoltage = (errorFlags & 0x0004) != 0;
+            CrcFailed = (errorFlags & 0x0008) != 0;
+            SdOK = (errorFlags & 0x0010) == 0;
+            GpsOK = (errorFlags & 0x0040) == 0;
+        }
+
 
         private DataStructures DeepCopyDataStructures(DataStructures source)
         {
@@ -601,6 +609,15 @@ namespace Cortex.ViewModels
             }
         }
 
+        public void SendOverrideCommand(OutputChannel channel)
+        {
+            // Find the channel index
+            int channelIndex = LiveDataView.ChannelsLiveData.IndexOf(channel);
+            if (channelIndex >= 0)
+            {
+                _portService?.SendOverrideCommand(channelIndex, channel.Override);
+            }
+        }
 
         [RelayCommand]
         private void Disconnect()
@@ -618,8 +635,6 @@ namespace Cortex.ViewModels
 
         public void AddLog(string message)
         {
-            //var timestamp = DateTime.Now.ToString("HH:mm:ss");
-            //LogEntries.Add($"[{timestamp}] {message}");
             LoggingService.AddLog(message);
         }
 
@@ -662,7 +677,7 @@ public partial class InputLabel : ObservableObject
 public class InputDisplayItem
 {
     public byte Pin { get; set; }
-    public string Label { get; set; } = "";
+    public string Label { get; set; } = string.Empty;
 }
 
 public class ChannelTypeDisplay
@@ -670,4 +685,3 @@ public class ChannelTypeDisplay
     public OutputChannel.ChannelType ChannelType { get; set; }
     public required string Label { get; set; }
 }
-

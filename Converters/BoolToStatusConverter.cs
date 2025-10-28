@@ -1,11 +1,7 @@
 ﻿using Avalonia.Data.Converters;
 using Avalonia.Media;
 using System;
-using System.Collections.Generic;
 using System.Globalization;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace Cortex.Converters
 {
@@ -16,6 +12,23 @@ namespace Cortex.Converters
             if (value is bool hasError)
             {
                 return hasError ? "FAULT" : "OK";
+            }
+            return "UNKNOWN";
+        }
+
+        public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        {
+            throw new NotImplementedException();
+        }
+    }
+
+    public class BoolToOverrideStatusConverter : IValueConverter
+    {
+        public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+        {
+            if (value is bool enabled)
+            {
+                return enabled ? "ACTIVE" : "INACTIVE";
             }
             return "UNKNOWN";
         }
@@ -93,6 +106,55 @@ namespace Cortex.Converters
         public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
         {
             throw new NotImplementedException();
+        }
+    }
+
+    public class BoolToTextConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>
+            (bool)value ? "Deactivate" : "Hold 2s to Activate";
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => throw new NotImplementedException();
+    }
+
+    public class ByteToTextConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            if (value is byte b)
+            {
+                return b != 0 ? "ON" : "OFF";
+            }
+            return "OFF";
+        }
+
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            if (value is string s)
+            {
+                return s.Equals("ON", StringComparison.OrdinalIgnoreCase) ? (byte)1 : (byte)0;
+            }
+            return (byte)0;
+        }
+    }
+
+    public class ByteToColorConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            if (value is byte b)
+            {
+                return b != 0 ? Brushes.LightGreen : Brushes.LightGray;
+            }
+            return Brushes.LightGray;
+        }
+
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            if (value is IBrush brush)
+            {
+                return brush == Brushes.LightGreen ? (byte)1 : (byte)0;
+            }
+            return (byte)0;
         }
     }
 }

@@ -1,10 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-namespace Cortex.Models
+﻿namespace Cortex.Models
 {
     public static class Constants
     {
@@ -25,7 +19,7 @@ namespace Cortex.Models
         public const int CHANNEL_NAME_LENGTH = 3;
 
         public const char COMMAND_ID_BEGIN = 'b';
-        
+
         public const char COMMAND_ID_CONFIM = 'c';
 
         public const char COMMAND_ID_REQUEST = 'r';

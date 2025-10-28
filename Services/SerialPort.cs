@@ -1,12 +1,10 @@
 ﻿using Cortex.Models;
 using Cortex.Services;
-using Cortex.ViewModels;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO.Ports;
 using System.Linq;
-using System.Xml;
 using System.Timers;
 using static Cortex.Models.OutputChannel;
 
@@ -32,6 +30,8 @@ public class SerialPortService
     public bool foundECU;
     private int totalBytesSent;
     private int checkSumSend;
+
+    private bool overridding;
 
     /// <summary>
     /// Setting index: 0 = channel, 1 = analogue input, 2 = system
@@ -69,6 +69,7 @@ public class SerialPortService
         dataStructures = new DataStructures();
         settingsData = new DataStructures();
         dataBytes = Array.Empty<byte>();
+        overridding = false;
 
         // create and start the processing timer (100ms)
         _processTimer = new Timer(100);
@@ -76,7 +77,7 @@ public class SerialPortService
         _processTimer.Elapsed += (s, e) =>
         {
             // if a full packet has been flagged, process it on timer thread
-            if (_packetReady)
+            if (_packetReady && !overridding)
             {
                 // ensure only one thread processes the buffer
                 lock (_bufferLock)
@@ -100,7 +101,7 @@ public class SerialPortService
 
     public void UpdateSettingsData(DataStructures newSettingsData)
     {
-        this.settingsData = newSettingsData;
+        settingsData = newSettingsData;
     }
 
     /// <summary>
@@ -148,7 +149,7 @@ public class SerialPortService
                     // Request response for channel and system data
                     case 114:
                         // Data 3 contains number of channels
-                        if (Constants.NUM_OUTPUT_CHANNELS == dataBytes[3])
+                        if (dataBytes[3] == Constants.NUM_OUTPUT_CHANNELS)
                         {
                             int dataIndex = 4; // Start after header, command, and number of channels
 
@@ -157,7 +158,7 @@ public class SerialPortService
                             for (int i = 0; i < dataBytes[3]; i++)
                             {
                                 dataStructures.ChannelsLiveData[i].ChanType = (ChannelType)reader.ReadByte();
-                                dataStructures.ChannelsLiveData[i].CurrentLimitHigh = reader.ReadSingle();
+                                dataStructures.ChannelsLiveData[i].Override = reader.ReadByte() != 0;
                                 dataStructures.ChannelsLiveData[i].CurrentSensePin = reader.ReadByte();
                                 dataStructures.ChannelsLiveData[i].CurrentThresholdHigh = reader.ReadSingle();
                                 dataStructures.ChannelsLiveData[i].CurrentThresholdLow = reader.ReadSingle();
@@ -175,7 +176,7 @@ public class SerialPortService
                             }
 
                             int numAnalogueChannels = reader.ReadByte();
-                            
+
 
                             for (int i = 0; i < numAnalogueChannels; i++) // Analogue input channel data coming in
                             {
@@ -261,15 +262,14 @@ public class SerialPortService
                             AddData(0, true); // Padding
                         }
                         break;
-                    case 1: // Current limit high
-                        if (dataStructures.ChannelsLiveData[channelIndex].CurrentLimitHigh != settingsData.ChannelsStaticData[channelIndex].CurrentLimitHigh)
+                    case 1: // Override
+                        if (dataStructures.ChannelsLiveData[channelIndex].Override != settingsData.ChannelsStaticData[channelIndex].Override)
                         {
                             configChanged = true;
                             AddData((byte)settingIndex, true);
                             AddData((byte)parameterIndex, true);
                             AddData((byte)channelIndex, true);
-                            byte[] floatBytes = BitConverter.GetBytes(settingsData.ChannelsStaticData[channelIndex].CurrentLimitHigh);
-                            foreach (byte b in floatBytes) AddData(b, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].Override ? (byte)1 : (byte)0, true);
                         }
                         break;
                     case 2: // Current threshold high
@@ -453,7 +453,7 @@ public class SerialPortService
             SendCommand(Constants.COMMAND_ID_SKIP);
         }
 
-            return retVal;
+        return retVal;
     }
 
     private void AddData(byte data, bool addToCheck)
@@ -470,134 +470,151 @@ public class SerialPortService
     {
         if (_serialPort.IsOpen)
         {
-            //Debug.WriteLine(DateTime.Now.ToString("HH:mm:ss.fff") + " Serial data received");
-            while (_serialPort.BytesToRead > 0 && _serialPort.IsOpen)
+            try
             {
-                byte readByte = (byte)_serialPort.ReadByte();
 
-                lock (_bufferLock)
-                {
-                    receivedDataBuffer.Add(readByte);
-                }
 
-                if (readByte == Constants.SERIAL_TRAILER1 || foundTrailer1)
+                //Debug.WriteLine(DateTime.Now.ToString("HH:mm:ss.fff") + " Serial data received");
+                while (_serialPort.BytesToRead > 0 && _serialPort.IsOpen)
                 {
-                    foundTrailer1 = true;
-                    if (readByte == Constants.SERIAL_TRAILER2 || foundTrailer2)
+                    byte readByte = (byte)_serialPort.ReadByte();
+
+                    lock (_bufferLock)
                     {
-                        foundTrailer2 = true;
+                        receivedDataBuffer.Add(readByte);
+                    }
+
+                    if (readByte == Constants.SERIAL_TRAILER1 || foundTrailer1)
+                    {
+                        foundTrailer1 = true;
+                        if (readByte == Constants.SERIAL_TRAILER2 || foundTrailer2)
+                        {
+                            foundTrailer2 = true;
+                            switch (lastCommandSent)
+                            {
+                                case Constants.COMMAND_ID_REQUEST:
+                                    // Trailer found and we've read all the bytes. Flag packet ready for processing by timer
+                                    if (_serialPort.BytesToRead == 0)
+                                    {
+                                        UpdateStaticData = true;
+                                        _packetReady = true;
+                                    }
+                                    break;
+                            }
+
+                        }
+                    }
+
+                    if (readByte == Constants.COMMAND_ID_CONFIM)
+                    {
                         switch (lastCommandSent)
                         {
-                            case Constants.COMMAND_ID_REQUEST:
-                                // Trailer found and we've read all the bytes. Flag packet ready for processing by timer
-                                if (_serialPort.BytesToRead == 0)
+                            case Constants.COMMAND_ID_BEGIN:
+                                if (!sendingConfig)
                                 {
-                                    UpdateStaticData = true;
-                                    _packetReady = true;
+                                    foundECU = true;
+                                    lock (_bufferLock)
+                                    {
+                                        receivedDataBuffer.Clear();
+                                    }
+                                    SendCommand(Constants.COMMAND_ID_REQUEST);
                                 }
                                 break;
-                        }
+                            case Constants.COMMAND_ID_NEWCONFIG:
+                            case Constants.COMMAND_ID_SKIP:
+                                if (!overridding)
+                                {
+                                    switch (settingIndex)
+                                    {
+                                        case 0: // Channel data
+                                            parameterIndex++;
+                                            if (parameterIndex > Constants.NUMBER_CHANNEL_PARAMETERS)
+                                            {
+                                                parameterIndex = 0;
+                                                channelIndex++;
+                                                if (channelIndex >= Constants.NUM_OUTPUT_CHANNELS)
+                                                {
+                                                    channelIndex = 0;
+                                                    settingIndex++;
+                                                }
+                                            }
+                                            break;
+                                        case 1: // Analogue input data
+                                            parameterIndex++;
+                                            if (parameterIndex > Constants.NUMBER_ANALOGUE_PARAMETERS)
+                                            {
+                                                parameterIndex = 0;
+                                                analogueIndex++;
+                                                if (analogueIndex >= Constants.NUM_ANALOGUE_INPUTS)
+                                                {
+                                                    analogueIndex = 0;
+                                                    settingIndex++;
+                                                }
+                                            }
+                                            break;
+                                        case 2: // System data
+                                            parameterIndex++;
+                                            if (parameterIndex > Constants.NUMBER_SYSTEM_PARAMETERS)
+                                            {
+                                                sendingConfig = false;
+                                                saveToEEPROM = true;
+                                                // That's it. Finished sending config.
+                                            }
+                                            break;
+                                    }
 
-                    }
-                }
+                                    if (sendingConfig)
+                                    {
+                                        SendConfig();
+                                    }
+                                    else
+                                    {
+                                        parameterIndex = channelIndex = analogueIndex = settingIndex = 0;
+                                    }
 
-                if (readByte == Constants.COMMAND_ID_CONFIM)
-                {
-                    switch (lastCommandSent)
-                    {
-                        case Constants.COMMAND_ID_BEGIN:
-                            if (!sendingConfig)
-                            {
-                                foundECU = true;
+                                    if (saveToEEPROM)
+                                    {
+                                        saveToEEPROM = false;
+                                        SendCommand(Constants.COMMAND_ID_SAVECHANGES);
+
+                                    }
+                                }
+                                else
+                                {
+                                    overridding = false;
+                                    SendCommand(Constants.COMMAND_ID_REQUEST);
+                                }
+                                break;
+
+                            case Constants.COMMAND_ID_SAVECHANGES:
                                 lock (_bufferLock)
                                 {
                                     receivedDataBuffer.Clear();
                                 }
                                 SendCommand(Constants.COMMAND_ID_REQUEST);
-                            }
-                            break;
-                        case Constants.COMMAND_ID_NEWCONFIG:
-                        case Constants.COMMAND_ID_SKIP:
-                            switch (settingIndex)
-                            {
-                                case 0: // Channel data
-                                    parameterIndex++;
-                                    if (parameterIndex > Constants.NUMBER_CHANNEL_PARAMETERS)
-                                    {
-                                        parameterIndex = 0;
-                                        channelIndex++;
-                                        if (channelIndex >= Constants.NUM_OUTPUT_CHANNELS)
-                                        {
-                                            channelIndex = 0;
-                                            settingIndex++;
-                                        }
-                                    }
-                                    break;
-                                case 1: // Analogue input data
-                                    parameterIndex++;
-                                    if (parameterIndex > Constants.NUMBER_ANALOGUE_PARAMETERS)
-                                    {
-                                        parameterIndex = 0;
-                                        analogueIndex++;
-                                        if (analogueIndex >= Constants.NUM_ANALOGUE_INPUTS)
-                                        {
-                                            analogueIndex = 0;
-                                            settingIndex++;
-                                        }
-                                    }
-                                    break;
-                                case 2: // System data
-                                    parameterIndex++;
-                                    if (parameterIndex > Constants.NUMBER_SYSTEM_PARAMETERS)
-                                    {
-                                        sendingConfig = false;
-                                        saveToEEPROM = true;
-                                        // That's it. Finished sending config.
-                                    }
-                                    break;
-                            }
-
-                            if (sendingConfig)
-                            {
-                                SendConfig();
-                            }
-                            else
-                            {
-                                parameterIndex = channelIndex = analogueIndex = settingIndex = 0;
-                            }
-
-                            if (saveToEEPROM)
-                            {
-                                saveToEEPROM = false;
-                                SendCommand(Constants.COMMAND_ID_SAVECHANGES);
-                                
-                            }
-                            break;
-
-                        case Constants.COMMAND_ID_SAVECHANGES:
-                            lock (_bufferLock) 
-                            { 
-                                receivedDataBuffer.Clear(); 
-                            }
-                            SendCommand(Constants.COMMAND_ID_REQUEST);
-                            Debug.WriteLine("Configuration saved to EEPROM.");
-                            LoggingService.AddLog("PDM updated.");
-                            break;
+                                Debug.WriteLine("Configuration saved to EEPROM.");
+                                LoggingService.AddLog("PDM updated.");
+                                break;
+                        }
                     }
-                }
-                else if (readByte == Constants.COMMAND_ID_CHECKSUM_FAIL)
-                {
-                    switch (lastCommandSent)
+                    else if (readByte == Constants.COMMAND_ID_CHECKSUM_FAIL)
                     {
-                        case Constants.COMMAND_ID_NEWCONFIG:
-                            LoggingService.AddLog("PDM reported checksum failure for config data. Try again.");
-                            break;
-                        case Constants.COMMAND_ID_SAVECHANGES:
-                            LoggingService.AddLog("PDM reported checksum failure when saving changes. Try again.");
+                        switch (lastCommandSent)
+                        {
+                            case Constants.COMMAND_ID_NEWCONFIG:
+                                LoggingService.AddLog("PDM reported checksum failure for config data. Try again.");
+                                break;
+                            case Constants.COMMAND_ID_SAVECHANGES:
+                                LoggingService.AddLog("PDM reported checksum failure when saving changes. Try again.");
 
-                            break;
+                                break;
+                        }
                     }
                 }
+            }
+            catch (Exception ex)
+            {
+                // Do nothing. Disconnect was probably hit
             }
         }
     }
@@ -661,7 +678,7 @@ public class SerialPortService
         parameterIndex = 0;
         SendConfig();
         LoggingService.AddLog("Sending config to PDM...");
-    }   
+    }
 
     private void SendCommand(char commandId)
     {
@@ -672,6 +689,39 @@ public class SerialPortService
             _serialPort.Write(data, 0, data.Length);
             lastCommandSent = commandId;
         }
+    }
+
+    /// <summary>
+    /// Send override command immediately for a specific channel
+    /// </summary>
+    public void SendOverrideCommand(int channelIndex, bool overrideState)
+    {
+        if (!_serialPort.IsOpen) return;
+
+        overridding = true;
+
+        _sendBuffer.Clear();
+        checkSumSend = 0;
+
+        // Build packet
+        AddData(Constants.SERIAL_HEADER1, true);
+        AddData(Constants.SERIAL_HEADER2, true);
+        AddData(0, true);  // settingIndex = 0 (Channel data)
+        AddData(1, true);  // parameterIndex = 1 (Override)
+        AddData((byte)channelIndex, true);
+        AddData(overrideState ? (byte)1 : (byte)0, true);
+        AddData(Constants.SERIAL_TRAILER1, true);
+        AddData(Constants.SERIAL_TRAILER2, true);
+        AddData((byte)(checkSumSend & 0xFF), false);
+        AddData((byte)((checkSumSend >> 8) & 0xFF), false);
+        AddData((byte)((checkSumSend >> 16) & 0xFF), false);
+        AddData((byte)((checkSumSend >> 24) & 0xFF), false);
+
+        // Send the command
+        SendCommand(Constants.COMMAND_ID_NEWCONFIG);
+        _serialPort.Write(_sendBuffer.ToArray(), 0, _sendBuffer.Count);
+        _sendBuffer.Clear();
+
     }
 }
 

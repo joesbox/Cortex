@@ -1,17 +1,23 @@
-using Avalonia.Controls;
-using Avalonia.Threading;
-using Cortex.Services;
-using Cortex.ViewModels;
-
-namespace Cortex.Views
+﻿namespace Cortex.Views
 {
+    using System.Threading;
+    using System.Threading.Tasks;
+    using Avalonia.Controls;
+    using Avalonia.Input;
+    using Avalonia.Threading;
+    using Cortex.Models;
+    using Cortex.Services;
+    using Cortex.ViewModels;
+
     public partial class MainWindow : Window, IAppCloser
     {
+        private CancellationTokenSource? _holdCts;
+
         public MainWindow()
         {
             InitializeComponent();
 
-            var vm = new MainWindowViewModel(this);            
+            var vm = new MainWindowViewModel(this);
             DataContext = vm;
 
             vm.PropertyChanged += (_, args) =>
@@ -20,21 +26,30 @@ namespace Cortex.Views
                 {
                     UpdateConnectionState(vm.IsConnected);
                 }
+
                 if (args.PropertyName == nameof(vm.SdOK))
                 {
                     UpdateSDStatus(vm.SdOK);
                 }
+
                 if (args.PropertyName == nameof(vm.OverCurrent))
                 {
                     UpdateCurrentStatus(vm.OverCurrent);
                 }
+
                 if (args.PropertyName == nameof(vm.OverTemperature))
                 {
                     UpdateTempStatus(vm.OverTemperature);
                 }
+
                 if (args.PropertyName == nameof(vm.UnderVoltage))
                 {
                     UpdateVoltStatus(vm.UnderVoltage);
+                }
+
+                if (args.PropertyName == nameof(vm.GpsOK))
+                {
+                    UpdateGPSStatus(vm.GpsOK);
                 }
             };
 
@@ -50,6 +65,7 @@ namespace Cortex.Views
             UpdateCurrentStatus(vm.OverCurrent);
             UpdateTempStatus(vm.OverTemperature);
             UpdateVoltStatus(vm.UnderVoltage);
+            UpdateGPSStatus(vm.GpsOK);
 
             ChannelChart.SizeChanged += (s, e) =>
             {
@@ -58,8 +74,8 @@ namespace Cortex.Views
         }
 
         public void CloseApp()
-        {            
-            this.Close();
+        {
+            Close();
         }
 
         private void UpdateConnectionState(bool isConnected)
@@ -107,6 +123,15 @@ namespace Cortex.Views
             voltRect.Classes.Set("underVolts", undervoltage);
         }
 
+        private void UpdateGPSStatus(bool gpsOk)
+        {
+            GPSIcon.Classes.Set("gpsOK", gpsOk);
+            GPSIcon.Classes.Set("gpsError", !gpsOk);
+
+            GPSIcon.Classes.Set("gpsOK", gpsOk);
+            GPSIcon.Classes.Set("gpsError", !gpsOk);
+        }
+
         private void LogEntries_CollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
         {
             // Ensure the scroll happens on the UI thread
@@ -114,6 +139,84 @@ namespace Cortex.Views
             {
                 LogScrollViewer?.ScrollToEnd();
             });
+        }
+
+
+        private bool _holdCompleted = false;
+
+        private async void OnBorderPointerPressed(object? sender, PointerPressedEventArgs e)
+        {
+            if (sender is Border border && border.DataContext is OutputChannel item)
+            {
+                if (item.Override)
+                {
+                    // Already active → single click deactivates
+                    item.Override = false;
+                    item.HoldProgress = 0;
+
+                    // Send command to device
+                    if (DataContext is MainWindowViewModel vm)
+                    {
+                        vm.SendOverrideCommand(item);
+                    }
+
+                    return;
+                }
+
+                _holdCompleted = false;
+                _holdCts?.Cancel();
+                _holdCts = new CancellationTokenSource();
+                var start = System.DateTime.Now;
+                var holdTime = System.TimeSpan.FromSeconds(2);
+
+                try
+                {
+                    while ((System.DateTime.Now - start) < holdTime)
+                    {
+                        await Task.Delay(50, _holdCts.Token);
+                        var progress = (System.DateTime.Now - start).TotalMilliseconds / holdTime.TotalMilliseconds;
+                        item.HoldProgress = System.Math.Clamp(progress, 0, 1);
+                    }
+
+                    item.Override = true;
+
+                    // Send command to device
+                    if (DataContext is MainWindowViewModel vm)
+                    {
+                        vm.SendOverrideCommand(item);
+                    }
+
+                    item.HoldProgress = 0;
+                    _holdCompleted = true;
+                }
+                catch (TaskCanceledException)
+                {
+                    item.HoldProgress = 0;
+                    _holdCompleted = false;
+                }
+            }
+        }
+
+        private void OnBorderPointerReleased(object? sender, PointerReleasedEventArgs e)
+        {
+            _holdCts?.Cancel();
+
+            if (_holdCompleted)
+            {
+                _holdCompleted = false;
+                return;
+            }
+        }
+
+        private void OnBorderPointerExited(object? sender, PointerEventArgs e)
+        {
+            _holdCts?.Cancel();
+            _holdCompleted = false;
+
+            if (sender is Border border && border.DataContext is OutputChannel item)
+            {
+                item.HoldProgress = 0;
+            }
         }
     }
 }
