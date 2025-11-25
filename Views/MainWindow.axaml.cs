@@ -125,8 +125,8 @@
 
         private void UpdateGPSStatus(bool gpsOk)
         {
-            GPSIcon.Classes.Set("gpsOK", gpsOk);
-            GPSIcon.Classes.Set("gpsError", !gpsOk);
+            GPSRect.Classes.Set("gpsOK", gpsOk);
+            GPSRect.Classes.Set("gpsError", !gpsOk);
 
             GPSIcon.Classes.Set("gpsOK", gpsOk);
             GPSIcon.Classes.Set("gpsError", !gpsOk);
