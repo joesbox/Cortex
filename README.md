@@ -12,9 +12,9 @@ Further details can be found at https://wiki.joeblogs.uk.
 - Live data stream from the controller
 - Channel, input and system parameter configuration updates to the controller 
 - Event log
+- Live charting and data visualisation
 
 ## What's next
-- Live charting and data visualization
 - Configuration save/load
 - Telemetry configuration
 - IMU/GPS/Tracking configuration
