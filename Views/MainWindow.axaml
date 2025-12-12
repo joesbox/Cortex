@@ -853,7 +853,8 @@ mc:Ignorable="d">
 								Series="{Binding SeriesCollection}"
 								XAxes="{Binding XAxes}"
 								YAxes="{Binding YAxes}"
-								ZoomMode="Both" />
+								ZoomMode="None"
+								ClipToBounds="True"/>
 							</Border>
 						</Grid>
 					</Grid>
@@ -1488,7 +1489,7 @@ mc:Ignorable="d">
 										<ComboBox
 										Width="100"
 										Margin="0,0,10,0"
-										ItemsSource="{Binding SettingsDataView.DigitalInputs}"
+										ItemsSource="{Binding SettingsDataView.DigitalInputsLiveData}"
 										DisplayMemberBinding="{Binding InputNumber}"										
 										SelectedItem="{Binding SelectedDigitalInput, Mode=TwoWay}" />
 									</StackPanel>

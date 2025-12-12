@@ -15,7 +15,13 @@ namespace Cortex.Models
         public ObservableCollection<OutputChannel> channelsStaticData;
 
         [ObservableProperty]
-        public ObservableCollection<DigitalInput> digitalInputs;
+        public ObservableCollection<DigitalInput> digitalInputsLiveData;
+
+        [ObservableProperty]
+        public ObservableCollection<DigitalInput> digitalInputsStaticData;
+
+        [ObservableProperty]
+        public ObservableCollection<AnalogueInput> analogueInputsLiveData;
 
         [ObservableProperty]
         public ObservableCollection<AnalogueInput> analogueInputsStaticData;
@@ -38,24 +44,25 @@ namespace Cortex.Models
                 channelsStaticData.Add(new OutputChannel());
             }
 
-            digitalInputs = new ObservableCollection<DigitalInput>();
+            digitalInputsLiveData = new ObservableCollection<DigitalInput>();
+            digitalInputsStaticData = new ObservableCollection<DigitalInput>();
 
             for (int i = 0; i < Constants.NUM_DIGITAL_INPUTS; i++)
             {
-                digitalInputs.Add(new DigitalInput(i + 1, true));
+                digitalInputsStaticData.Add(new DigitalInput(i + 1, true));
+                digitalInputsLiveData.Add(new DigitalInput(i + 1, true));
             }
 
+            analogueInputsLiveData = new ObservableCollection<AnalogueInput>();
             analogueInputsStaticData = new ObservableCollection<AnalogueInput>();
 
             for (int i = 0; i < Constants.NUM_ANALOGUE_INPUTS; i++)
             {
                 analogueInputsStaticData.Add(new AnalogueInput(i + 1, false, false, true, true, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0));
+                analogueInputsLiveData.Add(new AnalogueInput(i + 1, false, false, true, true, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0));
             }
 
             systemParams = new SystemParameters();
-
-
-
         }
     }
 }

@@ -18,8 +18,7 @@ public class SerialPortService
     private DataStructures dataStructures;
 
     private DataStructures settingsData;
-
-    private byte[] dataBytes;
+        
     private List<byte> receivedDataBuffer;
     private bool foundTrailer1;
     private bool foundTrailer2;
@@ -34,7 +33,7 @@ public class SerialPortService
     private bool overridding;
 
     /// <summary>
-    /// Setting index: 0 = channel, 1 = analogue input, 2 = system
+    /// Setting index: 0 = channel, 1 = analogue input, 2 = system, 3 = digital
     /// </summary>
     private int settingIndex;
 
@@ -45,6 +44,7 @@ public class SerialPortService
 
     private int channelIndex;
     private int analogueIndex;
+    private int digitalIndex;
 
 
     public bool UpdateStaticData = false;
@@ -56,12 +56,14 @@ public class SerialPortService
     private readonly object _bufferLock = new object();
     private volatile bool _packetReady = false;
 
-    public SerialPortService(string portName, int baudRate = 115200)
+    private byte[] dataBytes = new byte[4096]; 
+    private byte[] checkSumArray = new byte[4];
+    private int dataLength;
+
+    public SerialPortService(string portName, int baudRate = 921600)
     {
-        _serialPort = new SerialPort(portName, baudRate);
-        _serialPort.Parity = Parity.Even;
-        _serialPort.DataBits = 8;
-        _serialPort.StopBits = StopBits.Two;
+        _serialPort = new SerialPort(portName, baudRate);        
+        _serialPort.DataBits = 8;        
         _serialPort.RtsEnable = true;
         _serialPort.DtrEnable = true;
         _serialPort.DataReceived += OnDataReceived;
@@ -72,29 +74,32 @@ public class SerialPortService
         overridding = false;
 
         // create and start the processing timer (100ms)
-        _processTimer = new Timer(100);
+        _processTimer = new Timer(50);
         _processTimer.AutoReset = true;
         _processTimer.Elapsed += (s, e) =>
         {
             // if a full packet has been flagged, process it on timer thread
-            if (_packetReady && !overridding)
+            if (!_packetReady || overridding)
             {
-                // ensure only one thread processes the buffer
-                lock (_bufferLock)
+                return;
+            }
+
+            // ensure only one thread processes the buffer
+            lock (_bufferLock)
+            {
+                // clear flag before processing to avoid re-entrancy
+                _packetReady = false;
+                // processData will internally copy and clear the buffer
+                try
                 {
-                    // clear flag before processing to avoid re-entrancy
-                    _packetReady = false;
-                    // processData will internally copy and clear the buffer
-                    try
-                    {
-                        processData();
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.WriteLine($"Error in processData: {ex.Message}");
-                    }
+                    processData();
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Error in processData: {ex.Message}");
                 }
             }
+
         };
         _processTimer.Start();
     }
@@ -111,14 +116,21 @@ public class SerialPortService
     private bool processData()
     {
         bool retVal = false;
-        byte[] checkSumArray = new byte[4];
+        //byte[] checkSumArray = new byte[4];
         // Reset trailer flag
         foundTrailer1 = foundTrailer2 = false;
 
         // copy buffer to local array under lock
         lock (_bufferLock)
         {
-            dataBytes = receivedDataBuffer.ToArray();
+            dataLength = receivedDataBuffer.Count;
+
+            if (dataLength > dataBytes.Length)
+            {
+                dataBytes = new byte[dataLength * 2]; // Only resize when needed
+            }
+
+            receivedDataBuffer.CopyTo(dataBytes, 0);
             receivedDataBuffer.Clear();
         }
 
@@ -128,11 +140,13 @@ public class SerialPortService
         }
 
         int checkSum = 0;
+        for (int i = 0; i < dataLength - 4; i++)
+        {
+            checkSum += dataBytes[i];
+        }
 
-        checkSum = dataBytes.Take(dataBytes.Length - 4).Sum(b => (int)b);
-
-        Array.Copy(dataBytes, dataBytes.Length - 4, checkSumArray, 0, 4);
-
+        // Copy checksum bytes to reusable array
+        Array.Copy(dataBytes, dataLength - 4, checkSumArray, 0, 4);
         pdmCheckSum = BitConverter.ToUInt32(checkSumArray, 0);
 
         // First two bytes are the header
@@ -180,19 +194,19 @@ public class SerialPortService
 
                             for (int i = 0; i < numAnalogueChannels; i++) // Analogue input channel data coming in
                             {
-                                dataStructures.AnalogueInputsStaticData[i].PullUpEnable = reader.ReadByte() != 0;
-                                dataStructures.AnalogueInputsStaticData[i].PullDownEnable = reader.ReadByte() != 0;
-                                dataStructures.AnalogueInputsStaticData[i].IsDigital = reader.ReadByte() != 0;
-                                dataStructures.AnalogueInputsStaticData[i].OnThreshold = reader.ReadSingle();
-                                dataStructures.AnalogueInputsStaticData[i].OffThreshold = reader.ReadSingle();
-                                dataStructures.AnalogueInputsStaticData[i].InputScaleLow = reader.ReadSingle();
-                                dataStructures.AnalogueInputsStaticData[i].InputScaleHigh = reader.ReadSingle();
-                                dataStructures.AnalogueInputsStaticData[i].PwmLowValue = reader.ReadByte();
-                                dataStructures.AnalogueInputsStaticData[i].PwmHighValue = reader.ReadByte();
+                                dataStructures.AnalogueInputsLiveData[i].PullUpEnable = reader.ReadByte() != 0;
+                                dataStructures.AnalogueInputsLiveData[i].PullDownEnable = reader.ReadByte() != 0;
+                                dataStructures.AnalogueInputsLiveData[i].IsDigital = reader.ReadByte() != 0;
+                                dataStructures.AnalogueInputsLiveData[i].OnThreshold = reader.ReadSingle();
+                                dataStructures.AnalogueInputsLiveData[i].OffThreshold = reader.ReadSingle();
+                                dataStructures.AnalogueInputsLiveData[i].InputScaleLow = reader.ReadSingle();
+                                dataStructures.AnalogueInputsLiveData[i].InputScaleHigh = reader.ReadSingle();
+                                dataStructures.AnalogueInputsLiveData[i].PwmLowValue = reader.ReadByte();
+                                dataStructures.AnalogueInputsLiveData[i].PwmHighValue = reader.ReadByte();
                             }
 
                             dataStructures.SystemParams.SystemTemperature = reader.ReadInt32();
-                            dataStructures.SystemParams.CANResEnabled = reader.ReadByte();
+                            dataStructures.SystemParams.CANResEnabled = reader.ReadByte() != 0;
                             dataStructures.SystemParams.VBatt = (float)Math.Round(reader.ReadSingle(), 1);
                             dataStructures.SystemParams.SystemCurrent = reader.ReadSingle();
                             dataStructures.SystemParams.SystemCurrentLimit = reader.ReadByte();
@@ -201,10 +215,10 @@ public class SerialPortService
                             dataStructures.SystemParams.SystemDataCANID = reader.ReadUInt16();
                             dataStructures.SystemParams.ConfigDataCANID = reader.ReadUInt16();
                             dataStructures.SystemParams.IMUWakeWindow = reader.ReadUInt32();
-                            dataStructures.SystemParams.SpeedUnitPref = reader.ReadByte();
-                            dataStructures.SystemParams.DistanceUnitPref = reader.ReadByte();
-                            dataStructures.SystemParams.AllowData = reader.ReadByte();
-                            dataStructures.SystemParams.AllowGPS = reader.ReadByte();
+                            dataStructures.SystemParams.SpeedUnitPref = reader.ReadByte() != 0;
+                            dataStructures.SystemParams.DistanceUnitPref = reader.ReadByte() != 0;
+                            dataStructures.SystemParams.AllowData = reader.ReadByte() != 0;
+                            dataStructures.SystemParams.AllowGPS = reader.ReadByte() != 0;
                             dataStructures.SystemParams.BattSOC = reader.ReadInt32();
                             dataStructures.SystemParams.BattSOH = reader.ReadInt32();
 
@@ -213,6 +227,7 @@ public class SerialPortService
                                 // Copy live data to static data
                                 dataStructures.ChannelsStaticData = dataStructures.ChannelsLiveData;
                                 dataStructures.SystemParamsStaticData = dataStructures.SystemParams;
+                                dataStructures.AnalogueInputsStaticData = dataStructures.AnalogueInputsLiveData;
                                 UpdateStaticData = false;
                             }
                         }
@@ -241,6 +256,7 @@ public class SerialPortService
         checkSumSend = 0;
         _sendBuffer.Clear();
         bool configChanged = false;
+
         AddData(Constants.SERIAL_HEADER1, true);
         AddData(Constants.SERIAL_HEADER2, true);
 
@@ -280,7 +296,10 @@ public class SerialPortService
                             AddData((byte)parameterIndex, true);
                             AddData((byte)channelIndex, true);
                             byte[] floatBytes = BitConverter.GetBytes(settingsData.ChannelsStaticData[channelIndex].CurrentThresholdHigh);
-                            foreach (byte b in floatBytes) AddData(b, true);
+                            foreach (byte b in floatBytes)
+                            {
+                                AddData(b, true);
+                            }
                         }
                         break;
                     case 3: // Current threshold low
@@ -291,7 +310,10 @@ public class SerialPortService
                             AddData((byte)parameterIndex, true);
                             AddData((byte)channelIndex, true);
                             byte[] floatBytes = BitConverter.GetBytes(settingsData.ChannelsStaticData[channelIndex].CurrentThresholdLow);
-                            foreach (byte b in floatBytes) AddData(b, true);
+                            foreach (byte b in floatBytes)
+                            {
+                                AddData(b, true);
+                            }
                         }
                         break;
                     case 4: // Enabled
@@ -367,7 +389,10 @@ public class SerialPortService
                             AddData((byte)parameterIndex, true);
                             AddData((byte)channelIndex, true);
                             byte[] floatBytes = BitConverter.GetBytes((int)settingsData.ChannelsStaticData[channelIndex].InrushDelay * 1000);
-                            foreach (byte b in floatBytes) AddData(b, true);
+                            foreach (byte b in floatBytes)
+                            {
+                                AddData(b, true);
+                            }
                         }
                         break;
                     case 10: // Name
@@ -409,15 +434,282 @@ public class SerialPortService
 
                             Debug.WriteLine("Setting run on time to " + settingsData.ChannelsStaticData[channelIndex].RunOnTime + " seconds.");
                             byte[] floatBytes = BitConverter.GetBytes((int)settingsData.ChannelsStaticData[channelIndex].RunOnTime * 1000);
-                            foreach (byte b in floatBytes) AddData(b, true);
+                            foreach (byte b in floatBytes)
+                            {
+                                AddData(b, true);
+                            }
                         }
                         break;
                 }
 
                 break;
             case 1: // Analogue input data
+                switch (parameterIndex)
+                {
+                    case 0: // Pull-up enable
+                        if (dataStructures.AnalogueInputsLiveData[analogueIndex].PullUpEnable != settingsData.AnalogueInputsStaticData[analogueIndex].PullUpEnable)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)analogueIndex, true);
+                            AddData(settingsData.AnalogueInputsStaticData[analogueIndex].PullUpEnable ? (byte)1 : (byte)0, true);
+                        }
+                        break;
+                    case 1: // Pull-down enable
+                        if (dataStructures.AnalogueInputsLiveData[analogueIndex].PullDownEnable != settingsData.AnalogueInputsStaticData[analogueIndex].PullDownEnable)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)analogueIndex, true);
+                            AddData(settingsData.AnalogueInputsStaticData[analogueIndex].PullDownEnable ? (byte)1 : (byte)0, true);
+                        }
+                        break;
+                    case 2: // Is digital
+                        if (dataStructures.AnalogueInputsLiveData[analogueIndex].IsDigital != settingsData.AnalogueInputsStaticData[analogueIndex].IsDigital)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)analogueIndex, true);
+                            AddData(settingsData.AnalogueInputsStaticData[analogueIndex].IsDigital ? (byte)1 : (byte)0, true);
+                        }
+                        break;
+
+                    case 3: // Is threshold
+                        if (dataStructures.AnalogueInputsLiveData[analogueIndex].IsThreshold != settingsData.AnalogueInputsStaticData[analogueIndex].IsThreshold)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)analogueIndex, true);
+                            AddData(settingsData.AnalogueInputsStaticData[analogueIndex].IsThreshold ? (byte)1 : (byte)0, true);
+                        }
+                        break;
+                    case 4: // On threshold
+                        if (dataStructures.AnalogueInputsLiveData[analogueIndex].OnThreshold != settingsData.AnalogueInputsStaticData[analogueIndex].OnThreshold)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)analogueIndex, true);
+                            byte[] floatBytes = BitConverter.GetBytes(settingsData.AnalogueInputsStaticData[analogueIndex].OnThreshold);
+                            foreach (byte b in floatBytes)
+                            {
+                                AddData(b, true);
+                            }
+                        }
+                        break;
+                    case 5: // Off threshold
+                        if (dataStructures.AnalogueInputsLiveData[analogueIndex].OffThreshold != settingsData.AnalogueInputsStaticData[analogueIndex].OffThreshold)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)analogueIndex, true);
+                            byte[] floatBytes = BitConverter.GetBytes(settingsData.AnalogueInputsStaticData[analogueIndex].OffThreshold);
+                            foreach (byte b in floatBytes)
+                            {
+                                AddData(b, true);
+                            }
+                        }
+                        break;
+                    case 6: // Input scale low
+                        if (dataStructures.AnalogueInputsLiveData[analogueIndex].InputScaleLow != settingsData.AnalogueInputsStaticData[analogueIndex].InputScaleLow)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)analogueIndex, true);
+                            byte[] floatBytes = BitConverter.GetBytes(settingsData.AnalogueInputsStaticData[analogueIndex].InputScaleLow);
+                            foreach (byte b in floatBytes)
+                            {
+                                AddData(b, true);
+                            }
+                        }
+                        break;
+                    case 7: // Input scale high
+                        if (dataStructures.AnalogueInputsLiveData[analogueIndex].InputScaleHigh != settingsData.AnalogueInputsStaticData[analogueIndex].InputScaleHigh)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)analogueIndex, true);
+                            byte[] floatBytes = BitConverter.GetBytes(settingsData.AnalogueInputsStaticData[analogueIndex].InputScaleHigh);
+                            foreach (byte b in floatBytes)
+                            {
+                                AddData(b, true);
+                            }
+                        }
+                        break;
+                    case 8: // PWM low value
+                        if (dataStructures.AnalogueInputsLiveData[analogueIndex].PwmLowValue != settingsData.AnalogueInputsStaticData[analogueIndex].PwmLowValue)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)analogueIndex, true);
+                            AddData(settingsData.AnalogueInputsStaticData[analogueIndex].PwmLowValue, true);
+                        }
+                        break;
+                    case 9: // PWM high value
+                        if (dataStructures.AnalogueInputsLiveData[analogueIndex].PwmHighValue != settingsData.AnalogueInputsStaticData[analogueIndex].PwmHighValue)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)analogueIndex, true);
+                            AddData(settingsData.AnalogueInputsStaticData[analogueIndex].PwmHighValue, true);
+                        }
+                        break;
+
+
+                }
                 break;
             case 2: // System data
+                switch (parameterIndex)
+                {
+                    case 0: // CAN Resistor enabled
+                        if (dataStructures.SystemParamsStaticData.CANResEnabled != settingsData.SystemParamsStaticData.CANResEnabled)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData(settingsData.SystemParamsStaticData.CANResEnabled ? (byte)1 : (byte)0, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                        }
+                        break;
+                    case 1: // Channel data CAN ID
+                        if (dataStructures.SystemParamsStaticData.ChannelDataCANID != settingsData.SystemParamsStaticData.ChannelDataCANID)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            byte[] uintBytes = BitConverter.GetBytes(settingsData.SystemParamsStaticData.ChannelDataCANID);
+                            foreach (byte b in uintBytes)
+                            {
+                                AddData(b, true);
+                            }
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                        }
+                        break;
+                    case 2: // System data CAN ID
+                        if (dataStructures.SystemParamsStaticData.SystemDataCANID != settingsData.SystemParamsStaticData.SystemDataCANID)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            byte[] uintBytes = BitConverter.GetBytes(settingsData.SystemParamsStaticData.SystemDataCANID);
+                            foreach (byte b in uintBytes)
+                            {
+                                AddData(b, true);
+                            }
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                        }
+                        break;
+                    case 3: // Config data CAN ID
+                        if (dataStructures.SystemParamsStaticData.ConfigDataCANID != settingsData.SystemParamsStaticData.ConfigDataCANID)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            byte[] uintBytes = BitConverter.GetBytes(settingsData.SystemParamsStaticData.ConfigDataCANID);
+                            foreach (byte b in uintBytes)
+                            {
+                                AddData(b, true);
+                            }
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                        }
+                        break;
+                    case 4: // IMU wake window
+                        if (dataStructures.SystemParamsStaticData.IMUWakeWindow != settingsData.SystemParamsStaticData.IMUWakeWindow)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            byte[] uintBytes = BitConverter.GetBytes(settingsData.SystemParamsStaticData.IMUWakeWindow);
+                            foreach (byte b in uintBytes)
+                            {
+                                AddData(b, true);
+                            }
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                        }
+                        break;
+                    case 5: // Speed unit preference
+                        if (dataStructures.SystemParamsStaticData.SpeedUnitPref != settingsData.SystemParamsStaticData.SpeedUnitPref)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData(settingsData.SystemParamsStaticData.SpeedUnitPref ? (byte)1 : (byte)0, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                        }
+                        break;
+                    case 6: // Distance unit preference
+                        if (dataStructures.SystemParamsStaticData.DistanceUnitPref != settingsData.SystemParamsStaticData.DistanceUnitPref)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData(settingsData.SystemParamsStaticData.DistanceUnitPref ? (byte)1 : (byte)0, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                        }
+                        break;
+                    case 7: // Allow GSM data
+                        if (dataStructures.SystemParamsStaticData.AllowData != settingsData.SystemParamsStaticData.AllowData)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData(settingsData.SystemParamsStaticData.AllowData ? (byte)1 : (byte)0, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                        }
+                        break;
+                    case 8: // Allow GPS data
+                        if (dataStructures.SystemParamsStaticData.AllowGPS != settingsData.SystemParamsStaticData.AllowGPS)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData(settingsData.SystemParamsStaticData.AllowGPS ? (byte)1 : (byte)0, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                        }
+                        break;
+                }
+                break;
+
+            case 3: // Digital inputs
+                switch (parameterIndex)
+                {
+                    case 0: // Digital input active high
+                        if (dataStructures.DigitalInputsLiveData[digitalIndex].IsActiveHigh != settingsData.DigitalInputsStaticData[digitalIndex].IsActiveHigh)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)digitalIndex, true);
+                            AddData(settingsData.DigitalInputsStaticData[digitalIndex].IsActiveHigh ? (byte)1 : (byte)0, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                        }
+                        break;
+                }
                 break;
         }
 
@@ -430,11 +722,22 @@ public class SerialPortService
 
         if (configChanged)
         {
-            Debug.Write("Setting, parameter, channel: ");
-            Debug.Write(settingIndex);
-            Debug.Write(", ");
-            Debug.Write(parameterIndex);
-            Debug.Write(", ");
+            switch (settingIndex)
+                {
+                case 0:
+                    Debug.WriteLine("Sending channel " + channelIndex + " parameter " + parameterIndex);
+                    break;
+                case 1:
+                    Debug.WriteLine("Sending analogue input " + analogueIndex + " parameter " + parameterIndex);
+                    break;
+                case 2:
+                    Debug.WriteLine("Sending system parameter " + parameterIndex);
+                    break;
+                case 3:
+                    Debug.WriteLine("Sending digital input " + digitalIndex + " parameter " + parameterIndex);
+                    break;
+            }
+          
             Debug.WriteLine(channelIndex);
             if (_serialPort.IsOpen && _serialPort != null)
             {
@@ -471,10 +774,7 @@ public class SerialPortService
         if (_serialPort.IsOpen)
         {
             try
-            {
-
-
-                //Debug.WriteLine(DateTime.Now.ToString("HH:mm:ss.fff") + " Serial data received");
+            {                
                 while (_serialPort.BytesToRead > 0 && _serialPort.IsOpen)
                 {
                     byte readByte = (byte)_serialPort.ReadByte();
@@ -556,12 +856,21 @@ public class SerialPortService
                                             parameterIndex++;
                                             if (parameterIndex > Constants.NUMBER_SYSTEM_PARAMETERS)
                                             {
+                                                parameterIndex = 0;
+                                                settingIndex++;
+                                            }
+                                            break;
+                                        case 3: // Digital inputs
+                                            parameterIndex++;
+                                            if (parameterIndex > Constants.NUMBER_DIGITAL_INPUT_PARAMETERS)
+                                            {
+                                                digitalIndex++;
                                                 sendingConfig = false;
                                                 saveToEEPROM = true;
                                                 // That's it. Finished sending config.
                                             }
                                             break;
-                                    }
+                                    }                                    
 
                                     if (sendingConfig)
                                     {
@@ -569,7 +878,7 @@ public class SerialPortService
                                     }
                                     else
                                     {
-                                        parameterIndex = channelIndex = analogueIndex = settingIndex = 0;
+                                        parameterIndex = channelIndex = analogueIndex = settingIndex = digitalIndex = 0;
                                     }
 
                                     if (saveToEEPROM)

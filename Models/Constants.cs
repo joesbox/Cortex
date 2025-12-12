@@ -40,8 +40,10 @@
 
         public const int NUMBER_CHANNEL_PARAMETERS = 13;
 
-        public const int NUMBER_ANALOGUE_PARAMETERS = 9;
+        public const int NUMBER_ANALOGUE_PARAMETERS = 10;
 
         public const int NUMBER_SYSTEM_PARAMETERS = 9;
+
+        public const int NUMBER_DIGITAL_INPUT_PARAMETERS = 1;
     }
 }

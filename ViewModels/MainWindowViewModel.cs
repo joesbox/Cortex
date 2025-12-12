@@ -1,10 +1,4 @@
-﻿using System;
-using System.Collections.ObjectModel;
-using System.Diagnostics;
-using System.IO.Ports;
-using System.Linq;
-using System.Text.Json;
-using CommunityToolkit.Mvvm.ComponentModel;
+﻿using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Cortex.Models;
 using Cortex.Services;
@@ -14,6 +8,24 @@ using LiveChartsCore.Kernel.Sketches;
 using LiveChartsCore.SkiaSharpView;
 using LiveChartsCore.SkiaSharpView.Painting;
 using SkiaSharp;
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Diagnostics;
+using System.IO.Ports;
+using System.Linq;
+using System.Text.Json;
+using System.Timers;
+
+/*
+
+ * Version history:
+    Date              Version       Description
+    ----              -------       ------------------------------------------------------------
+    2025-12-12        v0.1.0        Fixes:
+                                    - Send analogue input parameters when sending config.
+                                    - Some UI optimisations
+ */
 
 namespace Cortex.ViewModels
 {
@@ -141,6 +153,11 @@ namespace Cortex.ViewModels
 
         private readonly System.Timers.Timer updateTimer;
         private readonly DateTime startTime = DateTime.UtcNow;
+
+        private readonly System.Timers.Timer _uiUpdateTimer;
+        private DataStructures _pendingLiveData;
+        private readonly object _pendingDataLock = new();
+        private bool _hasPendingData = false;
 
         private InputDisplayItem? _selectedInputItem;
 
@@ -282,7 +299,7 @@ namespace Cortex.ViewModels
 
             SelectedChannelLabel = ChannelDisplayList.FirstOrDefault();
 
-            SelectedDigitalInput = SettingsDataView.DigitalInputs.FirstOrDefault();
+            SelectedDigitalInput = SettingsDataView.DigitalInputsStaticData.FirstOrDefault();
 
             SelectedAnalogueInput = SettingsDataView.AnalogueInputsStaticData.FirstOrDefault();
 
@@ -328,23 +345,19 @@ namespace Cortex.ViewModels
                 {
                     if (srs is LineSeries<ObservablePoint> lineSeries)
                     {
+                        lineSeries.LineSmoothness = 0;
                         if (lineSeries.Stroke is SolidColorPaint paint)
                         {
                             paint.StrokeThickness = 1.0f;
                         }
                     }
                 }
-
-                // Keep updating points as values change
-                ch.PropertyChanged += (s, e) =>
-                {
-                    if (e.PropertyName == nameof(ch.CurrentValue))
-                    {
-                        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                        points.Add(new ObservablePoint(now, ch.CurrentValue));
-                    }
-                };
             }
+
+            _uiUpdateTimer = new System.Timers.Timer(50);
+            _uiUpdateTimer.Elapsed += OnUIUpdateTimerElapsed;
+            _uiUpdateTimer.AutoReset = true;
+            _uiUpdateTimer.Start();
         }
 
         public ICartesianAxis[] YAxes { get; set; } = [
@@ -441,7 +454,7 @@ namespace Cortex.ViewModels
 
             if (SelectedDigitalInput == null)
             {
-                SelectedDigitalInput = SettingsDataView.DigitalInputs.FirstOrDefault();
+                SelectedDigitalInput = SettingsDataView.DigitalInputsStaticData.FirstOrDefault();
             }
         }
 
@@ -511,65 +524,373 @@ namespace Cortex.ViewModels
 
         private void _portService_DataUpdated(DataStructures obj)
         {
+            lock (_pendingDataLock)
+            {
+                _pendingLiveData = obj;
+                _hasPendingData = true;
+            }
+        }
+
+        private void OnUIUpdateTimerElapsed(object sender, ElapsedEventArgs e)
+        {
+            DataStructures dataToProcess;
+
+            lock (_pendingDataLock)
+            {
+                if (!_hasPendingData) return;
+
+                dataToProcess = _pendingLiveData;
+                _hasPendingData = false;
+            }
+
+            // Now marshal to UI thread ONCE per timer tick
             Avalonia.Threading.Dispatcher.UIThread.Post(() =>
             {
-                LiveDataView = obj;
-                lock (_chartLock)
-                {
-                    for (int i = 0; i < LiveDataView.ChannelsLiveData.Count; i++)
-                    {
-                        if (SeriesCollection[i] is not LineSeries<ObservablePoint> series)
-                        {
-                            continue;
-                        }
-
-                        var ch = LiveDataView.ChannelsLiveData[i];
-
-                        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                        var cutoff = now - (SelectedTimeWindowSeconds * 1000);
-
-                        if (series.Values is not ObservableCollection<ObservablePoint> values)
-                        {
-                            values = new ObservableCollection<ObservablePoint>();
-                            series.Values = values;
-                        }
-
-                        if (series.Stroke is SolidColorPaint paint)
-                        {
-                            paint.StrokeThickness = 1.0f;
-                        }
-                        YAxes[0].MinLimit = null;
-                        YAxes[0].MaxLimit = null;
-
-                        values.Add(new ObservablePoint(now, ch.CurrentValue));
-
-                        while (values.Count > 0 && values[0].X < cutoff)
-                        {
-                            values.RemoveAt(0);
-                        }
-                    }
-
-                    if (XAxes is { Length: > 0 })
-                    {
-                        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                        XAxes[0].MinLimit = now - (SelectedTimeWindowSeconds * 1000);
-                        XAxes[0].MaxLimit = now;
-                    }
-                }
-
-                // Only update settings data on initial load or when user requests refresh
-                if (refreshStaticData)
-                {
-                    // Initial load - copy data to settings
-                    refreshStaticData = false;
-                    SettingsDataView = DeepCopyDataStructures(obj);
-                    _portService?.UpdateSettingsData(SettingsDataView);
-                    OnSelectedChannelIndexChanged(SelectedChannelIndex, SelectedChannelIndex);
-                    SelectedAnalogueInput = SettingsDataView.AnalogueInputsStaticData.FirstOrDefault();
-                    SelectedDigitalInput = SettingsDataView.DigitalInputs.FirstOrDefault();
-                }
-                UpdateErrorFlags();
+                UpdateUIWithData(dataToProcess);
             });
+        }
+
+        private void UpdateUIWithData(DataStructures data)
+        {
+            // Update live data in place
+            UpdateLiveDataInPlace(data);
+
+            // Update charts
+            UpdateCharts(LiveDataView);  // Use existing LiveDataView
+
+            // Update error flags
+            UpdateErrorFlags();
+
+            // Handle static data refresh
+            if (refreshStaticData)
+            {
+                refreshStaticData = false;
+                SettingsDataView = DeepCopyDataStructures(data);
+                _portService?.UpdateSettingsData(SettingsDataView);
+                OnSelectedChannelIndexChanged(SelectedChannelIndex, SelectedChannelIndex);
+                SelectedAnalogueInput = SettingsDataView.AnalogueInputsStaticData.FirstOrDefault();
+                SelectedDigitalInput = SettingsDataView.DigitalInputsStaticData.FirstOrDefault();
+            }
+        }
+
+        private void UpdateLiveDataInPlace(DataStructures newData)
+        {
+            if (newData == null)
+            {
+                return;
+            }
+
+            // Update channel data without replacing collections
+            int channelCount = Math.Min(newData.ChannelsLiveData.Count, LiveDataView.ChannelsLiveData.Count);
+            for (int i = 0; i < channelCount; i++)
+            {
+                var target = LiveDataView.ChannelsLiveData[i];
+                var source = newData.ChannelsLiveData[i];
+
+                // Update all OutputChannel properties
+                if (target.ChanType != source.ChanType)
+                {
+                    target.ChanType = source.ChanType;
+                }
+
+                if (target.Override != source.Override)
+                {
+                    target.Override = source.Override;
+                }
+
+                if (target.CurrentSensePin != source.CurrentSensePin)
+                {
+                    target.CurrentSensePin = source.CurrentSensePin;
+                }
+
+                if (target.CurrentThresholdHigh != source.CurrentThresholdHigh)
+                {
+                    target.CurrentThresholdHigh = source.CurrentThresholdHigh;
+                }
+
+                if (target.CurrentThresholdLow != source.CurrentThresholdLow)
+                {
+                    target.CurrentThresholdLow = source.CurrentThresholdLow;
+                }
+
+                if (target.CurrentValue != source.CurrentValue)
+                {
+                    target.CurrentValue = source.CurrentValue;
+                }
+
+                if (target.Enabled != source.Enabled)
+                {
+                    target.Enabled = source.Enabled;
+                }
+
+                if (target.ErrorFlags != source.ErrorFlags)
+                {
+                    target.ErrorFlags = source.ErrorFlags;
+                }
+
+                if (target.GroupNumber != source.GroupNumber)
+                {
+                    target.GroupNumber = source.GroupNumber;
+                }
+
+                if (target.InputControlPin != source.InputControlPin)
+                {
+                    target.InputControlPin = source.InputControlPin;
+                }
+
+                if (target.MultiChannel != source.MultiChannel)
+                {
+                    target.MultiChannel = source.MultiChannel;
+                }
+
+                if (target.RetryCount != source.RetryCount)
+                {
+                    target.RetryCount = source.RetryCount;
+                }
+
+                if (target.InrushDelay != source.InrushDelay)
+                {
+                    target.InrushDelay = source.InrushDelay;
+                }
+
+                // Update Name array if different
+                if (source.Name != null && (target.Name == null || !target.Name.SequenceEqual(source.Name)))
+                {
+                    target.Name = (char[])source.Name.Clone();
+                }
+
+                if (target.RunOn != source.RunOn)
+                {
+                    target.RunOn = source.RunOn;
+                }
+
+                if (target.RunOnTime != source.RunOnTime)
+                {
+                    target.RunOnTime = source.RunOnTime;
+                }
+
+                if (target.PWMSetDuty != source.PWMSetDuty)
+                {
+                    target.PWMSetDuty = source.PWMSetDuty;
+                }
+            }
+
+            // Update analogue inputs
+            int analogueCount = Math.Min(newData.AnalogueInputsLiveData.Count, LiveDataView.AnalogueInputsLiveData.Count);
+            for (int i = 0; i < analogueCount; i++)
+            {
+                var target = LiveDataView.AnalogueInputsLiveData[i];
+                var source = newData.AnalogueInputsLiveData[i];
+
+                if (target.PullUpEnable != source.PullUpEnable)
+                {
+                    target.PullUpEnable = source.PullUpEnable;
+                }
+
+                if (target.PullDownEnable != source.PullDownEnable)
+                {
+                    target.PullDownEnable = source.PullDownEnable;
+                }
+
+                if (target.IsDigital != source.IsDigital)
+                {
+                    target.IsDigital = source.IsDigital;
+                }
+
+                if (target.OnThreshold != source.OnThreshold)
+                {
+                    target.OnThreshold = source.OnThreshold;
+                }
+
+                if (target.OffThreshold != source.OffThreshold)
+                {
+                    target.OffThreshold = source.OffThreshold;
+                }
+
+                if (target.InputScaleLow != source.InputScaleLow)
+                {
+                    target.InputScaleLow = source.InputScaleLow;
+                }
+
+                if (target.InputScaleHigh != source.InputScaleHigh)
+                {
+                    target.InputScaleHigh = source.InputScaleHigh;
+                }
+
+                if (target.PwmLowValue != source.PwmLowValue)
+                {
+                    target.PwmLowValue = source.PwmLowValue;
+                }
+
+                if (target.PwmHighValue != source.PwmHighValue)
+                {
+                    target.PwmHighValue = source.PwmHighValue;
+                }
+            }
+
+            // Update digital inputs
+            int digitalCount = Math.Min(newData.DigitalInputsStaticData.Count, LiveDataView.DigitalInputsLiveData.Count);
+            for (int i = 0; i < digitalCount; i++)
+            {
+                var target = LiveDataView.DigitalInputsLiveData[i];
+                var source = newData.DigitalInputsLiveData[i];
+
+                if (target.IsActiveHigh != source.IsActiveHigh)
+                {
+                    target.IsActiveHigh = source.IsActiveHigh;
+                }
+            }
+
+            // Update system params
+            var targetSys = LiveDataView.SystemParams;
+            var sourceSys = newData.SystemParams;
+
+            if (targetSys.SystemTemperature != sourceSys.SystemTemperature)
+            {
+                targetSys.SystemTemperature = sourceSys.SystemTemperature;
+            }
+
+            if (targetSys.CANResEnabled != sourceSys.CANResEnabled)
+            {
+                targetSys.CANResEnabled = sourceSys.CANResEnabled;
+            }
+
+            if (targetSys.VBatt != sourceSys.VBatt)
+            {
+                targetSys.VBatt = sourceSys.VBatt;
+            }
+
+            if (targetSys.SystemCurrent != sourceSys.SystemCurrent)
+            {
+                targetSys.SystemCurrent = sourceSys.SystemCurrent;
+            }
+
+            if (targetSys.SystemCurrentLimit != sourceSys.SystemCurrentLimit)
+            {
+                targetSys.SystemCurrentLimit = sourceSys.SystemCurrentLimit;
+            }
+
+            if (targetSys.ErrorFlags != sourceSys.ErrorFlags)
+            {
+                targetSys.ErrorFlags = sourceSys.ErrorFlags;
+            }
+
+            if (targetSys.ChannelDataCANID != sourceSys.ChannelDataCANID)
+            {
+                targetSys.ChannelDataCANID = sourceSys.ChannelDataCANID;
+            }
+
+            if (targetSys.SystemDataCANID != sourceSys.SystemDataCANID)
+            {
+                targetSys.SystemDataCANID = sourceSys.SystemDataCANID;
+            }
+
+            if (targetSys.ConfigDataCANID != sourceSys.ConfigDataCANID)
+            {
+                targetSys.ConfigDataCANID = sourceSys.ConfigDataCANID;
+            }
+
+            if (targetSys.IMUWakeWindow != sourceSys.IMUWakeWindow)
+            {
+                targetSys.IMUWakeWindow = sourceSys.IMUWakeWindow;
+            }
+
+            if (targetSys.SpeedUnitPref != sourceSys.SpeedUnitPref)
+            {
+                targetSys.SpeedUnitPref = sourceSys.SpeedUnitPref;
+            }
+
+            if (targetSys.DistanceUnitPref != sourceSys.DistanceUnitPref)
+            {
+                targetSys.DistanceUnitPref = sourceSys.DistanceUnitPref;
+            }
+
+            if (targetSys.AllowData != sourceSys.AllowData)
+            {
+                targetSys.AllowData = sourceSys.AllowData;
+            }
+
+            if (targetSys.AllowGPS != sourceSys.AllowGPS)
+            {
+                targetSys.AllowGPS = sourceSys.AllowGPS;
+            }
+
+            if (targetSys.BattSOC != sourceSys.BattSOC)
+            {
+                targetSys.BattSOC = sourceSys.BattSOC;
+            }
+
+            if (targetSys.BattSOH != sourceSys.BattSOH)
+            {
+                targetSys.BattSOH = sourceSys.BattSOH;
+            }
+        }
+
+        private const int MAX_CHART_POINTS = 2000;
+
+        private void UpdateCharts(DataStructures data)
+        {
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var cutoff = now - (SelectedTimeWindowSeconds * 1000);
+
+            for (int i = 0; i < data.ChannelsLiveData.Count && i < SeriesCollection.Count; i++)
+            {
+                if (SeriesCollection[i] is not LineSeries<ObservablePoint> series)
+                    continue;
+
+                var ch = data.ChannelsLiveData[i];
+
+                // REUSE existing collection
+                if (series.Values is not ObservableCollection<ObservablePoint> values)
+                {
+                    values = new ObservableCollection<ObservablePoint>();
+                    series.Values = values;
+                }
+
+                if (series.Stroke is SolidColorPaint paint)
+                {
+                    paint.StrokeThickness = 1.0f;
+                }
+
+                // Add new point
+                values.Add(new ObservablePoint(now, ch.CurrentValue));
+
+                // Remove old points in batch
+                int removeCount = 0;
+                for (int j = 0; j < values.Count; j++)
+                {
+                    if (values[j].X < cutoff)
+                        removeCount++;
+                    else
+                        break; // Points are in order, stop when we hit valid ones
+                }
+
+                // Remove from front
+                for (int j = 0; j < removeCount; j++)
+                {
+                    values.RemoveAt(0);
+                }
+
+                // Enforce max limit
+                int excessCount = values.Count - MAX_CHART_POINTS;
+                for (int j = 0; j < excessCount; j++)
+                {
+                    values.RemoveAt(0);
+                }
+            }
+
+            // Update axes
+            if (XAxes is { Length: > 0 })
+            {
+                XAxes[0].MinLimit = cutoff;
+                XAxes[0].MaxLimit = now;
+            }
+
+            if (YAxes is { Length: > 0 })
+            {
+                YAxes[0].MinLimit = null;
+                YAxes[0].MaxLimit = null;
+            }
         }
 
         private void UpdateErrorFlags()

@@ -10,7 +10,7 @@ namespace Cortex.Models
         public Int32 _SystemTemperature;        // Internal system (Teensy processor) temperature
 
         [ObservableProperty]
-        public byte _CANResEnabled;             // CAN bus termination resistor enabled
+        public bool _CANResEnabled;             // CAN bus termination resistor enabled
 
         [ObservableProperty]
         public float _VBatt;                    // Battery supply voltage
@@ -37,16 +37,16 @@ namespace Cortex.Models
         public UInt32 _IMUWakeWindow;           // IMU wake window in ms. Time that the controller stays awake after motion detected
 
         [ObservableProperty]
-        public byte _SpeedUnitPref;             // Speed unit preference (0 = mph, 1 = km/h)
+        public bool _SpeedUnitPref;             // Speed unit preference (0 = mph, 1 = km/h)
 
         [ObservableProperty]
-        public byte _DistanceUnitPref;          // Distance unit preference (0 = metres, 1 = feet)
+        public bool _DistanceUnitPref;          // Distance unit preference (0 = metres, 1 = feet)
 
         [ObservableProperty]
-        public byte _AllowData;                 // Allow GSM data
+        public bool _AllowData;                 // Allow GSM data
 
         [ObservableProperty]
-        public byte _AllowGPS;                  // Allow GPS
+        public bool _AllowGPS;                  // Allow GPS
 
         [ObservableProperty]
         public Int32 _BattSOC;                  // Battery state of charge (0-100%)
