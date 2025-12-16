@@ -47,11 +47,5 @@ namespace Cortex.Models
 
         [ObservableProperty]
         public bool _AllowGPS;                  // Allow GPS
-
-        [ObservableProperty]
-        public Int32 _BattSOC;                  // Battery state of charge (0-100%)
-
-        [ObservableProperty]
-        public Int32 _BattSOH;                  // Battery state of health (0-100%)
     }
 }

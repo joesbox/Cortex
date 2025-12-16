@@ -219,8 +219,6 @@ public class SerialPortService
                             dataStructures.SystemParams.DistanceUnitPref = reader.ReadByte() != 0;
                             dataStructures.SystemParams.AllowData = reader.ReadByte() != 0;
                             dataStructures.SystemParams.AllowGPS = reader.ReadByte() != 0;
-                            dataStructures.SystemParams.BattSOC = reader.ReadInt32();
-                            dataStructures.SystemParams.BattSOH = reader.ReadInt32();
 
                             if (UpdateStaticData)
                             {

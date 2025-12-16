@@ -815,15 +815,6 @@ namespace Cortex.ViewModels
                 targetSys.AllowGPS = sourceSys.AllowGPS;
             }
 
-            if (targetSys.BattSOC != sourceSys.BattSOC)
-            {
-                targetSys.BattSOC = sourceSys.BattSOC;
-            }
-
-            if (targetSys.BattSOH != sourceSys.BattSOH)
-            {
-                targetSys.BattSOH = sourceSys.BattSOH;
-            }
         }
 
         private const int MAX_CHART_POINTS = 2000;
