@@ -219,6 +219,7 @@ public class SerialPortService
                             dataStructures.SystemParams.DistanceUnitPref = reader.ReadByte() != 0;
                             dataStructures.SystemParams.AllowData = reader.ReadByte() != 0;
                             dataStructures.SystemParams.AllowGPS = reader.ReadByte() != 0;
+                            dataStructures.SystemParams.AllowMotionDetect = reader.ReadByte() != 0;
 
                             if (UpdateStaticData)
                             {
@@ -574,8 +575,8 @@ public class SerialPortService
                             configChanged = true;
                             AddData((byte)settingIndex, true);
                             AddData((byte)parameterIndex, true);
-                            AddData(settingsData.SystemParamsStaticData.CANResEnabled ? (byte)1 : (byte)0, true);
                             AddData(0, true); // Padding
+                            AddData(settingsData.SystemParamsStaticData.CANResEnabled ? (byte)1 : (byte)0, true);                            
                             AddData(0, true); // Padding
                             AddData(0, true); // Padding
                         }
@@ -586,13 +587,13 @@ public class SerialPortService
                             configChanged = true;
                             AddData((byte)settingIndex, true);
                             AddData((byte)parameterIndex, true);
+                            AddData(0, true); // Padding
                             byte[] uintBytes = BitConverter.GetBytes(settingsData.SystemParamsStaticData.ChannelDataCANID);
                             foreach (byte b in uintBytes)
                             {
                                 AddData(b, true);
                             }
-                            AddData(0, true); // Padding
-                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding                            
                         }
                         break;
                     case 2: // System data CAN ID
@@ -601,13 +602,13 @@ public class SerialPortService
                             configChanged = true;
                             AddData((byte)settingIndex, true);
                             AddData((byte)parameterIndex, true);
+                            AddData(0, true); // Padding
                             byte[] uintBytes = BitConverter.GetBytes(settingsData.SystemParamsStaticData.SystemDataCANID);
                             foreach (byte b in uintBytes)
                             {
                                 AddData(b, true);
                             }
-                            AddData(0, true); // Padding
-                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding                            
                         }
                         break;
                     case 3: // Config data CAN ID
@@ -616,13 +617,13 @@ public class SerialPortService
                             configChanged = true;
                             AddData((byte)settingIndex, true);
                             AddData((byte)parameterIndex, true);
+                            AddData(0, true); // Padding
                             byte[] uintBytes = BitConverter.GetBytes(settingsData.SystemParamsStaticData.ConfigDataCANID);
                             foreach (byte b in uintBytes)
                             {
                                 AddData(b, true);
                             }
-                            AddData(0, true); // Padding
-                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding                            
                         }
                         break;
                     case 4: // IMU wake window
@@ -631,13 +632,13 @@ public class SerialPortService
                             configChanged = true;
                             AddData((byte)settingIndex, true);
                             AddData((byte)parameterIndex, true);
+                            AddData(0, true); // Padding
                             byte[] uintBytes = BitConverter.GetBytes(settingsData.SystemParamsStaticData.IMUWakeWindow);
                             foreach (byte b in uintBytes)
                             {
                                 AddData(b, true);
                             }
-                            AddData(0, true); // Padding
-                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding                            
                         }
                         break;
                     case 5: // Speed unit preference
@@ -646,8 +647,8 @@ public class SerialPortService
                             configChanged = true;
                             AddData((byte)settingIndex, true);
                             AddData((byte)parameterIndex, true);
-                            AddData(settingsData.SystemParamsStaticData.SpeedUnitPref ? (byte)1 : (byte)0, true);
                             AddData(0, true); // Padding
+                            AddData(settingsData.SystemParamsStaticData.SpeedUnitPref ? (byte)1 : (byte)0, true);
                             AddData(0, true); // Padding
                             AddData(0, true); // Padding
                         }
@@ -658,10 +659,11 @@ public class SerialPortService
                             configChanged = true;
                             AddData((byte)settingIndex, true);
                             AddData((byte)parameterIndex, true);
+                            AddData(0, true); // Padding
                             AddData(settingsData.SystemParamsStaticData.DistanceUnitPref ? (byte)1 : (byte)0, true);
                             AddData(0, true); // Padding
                             AddData(0, true); // Padding
-                            AddData(0, true); // Padding
+                            
                         }
                         break;
                     case 7: // Allow GSM data
@@ -670,8 +672,8 @@ public class SerialPortService
                             configChanged = true;
                             AddData((byte)settingIndex, true);
                             AddData((byte)parameterIndex, true);
-                            AddData(settingsData.SystemParamsStaticData.AllowData ? (byte)1 : (byte)0, true);
                             AddData(0, true); // Padding
+                            AddData(settingsData.SystemParamsStaticData.AllowData ? (byte)1 : (byte)0, true);
                             AddData(0, true); // Padding
                             AddData(0, true); // Padding
                         }
@@ -682,10 +684,22 @@ public class SerialPortService
                             configChanged = true;
                             AddData((byte)settingIndex, true);
                             AddData((byte)parameterIndex, true);
+                            AddData(0, true); // Padding
                             AddData(settingsData.SystemParamsStaticData.AllowGPS ? (byte)1 : (byte)0, true);
                             AddData(0, true); // Padding
                             AddData(0, true); // Padding
+                        }
+                        break;
+                    case 9: // Allow motion detect
+                        if (dataStructures.SystemParamsStaticData.AllowMotionDetect != settingsData.SystemParamsStaticData.AllowMotionDetect)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
                             AddData(0, true); // Padding
+                            AddData(settingsData.SystemParamsStaticData.AllowMotionDetect ? (byte)1 : (byte)0, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding                            
                         }
                         break;
                 }

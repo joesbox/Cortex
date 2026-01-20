@@ -849,6 +849,25 @@ mc:Ignorable="d">
 									<TextBlock
 									Margin="5"
 									VerticalAlignment="Center"
+									Text="Motion detection" />
+									<ToggleSwitch
+									HorizontalAlignment="Left"
+									VerticalAlignment="Center"
+									Background="#ff15151f"
+									BorderBrush="#302042"
+									BorderThickness="1"
+									CornerRadius="10"
+									IsChecked="{Binding SettingsDataView.SystemParamsStaticData.AllowMotionDetect}"
+									OffContent="Disabled"
+									OnContent="Enabled" />
+								</StackPanel>
+								<StackPanel
+								HorizontalAlignment="Center"
+								Orientation="Horizontal"
+								Spacing="8">
+									<TextBlock
+									Margin="5"
+									VerticalAlignment="Center"
 									Text="Distance units" />
 									<ToggleSwitch
 									HorizontalAlignment="Left"

@@ -47,5 +47,8 @@ namespace Cortex.Models
 
         [ObservableProperty]
         public bool _AllowGPS;                  // Allow GPS
+
+        [ObservableProperty]
+        public bool _AllowMotionDetect;         // Allow GPS
     }
 }
