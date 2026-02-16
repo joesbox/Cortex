@@ -15,6 +15,7 @@ using System.Diagnostics;
 using System.IO.Ports;
 using System.Linq;
 using System.Text.Json;
+using System.Threading.Tasks;
 using System.Timers;
 
 /*
@@ -22,6 +23,9 @@ using System.Timers;
  * Version history:
     Date              Version       Description
     ----              -------       ------------------------------------------------------------
+    2026-02-16        v0.1.3        Added new CAN bus system parameters and updated config sending to include them.
+    2026-01-20        v0.1.2        Added motion detect system parameters and corrected byte padding for system parameters.
+    2025-12-12        v0.1.1        Removed LiPo backup battery gauges and serial comms data.
     2025-12-12        v0.1.0        Fixes:
                                     - Send analogue input parameters when sending config.
                                     - Some UI optimisations
@@ -289,11 +293,11 @@ namespace Cortex.ViewModels
 
             ChannelTypes = new ObservableCollection<ChannelTypeDisplay>
     {
-        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.DIG, Label = "Digital Input" },
-        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.DIG_PWM, Label = "Digital PWM" },
-        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.ANA, Label = "Analogue threshold" },
-        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.ANA_PWM, Label = "Analogue scaled PWM" },
-        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.CAN_DIGITAL, Label = "CAN Digital" },
+        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.Digital, Label = "Digital Input" },
+        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.PWM, Label = "Digital PWM" },
+        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.Analogue, Label = "Analogue threshold" },
+        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.AnalogueScaled, Label = "Analogue scaled PWM" },
+        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.CAN, Label = "CAN Digital" },
         new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.CAN_PWM, Label = "CAN PWM" },
     };
 
@@ -358,6 +362,18 @@ namespace Cortex.ViewModels
             _uiUpdateTimer.Elapsed += OnUIUpdateTimerElapsed;
             _uiUpdateTimer.AutoReset = true;
             _uiUpdateTimer.Start();
+        }
+
+        private void ConfigSaved(object? sender, EventArgs e)
+        {
+            _ = ShowUpdateMessage();
+        }
+
+        public async Task ShowUpdateMessage()
+        {
+            UpdateMessageOpacity = 1;      // Fade in
+            await Task.Delay(5000);
+            UpdateMessageOpacity = 0;      // Fade out
         }
 
         public ICartesianAxis[] YAxes { get; set; } = [
@@ -498,6 +514,7 @@ namespace Cortex.ViewModels
         {
             _portService = new SerialPortService(selectedPort);
             _portService.DataUpdated += _portService_DataUpdated;
+            _portService.ConfigurationSaved += ConfigSaved;
             IsConnected = _portService.Open();
 
             if (IsConnected)
@@ -790,6 +807,11 @@ namespace Cortex.ViewModels
                 targetSys.ConfigDataCANID = sourceSys.ConfigDataCANID;
             }
 
+            if (targetSys.SystemConfigCANID != sourceSys.SystemConfigCANID)
+            {
+                targetSys.SystemConfigCANID = sourceSys.SystemConfigCANID;
+            }
+
             if (targetSys.IMUWakeWindow != sourceSys.IMUWakeWindow)
             {
                 targetSys.IMUWakeWindow = sourceSys.IMUWakeWindow;
@@ -815,7 +837,28 @@ namespace Cortex.ViewModels
                 targetSys.AllowGPS = sourceSys.AllowGPS;
             }
 
+            if (targetSys.MobileSignalPercent != sourceSys.MobileSignalPercent)
+            {
+                targetSys.MobileSignalPercent = sourceSys.MobileSignalPercent;
+            }
+
         }
+
+        private double _updateMessageOpacity;
+
+        public double UpdateMessageOpacity
+        {
+            get => _updateMessageOpacity;
+            set
+            {
+                if (_updateMessageOpacity != value)
+                {
+                    _updateMessageOpacity = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
 
         private const int MAX_CHART_POINTS = 2000;
 

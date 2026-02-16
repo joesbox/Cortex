@@ -1,4 +1,5 @@
-﻿using Avalonia.Data.Converters;
+﻿using Avalonia;
+using Avalonia.Data.Converters;
 using System;
 using System.Globalization;
 
@@ -8,20 +9,14 @@ namespace Cortex.Converters
     {
         public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
         {
-            if (value == null) return "000";
-
-            // Convert int16 to hex string (without 0x prefix)
-            if (value is short shortValue)
+            if (value is ushort u)
             {
-                // Ensure the value is within 11-bit range and format as 3-digit hex
-                int maskedValue = shortValue & 0x7FF;
-                return maskedValue.ToString("X3");
+                return (u & 0x7FF).ToString("X3");
             }
-            else if (value is int intValue)
+
+            if (value is int i)
             {
-                // Handle int values too
-                int maskedValue = intValue & 0x7FF;
-                return maskedValue.ToString("X3");
+                return (i & 0x7FF).ToString("X3");
             }
 
             return "000";
@@ -29,29 +24,15 @@ namespace Cortex.Converters
 
         public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
         {
-            if (value is not string stringValue)
-                return (short)0;
+            if (value is not string s)
+                return AvaloniaProperty.UnsetValue;
 
-            string text = stringValue.Trim();
+            s = s.Trim();
 
-            if (string.IsNullOrWhiteSpace(text))
-                return (short)0;
+            if (!ushort.TryParse(s, NumberStyles.HexNumber, culture, out var hex))
+                return AvaloniaProperty.UnsetValue;
 
-            // Parse hex string to integer
-            try
-            {
-                int hexValue = System.Convert.ToInt32(text, 16);
-
-                // Ensure it's within 11-bit range
-                hexValue = hexValue & 0x7FF;
-
-                // Convert to int16
-                return (short)hexValue;
-            }
-            catch
-            {
-                return (short)0;
-            }
+            return (ushort)(hex & 0x7FF);
         }
     }
 }

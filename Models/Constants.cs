@@ -42,7 +42,7 @@
 
         public const int NUMBER_ANALOGUE_PARAMETERS = 10;
 
-        public const int NUMBER_SYSTEM_PARAMETERS = 10;
+        public const int NUMBER_SYSTEM_PARAMETERS = 11;
 
         public const int NUMBER_DIGITAL_INPUT_PARAMETERS = 1;
     }

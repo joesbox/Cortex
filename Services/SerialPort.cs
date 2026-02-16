@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO.Ports;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Timers;
 using static Cortex.Models.OutputChannel;
 
@@ -13,12 +14,14 @@ public class SerialPortService
 {
     public event Action<DataStructures>? DataUpdated;
 
+    public event EventHandler<EventArgs>? ConfigurationSaved;
+
     private SerialPort _serialPort;
 
     private DataStructures dataStructures;
 
     private DataStructures settingsData;
-        
+
     private List<byte> receivedDataBuffer;
     private bool foundTrailer1;
     private bool foundTrailer2;
@@ -56,14 +59,14 @@ public class SerialPortService
     private readonly object _bufferLock = new object();
     private volatile bool _packetReady = false;
 
-    private byte[] dataBytes = new byte[4096]; 
+    private byte[] dataBytes = new byte[4096];
     private byte[] checkSumArray = new byte[4];
     private int dataLength;
 
     public SerialPortService(string portName, int baudRate = 921600)
     {
-        _serialPort = new SerialPort(portName, baudRate);        
-        _serialPort.DataBits = 8;        
+        _serialPort = new SerialPort(portName, baudRate);
+        _serialPort.DataBits = 8;
         _serialPort.RtsEnable = true;
         _serialPort.DtrEnable = true;
         _serialPort.DataReceived += OnDataReceived;
@@ -116,7 +119,6 @@ public class SerialPortService
     private bool processData()
     {
         bool retVal = false;
-        //byte[] checkSumArray = new byte[4];
         // Reset trailer flag
         foundTrailer1 = foundTrailer2 = false;
 
@@ -214,12 +216,14 @@ public class SerialPortService
                             dataStructures.SystemParams.ChannelDataCANID = reader.ReadUInt16();
                             dataStructures.SystemParams.SystemDataCANID = reader.ReadUInt16();
                             dataStructures.SystemParams.ConfigDataCANID = reader.ReadUInt16();
+                            dataStructures.SystemParams.SystemConfigCANID = reader.ReadUInt16();
                             dataStructures.SystemParams.IMUWakeWindow = reader.ReadUInt32();
                             dataStructures.SystemParams.SpeedUnitPref = reader.ReadByte() != 0;
                             dataStructures.SystemParams.DistanceUnitPref = reader.ReadByte() != 0;
                             dataStructures.SystemParams.AllowData = reader.ReadByte() != 0;
                             dataStructures.SystemParams.AllowGPS = reader.ReadByte() != 0;
                             dataStructures.SystemParams.AllowMotionDetect = reader.ReadByte() != 0;
+                            dataStructures.SystemParams.MobileSignalPercent = reader.ReadByte();
 
                             if (UpdateStaticData)
                             {
@@ -576,7 +580,7 @@ public class SerialPortService
                             AddData((byte)settingIndex, true);
                             AddData((byte)parameterIndex, true);
                             AddData(0, true); // Padding
-                            AddData(settingsData.SystemParamsStaticData.CANResEnabled ? (byte)1 : (byte)0, true);                            
+                            AddData(settingsData.SystemParamsStaticData.CANResEnabled ? (byte)1 : (byte)0, true);
                             AddData(0, true); // Padding
                             AddData(0, true); // Padding
                         }
@@ -663,7 +667,7 @@ public class SerialPortService
                             AddData(settingsData.SystemParamsStaticData.DistanceUnitPref ? (byte)1 : (byte)0, true);
                             AddData(0, true); // Padding
                             AddData(0, true); // Padding
-                            
+
                         }
                         break;
                     case 7: // Allow GSM data
@@ -702,6 +706,22 @@ public class SerialPortService
                             AddData(0, true); // Padding                            
                         }
                         break;
+
+                    case 10: // System config CAN ID
+                        if (dataStructures.SystemParamsStaticData.SystemConfigCANID != settingsData.SystemParamsStaticData.SystemConfigCANID)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData(0, true); // Padding
+                            byte[] uintBytes = BitConverter.GetBytes(settingsData.SystemParamsStaticData.SystemConfigCANID);
+                            foreach (byte b in uintBytes)
+                            {
+                                AddData(b, true);
+                            }
+                            AddData(0, true); // Padding                            
+                        }
+                        break;
                 }
                 break;
 
@@ -735,7 +755,7 @@ public class SerialPortService
         if (configChanged)
         {
             switch (settingIndex)
-                {
+            {
                 case 0:
                     Debug.WriteLine("Sending channel " + channelIndex + " parameter " + parameterIndex);
                     break;
@@ -749,7 +769,7 @@ public class SerialPortService
                     Debug.WriteLine("Sending digital input " + digitalIndex + " parameter " + parameterIndex);
                     break;
             }
-          
+
             Debug.WriteLine(channelIndex);
             if (_serialPort.IsOpen && _serialPort != null)
             {
@@ -786,7 +806,7 @@ public class SerialPortService
         if (_serialPort.IsOpen)
         {
             try
-            {                
+            {
                 while (_serialPort.BytesToRead > 0 && _serialPort.IsOpen)
                 {
                     byte readByte = (byte)_serialPort.ReadByte();
@@ -882,7 +902,7 @@ public class SerialPortService
                                                 // That's it. Finished sending config.
                                             }
                                             break;
-                                    }                                    
+                                    }
 
                                     if (sendingConfig)
                                     {
@@ -915,6 +935,7 @@ public class SerialPortService
                                 SendCommand(Constants.COMMAND_ID_REQUEST);
                                 Debug.WriteLine("Configuration saved to EEPROM.");
                                 LoggingService.AddLog("PDM updated.");
+                                ConfigurationSaved?.Invoke(this, EventArgs.Empty);
                                 break;
                         }
                     }

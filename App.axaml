@@ -39,6 +39,9 @@
         <Style Selector="TextBlock.log">
             <Setter Property="FontFamily" Value="avares://Cortex/Assets/Lekton-Regular.ttf#Lekton" />
         </Style>
+        <Style Selector="TabItem:disabled Image.tab-icon">
+            <Setter Property="Opacity" Value="0.35"/>
+        </Style>
         <FluentTheme>
             <FluentTheme.Palettes>
                 <ColorPaletteResources

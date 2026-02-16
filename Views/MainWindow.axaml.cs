@@ -21,37 +21,37 @@
             DataContext = vm;
 
             vm.PropertyChanged += (_, args) =>
-            {
-                if (args.PropertyName == nameof(vm.IsConnected))
                 {
-                    UpdateConnectionState(vm.IsConnected);
-                }
+                    if (args.PropertyName == nameof(vm.IsConnected))
+                    {
+                        UpdateConnectionState(vm.IsConnected);
+                    }
 
-                if (args.PropertyName == nameof(vm.SdOK))
-                {
-                    UpdateSDStatus(vm.SdOK);
-                }
+                    if (args.PropertyName == nameof(vm.SdOK))
+                    {
+                        UpdateSDStatus(vm.SdOK);
+                    }
 
-                if (args.PropertyName == nameof(vm.OverCurrent))
-                {
-                    UpdateCurrentStatus(vm.OverCurrent);
-                }
+                    if (args.PropertyName == nameof(vm.OverCurrent))
+                    {
+                        UpdateCurrentStatus(vm.OverCurrent);
+                    }
 
-                if (args.PropertyName == nameof(vm.OverTemperature))
-                {
-                    UpdateTempStatus(vm.OverTemperature);
-                }
+                    if (args.PropertyName == nameof(vm.OverTemperature))
+                    {
+                        UpdateTempStatus(vm.OverTemperature);
+                    }
 
-                if (args.PropertyName == nameof(vm.UnderVoltage))
-                {
-                    UpdateVoltStatus(vm.UnderVoltage);
-                }
+                    if (args.PropertyName == nameof(vm.UnderVoltage))
+                    {
+                        UpdateVoltStatus(vm.UnderVoltage);
+                    }
 
-                if (args.PropertyName == nameof(vm.GpsOK))
-                {
-                    UpdateGPSStatus(vm.GpsOK);
-                }
-            };
+                    if (args.PropertyName == nameof(vm.GpsOK))
+                    {
+                        UpdateGPSStatus(vm.GpsOK);
+                    }
+                };
 
             // Subscribe to CollectionChanged event to auto-scroll when new log entries are added
             if (DataContext is MainWindowViewModel mainViewModel)
@@ -68,9 +68,9 @@
             UpdateGPSStatus(vm.GpsOK);
 
             ChannelChart.SizeChanged += (s, e) =>
-            {
-                ChannelChart?.CoreChart?.Update();
-            };
+                    {
+                        ChannelChart?.CoreChart?.Update();
+                    };
         }
 
         public void CloseApp()
@@ -132,13 +132,14 @@
             GPSIcon.Classes.Set("gpsError", !gpsOk);
         }
 
+
         private void LogEntries_CollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
         {
             // Ensure the scroll happens on the UI thread
             Dispatcher.UIThread.Post(() =>
-            {
-                LogScrollViewer?.ScrollToEnd();
-            });
+                        {
+                            LogScrollViewer?.ScrollToEnd();
+                        });
         }
 
 

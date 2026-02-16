@@ -10,7 +10,7 @@ namespace Cortex.Models
         public Int32 _SystemTemperature;        // Internal system (Teensy processor) temperature
 
         [ObservableProperty]
-        public bool _CANResEnabled;             // CAN bus termination resistor enabled
+        public bool _CANResEnabled;             // CAN bus termination resistor enableda
 
         [ObservableProperty]
         public float _VBatt;                    // Battery supply voltage
@@ -29,6 +29,9 @@ namespace Cortex.Models
 
         [ObservableProperty]
         public UInt16 _SystemDataCANID;         // System data CAN ID (transmit)
+
+        [ObservableProperty]
+        public UInt16 _SystemConfigCANID;       // System configuration CAN ID (receive)    
 
         [ObservableProperty]
         public UInt16 _ConfigDataCANID;         // Configuration data CAN ID (receive)
@@ -50,5 +53,8 @@ namespace Cortex.Models
 
         [ObservableProperty]
         public bool _AllowMotionDetect;         // Allow GPS
+
+        [ObservableProperty]
+        public UInt16 _MobileSignalPercent;     // Mobile signal strength
     }
 }

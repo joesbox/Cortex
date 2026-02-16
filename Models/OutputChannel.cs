@@ -153,12 +153,12 @@ namespace Cortex.Models
 
         public enum ChannelType
         {
-            DIG,                // Digital input
-            DIG_PWM,            // Digital input, PWM output
-            ANA,                // Analog input (threshold detection)
-            ANA_PWM,            // Analog input, PWM output
-            CAN_DIGITAL,        // CAN bus controlled digital output
-            CAN_PWM             // CAN bus controlled PWM output
+            Digital,                    // Digital input
+            PWM,                        // Digital input, PWM output
+            Analogue,                   // Analog input (threshold detection)
+            AnalogueScaled,             // Analog input, PWM output
+            CAN,                        // CAN bus controlled digital output
+            CAN_PWM                     // CAN bus controlled PWM output
         }
     }
 }
