@@ -1,0 +1,478 @@
+﻿<UserControl
+    x:Class="Cortex.Views.LogHistoryTabView"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:lvc="using:LiveChartsCore.SkiaSharpView.Avalonia"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:mapsui="clr-namespace:Mapsui.UI.Avalonia;assembly=Mapsui.UI.Avalonia"
+    xmlns:vm="using:Cortex.ViewModels"
+    x:DataType="vm:MainWindowViewModel"
+    mc:Ignorable="d">
+                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8" RowDefinitions="*" ClipToBounds="True">
+                        <Grid ColumnDefinitions="*" RowDefinitions="*"
+                              Grid.Column="0"
+                              MinWidth="440"
+                              MaxWidth="440"
+                              ClipToBounds="True">
+                            <Border
+                                Grid.Column="0"
+                                Margin="5"
+                                BorderBrush="#443553"
+                                BorderThickness="1"
+                                CornerRadius="10"
+                                ClipToBounds="True">
+                                <Border.Background>
+                                    <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                                        <GradientStop Color="#FF141722" Offset="0" />
+                                        <GradientStop Color="#FF221C34" Offset="0.5" />
+                                        <GradientStop Color="#FF302042" Offset="1" />
+                                    </LinearGradientBrush>
+                                </Border.Background>
+                                <TabControl
+                                    Margin="0"
+                                    SelectedIndex="0"
+                                    TabStripPlacement="Top">
+                                    <TabItem Header="Logs" FontSize="15">
+                                        <StackPanel
+                                            Margin="12"
+                                            HorizontalAlignment="Stretch"
+                                            Orientation="Vertical"
+                                            Spacing="9">
+                                            <Grid ColumnDefinitions="*,*" ColumnSpacing="8" RowDefinitions="*,*,*" RowSpacing="8" ClipToBounds="True">
+                                                <Button
+                                                    Grid.Column="0"
+                                                    Grid.Row="0"
+                                                    Width="120"
+                                                    HorizontalAlignment="Center"
+                                                    HorizontalContentAlignment="Center"
+                                                    Command="{Binding RefreshAvailableLogFilesCommand}"
+                                                    Content="REFRESH"
+                                                    IsEnabled="{Binding !IsLogBusy}" />
+                                                <Button
+                                                    Grid.Column="1"
+                                                    Grid.Row="0"
+                                                    Width="120"
+                                                    HorizontalAlignment="Center"
+                                                    HorizontalContentAlignment="Center"
+                                                    Command="{Binding DownloadSelectedLogFileCommand}"
+                                                    Content="DOWNLOAD"
+                                                    IsEnabled="{Binding CanDownloadSelectedLog}" />
+                                                <Button
+                                                    Grid.Column="0"
+                                                    Grid.Row="1"
+                                                    Width="120"
+                                                    HorizontalAlignment="Center"
+                                                    HorizontalContentAlignment="Center"
+                                                    Command="{Binding CancelLogDownloadCommand}"
+                                                    Content="CANCEL"
+                                                    IsEnabled="{Binding CanCancelLogDownload}" />
+                                                <Button
+                                                    Grid.Column="1"
+                                                    Grid.Row="1"
+                                                    Width="120"
+                                                    HorizontalAlignment="Center"
+                                                    HorizontalContentAlignment="Center"
+                                                    Command="{Binding ResetLogsCommand}"
+                                                    Content="RESET LOGS"
+                                                    IsEnabled="{Binding CanResetLogs}" />
+                                            </Grid>
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                Text="PDM Log Files"
+                                                TextWrapping="Wrap" />
+                                            <ScrollViewer
+                                                MinHeight="110"
+                                                MaxHeight="220"
+                                                VerticalScrollBarVisibility="Auto"
+                                                HorizontalScrollBarVisibility="Disabled">
+                                                <ListBox
+                                                    x:Name="logs"
+                                                    ItemsSource="{Binding AvailableLogFiles}"
+                                                    SelectedItem="{Binding SelectedLogFile, Mode=TwoWay}"
+                                                    SelectionMode="Single"
+                                                    IsEnabled="{Binding !IsLogBusy}"
+                                                    BorderBrush="#302042"
+                                                    Background="#302042" >
+                                                    <ListBox.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                                <TextBlock Text="{Binding DownloadedIcon}" Width="16" HorizontalAlignment="Center" />
+                                                                <TextBlock Text="{Binding FileName}" />
+                                                                <TextBlock Text="{Binding FileSizeMbDisplay}" />
+                                                            </StackPanel>
+                                                        </DataTemplate>
+                                                    </ListBox.ItemTemplate>
+                                                </ListBox>
+                                            </ScrollViewer>
+                                            <Button
+                                                HorizontalAlignment="Stretch"
+                                                HorizontalContentAlignment="Center"
+                                                Command="{Binding BrowseLocalLogFileCommand}"
+                                                Content="BROWSE LOCAL FILES..."
+                                                IsEnabled="{Binding !IsLogBusy}" />
+                                            <TextBlock
+                                                HorizontalAlignment="Center"
+                                                Text="{Binding LogStatusMessage}"
+                                                TextWrapping="Wrap" />
+                                            <ProgressBar
+                                                Width="220"
+                                                Minimum="0"
+                                                Maximum="100"
+                                                Value="{Binding LogDownloadProgress}"
+                                                IsIndeterminate="{Binding IsLogProgressIndeterminate}" />
+                                            <StackPanel
+                                                Margin="12"
+                                                HorizontalAlignment="Stretch"
+                                                Orientation="Vertical"
+                                                Spacing="9">
+                                                <StackPanel Margin="0" HorizontalAlignment="Center">
+                                                    <StackPanel Margin="10" Spacing="10">
+                                                        <Grid ColumnDefinitions="Auto,Auto" ColumnSpacing="8">
+                                                            <Label Grid.Column="0" VerticalAlignment="Center" Content="Start date:" />
+                                                            <DatePicker
+                                                                Grid.Column="1"
+                                                                Width="280"
+                                                                MinWidth="280"
+                                                                MaxWidth="280"
+                                                                HorizontalAlignment="Left"
+                                                                DayFormat="ddd dd"
+                                                                SelectedDate="{Binding LogRangeStartDate, Mode=TwoWay}"
+                                                                IsEnabled="{Binding !IsLogBusy}" />
+                                                        </Grid>
+                                                        <Grid ColumnDefinitions="Auto,Auto" ColumnSpacing="8">
+                                                            <Label Grid.Column="0" VerticalAlignment="Center" Content="Start time:" />
+                                                            <TimePicker
+                                                                Grid.Column="1"
+                                                                Width="100"
+                                                                MinWidth="100"
+                                                                MaxWidth="100"
+                                                                HorizontalAlignment="Left"
+                                                                ClockIdentifier="24HourClock"
+                                                                MinuteIncrement="5"
+                                                                SelectedTime="{Binding LogRangeStartTime, Mode=TwoWay}"
+                                                                IsEnabled="{Binding !IsLogBusy}" />
+                                                        </Grid>
+                                                    </StackPanel>
+                                                </StackPanel>
+                                                <StackPanel Margin="10" HorizontalAlignment="Center">
+                                                    <StackPanel Margin="0" Spacing="10">
+                                                        <Grid ColumnDefinitions="Auto,Auto" ColumnSpacing="8">
+                                                            <Label Grid.Column="0" VerticalAlignment="Center" Content="End date:" />
+                                                            <DatePicker
+                                                                Grid.Column="1"
+                                                                Width="280"
+                                                                MinWidth="280"
+                                                                MaxWidth="280"
+                                                                HorizontalAlignment="Left"
+                                                                DayFormat="ddd dd"
+                                                                SelectedDate="{Binding LogRangeEndDate, Mode=TwoWay}"
+                                                                IsEnabled="{Binding !IsLogBusy}" />
+                                                        </Grid>
+                                                        <Grid ColumnDefinitions="Auto,Auto" ColumnSpacing="8">
+                                                            <Label Grid.Column="0" VerticalAlignment="Center" Content="End time:" />
+                                                            <TimePicker
+                                                                Grid.Column="1"
+                                                                Width="100"
+                                                                MinWidth="100"
+                                                                MaxWidth="100"
+                                                                HorizontalAlignment="Left"
+                                                                ClockIdentifier="24HourClock"
+                                                                MinuteIncrement="5"
+                                                                SelectedTime="{Binding LogRangeEndTime, Mode=TwoWay}"
+                                                                IsEnabled="{Binding !IsLogBusy}" />
+                                                        </Grid>
+                                                    </StackPanel>
+                                                </StackPanel>
+                                                <CheckBox
+                                                    HorizontalAlignment="Center"
+                                                    Content="Enable crosshairs"
+                                                    IsChecked="{Binding IsLogCrosshairEnabled, Mode=TwoWay}"
+                                                    IsEnabled="{Binding !IsLogBusy}" />
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </TabItem>
+                                    <TabItem Header="Parameters" FontSize="15">
+                                        <Grid
+                                            Margin="12"
+                                            HorizontalAlignment="Stretch"
+                                            VerticalAlignment="Stretch"
+                                            RowDefinitions="Auto,*"
+                                            RowSpacing="9">
+                                            <TabControl Grid.Row="1"
+                                                        Margin="0"
+                                                        SelectedIndex="0"
+                                                        TabStripPlacement="Top">
+                                                <TabItem Header="System" FontSize="15">
+                                                    <Grid Margin="0,8,0,0"
+                                                          RowDefinitions="Auto,*"
+                                                          RowSpacing="8">
+                                                        <CheckBox
+                                                            Grid.Row="0"
+                                                            Content="Select/Deselect All"
+                                                            IsChecked="{Binding AreAllSystemParametersSelected, Mode=TwoWay}" />
+                                                        <Border
+                                                            Grid.Row="1"
+                                                            Padding="8"
+                                                            BorderBrush="#302042"
+                                                            BorderThickness="1"
+                                                            CornerRadius="8"
+                                                            ClipToBounds="True">
+                                                            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                                                          HorizontalScrollBarVisibility="Disabled">
+                                                                <ItemsControl ItemsSource="{Binding SystemParameterSelections}">
+                                                                    <ItemsControl.ItemTemplate>
+                                                                        <DataTemplate>
+                                                                            <CheckBox
+                                                                                Content="{Binding DisplayName}"
+                                                                                IsChecked="{Binding IsSelected, Mode=TwoWay}" />
+                                                                        </DataTemplate>
+                                                                    </ItemsControl.ItemTemplate>
+                                                                </ItemsControl>
+                                                            </ScrollViewer>
+                                                        </Border>
+                                                    </Grid>
+                                                </TabItem>
+                                                <TabItem Header="Channels" FontSize="15">
+                                                    <Grid Margin="0,8,0,0"
+                                                          RowDefinitions="Auto,Auto,*,Auto,Auto,*"
+                                                          RowSpacing="8">
+                                                        <TextBlock Grid.Row="0" Text="Channels" />
+                                                        <CheckBox
+                                                            Grid.Row="1"
+                                                            Content="Select/Deselect All"
+                                                            IsChecked="{Binding AreAllChannelsSelected, Mode=TwoWay}" />
+                                                        <Border
+                                                            Grid.Row="2"
+                                                            Padding="8"
+                                                            BorderBrush="#302042"
+                                                            BorderThickness="1"
+                                                            CornerRadius="8"
+                                                            ClipToBounds="True">
+                                                            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                                                          HorizontalScrollBarVisibility="Disabled">
+                                                                <ItemsControl ItemsSource="{Binding ChannelSelections}">
+                                                                    <ItemsControl.ItemTemplate>
+                                                                        <DataTemplate>
+                                                                            <CheckBox
+                                                                                Content="{Binding DisplayName}"
+                                                                                IsChecked="{Binding IsSelected, Mode=TwoWay}" />
+                                                                        </DataTemplate>
+                                                                    </ItemsControl.ItemTemplate>
+                                                                </ItemsControl>
+                                                            </ScrollViewer>
+                                                        </Border>
+                                                        <TextBlock Grid.Row="3" Text="Channel Parameters" />
+                                                        <CheckBox
+                                                            Grid.Row="4"
+                                                            Content="Select/Deselect All"
+                                                            IsChecked="{Binding AreAllChannelFieldsSelected, Mode=TwoWay}" />
+                                                        <Border
+                                                            Grid.Row="5"
+                                                            Padding="8"
+                                                            BorderBrush="#302042"
+                                                            BorderThickness="1"
+                                                            CornerRadius="8"
+                                                            ClipToBounds="True">
+                                                            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                                                          HorizontalScrollBarVisibility="Disabled">
+                                                                <ItemsControl ItemsSource="{Binding ChannelFieldSelections}">
+                                                                    <ItemsControl.ItemTemplate>
+                                                                        <DataTemplate>
+                                                                            <CheckBox
+                                                                                Content="{Binding DisplayName}"
+                                                                                IsChecked="{Binding IsSelected, Mode=TwoWay}" />
+                                                                        </DataTemplate>
+                                                                    </ItemsControl.ItemTemplate>
+                                                                </ItemsControl>
+                                                            </ScrollViewer>
+                                                        </Border>
+                                                    </Grid>
+                                                </TabItem>
+                                                <TabItem Header="Inputs" FontSize="15">
+                                                    <Grid Margin="0,8,0,0"
+                                                          RowDefinitions="Auto,Auto,*,Auto,Auto,*"
+                                                          RowSpacing="8">
+                                                        <TextBlock Grid.Row="0" Text="Digital Inputs" />
+                                                        <CheckBox
+                                                            Grid.Row="1"
+                                                            Content="Select/Deselect All"
+                                                            IsChecked="{Binding AreAllDigitalInputsSelected, Mode=TwoWay}" />
+                                                        <Border
+                                                            Grid.Row="2"
+                                                            Padding="8"
+                                                            BorderBrush="#302042"
+                                                            BorderThickness="1"
+                                                            CornerRadius="8"
+                                                            ClipToBounds="True">
+                                                            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                                                          HorizontalScrollBarVisibility="Disabled">
+                                                                <ItemsControl ItemsSource="{Binding DigitalInputSelections}">
+                                                                    <ItemsControl.ItemTemplate>
+                                                                        <DataTemplate>
+                                                                            <CheckBox
+                                                                                Content="{Binding DisplayName}"
+                                                                                IsChecked="{Binding IsSelected, Mode=TwoWay}" />
+                                                                        </DataTemplate>
+                                                                    </ItemsControl.ItemTemplate>
+                                                                </ItemsControl>
+                                                            </ScrollViewer>
+                                                        </Border>
+                                                        <TextBlock Grid.Row="3" Text="Analogue Inputs" />
+                                                        <CheckBox
+                                                            Grid.Row="4"
+                                                            Content="Select/Deselect All"
+                                                            IsChecked="{Binding AreAllAnalogueInputsSelected, Mode=TwoWay}" />
+                                                        <Border
+                                                            Grid.Row="5"
+                                                            Padding="8"
+                                                            BorderBrush="#302042"
+                                                            BorderThickness="1"
+                                                            CornerRadius="8"
+                                                            ClipToBounds="True">
+                                                            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                                                          HorizontalScrollBarVisibility="Disabled">
+                                                                <ItemsControl ItemsSource="{Binding AnalogueInputSelections}">
+                                                                    <ItemsControl.ItemTemplate>
+                                                                        <DataTemplate>
+                                                                            <CheckBox
+                                                                                Content="{Binding DisplayName}"
+                                                                                IsChecked="{Binding IsSelected, Mode=TwoWay}" />
+                                                                        </DataTemplate>
+                                                                    </ItemsControl.ItemTemplate>
+                                                                </ItemsControl>
+                                                            </ScrollViewer>
+                                                        </Border>
+                                                    </Grid>
+                                                </TabItem>
+                                            </TabControl>
+                                        </Grid>
+                                    </TabItem>
+                                    <TabItem Header="Metrics" FontSize="15">
+                                        <Grid Margin="12">
+                                            <Border
+                                                BorderBrush="#302042"
+                                                BorderThickness="1"
+                                                CornerRadius="8">
+                                                <DataGrid
+                                                    AutoGenerateColumns="False"
+                                                    CanUserReorderColumns="False"
+                                                    CanUserResizeColumns="True"
+                                                    CanUserSortColumns="False"
+                                                    GridLinesVisibility="All"
+                                                    Focusable="False"
+                                                    IsReadOnly="True"
+                                                    ItemsSource="{Binding LogMetricRows}">
+                                                    <DataGrid.Styles>
+                                                        <Style Selector="DataGridColumnHeader">
+                                                            <Setter Property="FontSize" Value="18" />
+                                                            <Setter Property="FontWeight" Value="ExtraBold" />
+                                                            <Setter Property="HorizontalContentAlignment" Value="Center" />
+                                                            <Setter Property="VerticalContentAlignment" Value="Center" />
+                                                            <Setter Property="Padding" Value="8,4,-26,4" />
+                                                            <Setter Property="Margin" Value="0,0,0,0" />
+                                                            <Setter Property="Foreground" Value="White" />
+                                                        </Style>
+                                                        <Style Selector="DataGridCell">
+                                                            <Setter Property="Padding" Value="12,6"/>
+                                                            <Setter Property="VerticalContentAlignment" Value="Center"/>
+                                                            <Setter Property="Foreground" Value="White" />
+                                                            <Setter Property="HorizontalContentAlignment" Value="Center" />
+                                                        </Style>
+                                                        <Style Selector="DataGridRow:pointerover">
+                                                            <Setter Property="Background" Value="Transparent"/>
+                                                        </Style>
+                                                    </DataGrid.Styles>
+                                                    <DataGrid.Columns>
+                                                        <DataGridTextColumn
+                                                            Width="2*"
+                                                            Binding="{Binding Metric}"
+                                                            Header="Metric" />
+                                                        <DataGridTextColumn
+                                                            Width="*"
+                                                            Binding="{Binding Value}"
+                                                            Header="Value" />
+                                                    </DataGrid.Columns>
+                                                </DataGrid>
+                                            </Border>
+                                        </Grid>
+                                    </TabItem>
+                                </TabControl>
+                            </Border>
+                        </Grid>
+                        <Border
+                            Grid.Column="1"
+                            Grid.Row="0"
+                            Margin="5"
+                            BorderBrush="#443553"
+                            BorderThickness="1"
+                            CornerRadius="10"
+                            ClipToBounds="True">
+                            <Border.Background>
+                                <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                                    <GradientStop Color="#FF141722" Offset="0" />
+                                    <GradientStop Color="#FF221C34" Offset="0.5" />
+                                    <GradientStop Color="#FF302042" Offset="1" />
+                                </LinearGradientBrush>
+                            </Border.Background>
+                            <TabControl
+                                SelectedIndex="{Binding SelectedLogDetailTabIndex, Mode=TwoWay}"
+                                TabStripPlacement="Top">
+                                <TabItem Header="Chart" FontSize="15">
+                                    <Grid Margin="16" ClipToBounds="True">
+                                        <lvc:CartesianChart
+                                            x:Name="LogChart"
+                                            FindingStrategy="{Binding LogFindingStrategy}"
+                                            HorizontalAlignment="Stretch"
+                                            VerticalAlignment="Stretch"
+                                            LegendPosition="Bottom"
+                                            Series="{Binding LogSeriesCollection}"
+                                            XAxes="{Binding LogXAxes}"
+                                            YAxes="{Binding LogYAxes}"
+                                            ZoomMode="X"
+                                            ClipToBounds="True"/>
+                                    </Grid>
+                                </TabItem>
+                                <TabItem Header="Map" FontSize="15">
+                                    <Grid Margin="0,8,0,0"
+                                          RowDefinitions="8*,4*"
+                                          RowSpacing="8">
+                                        <mapsui:MapControl x:Name="LogMap" Grid.Row="0"/>
+                                        <DataGrid
+                                            x:Name="LogMapDataGrid"
+                                            AutoGenerateColumns="False"
+                                            CanUserReorderColumns="False"
+                                            CanUserResizeColumns="True"
+                                            CanUserSortColumns="False"
+                                            GridLinesVisibility="All"
+                                            Focusable="False"
+                                            IsReadOnly="True"
+                                            Grid.Row="1"
+                                            ItemsSource="{Binding LogMapInspectionRows}">
+                                            <DataGrid.Styles>
+                                                <Style Selector="DataGridColumnHeader">
+                                                    <Setter Property="FontSize" Value="18" />
+                                                    <Setter Property="FontWeight" Value="ExtraBold" />
+                                                    <Setter Property="HorizontalContentAlignment" Value="Center" />
+                                                    <Setter Property="VerticalContentAlignment" Value="Center" />
+                                                    <Setter Property="Padding" Value="8,4,-26,4" />
+                                                    <Setter Property="Margin" Value="0,0,0,0" />
+                                                    <Setter Property="Foreground" Value="White" />
+                                                </Style>
+                                                <Style Selector="DataGridCell">
+                                                    <Setter Property="Padding" Value="0"/>
+                                                    <Setter Property="HorizontalContentAlignment" Value="Center"/>
+                                                    <Setter Property="VerticalContentAlignment" Value="Stretch"/>
+                                                    <Setter Property="Foreground" Value="White" />
+                                                </Style>
+                                                <Style Selector="DataGridRow:pointerover">
+                                                    <Setter Property="Background" Value="Transparent"/>
+                                                </Style>
+                                            </DataGrid.Styles>
+                                        </DataGrid>
+                                    </Grid>
+                                </TabItem>
+                            </TabControl>
+                        </Border>
+                    </Grid>
+</UserControl>

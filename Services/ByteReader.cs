@@ -7,6 +7,10 @@ namespace Cortex.Services
         private readonly byte[] _buffer;
         private int _index;
 
+        public int Position => _index;
+
+        public int Remaining => _buffer.Length - _index;
+
         public ByteReader(byte[] buffer, int startIndex = 0)
         {
             _buffer = buffer;

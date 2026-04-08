@@ -3,10 +3,12 @@
 ; Non-commercial use only
 
 #define MyAppName "Cortex"
-#define MyAppVersion "0.1.3"
+#define MyAppVersion "0.1.4"
 #define MyAppPublisher "Joe Mann"
 #define MyAppURL "https://wiki.joeblogs.uk"
 #define MyAppExeName "Cortex.exe"
+#define MyProjectRoot ".."
+#define MyPublishDir MyProjectRoot + "\\bin\\Release\\net8.0\\win-x64\\publish"
 
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.
@@ -33,7 +35,7 @@ DisableProgramGroupPage=yes
 ; Uncomment the following line to run in non administrative install mode (install for current user only).
 ;PrivilegesRequired=lowest
 OutputBaseFilename=CortexSetup
-SetupIconFile=G:\Users\Joe\documents\GitHub\Cortex\Assets\cortex.ico
+SetupIconFile={#MyProjectRoot}\Assets\cortex.ico
 SolidCompression=yes
 WizardStyle=modern dynamic
 
@@ -44,8 +46,8 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "G:\Users\Joe\documents\GitHub\Cortex\bin\Release\net8.0\win-x64\publish\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "G:\Users\Joe\documents\GitHub\Cortex\bin\Release\net8.0\win-x64\publish\*"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyPublishDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyPublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
 [Icons]

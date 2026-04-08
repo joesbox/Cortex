@@ -24,6 +24,8 @@
 
         public const char COMMAND_ID_REQUEST = 'r';
 
+        public const char COMMAND_ID_REQUEST_STATIC = 'R';
+
         public const char COMMAND_ID_NEWCONFIG = 'n';
 
         public const char COMMAND_ID_SKIP = 'k';
@@ -38,12 +40,48 @@
 
         public const char COMMAND_ID_BUILD_DATE = 'd';
 
-        public const int NUMBER_CHANNEL_PARAMETERS = 13;
+        public const char COMMAND_ID_LOG_LIST = 'l';
 
-        public const int NUMBER_ANALOGUE_PARAMETERS = 10;
+        public const char COMMAND_ID_LOG_OPEN = 'o';
 
-        public const int NUMBER_SYSTEM_PARAMETERS = 11;
+        public const char COMMAND_ID_LOG_CHUNK = 'p';
 
-        public const int NUMBER_DIGITAL_INPUT_PARAMETERS = 1;
+        public const char COMMAND_ID_LOG_STREAM = 'q';
+
+        public const char COMMAND_ID_LOG_CANCEL = 'x';
+
+        public const char COMMAND_ID_LOG_RESET = 'w';
+
+        public const char COMMAND_ID_LOG_BULK = 'y';
+
+        public const char COMMAND_ID_FW_UPLOAD_BEGIN = 'U';
+
+        public const char COMMAND_ID_FW_UPLOAD_CHUNK = 'J';
+
+        public const char COMMAND_ID_FW_UPLOAD_END = 'E';
+
+        public const char COMMAND_ID_FW_UPLOAD_CANCEL = 'C';
+
+        public const char COMMAND_ID_FW_INSTALL = 'I';
+
+        public const char COMMAND_ID_FW_DIAGNOSTIC = 'Z';
+
+        public const char COMMAND_ID_SET_RTC = 'T';
+
+        public const char COMMAND_ID_FACTORY_RESET = 'P';
+
+        public const int LOG_FILE_NAME_LENGTH = 24;
+
+        public const int LAST_CHANNEL_PARAM_INDEX = 27;
+
+        public const int LAST_ANALOGUE_PARAM_INDEX = 12;
+
+        public const int LAST_SYSTEM_PARAM_INDEX = 11;
+
+        public const int SYSTEM_PARAM_TIME_ZONE_RULE = 11;
+
+        public const int TIME_ZONE_RULE_LENGTH = 15;
+
+        public const int LAST_DIGITAL_PARAM_INDEX = 0;
     }
 }

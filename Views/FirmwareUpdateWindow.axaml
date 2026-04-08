@@ -1,0 +1,34 @@
+<Window
+    x:Class="Cortex.Views.FirmwareUpdateWindow"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:vm="using:Cortex.ViewModels"
+    x:DataType="vm:FirmwareUpdateWindowViewModel"
+    Width="620"
+    Height="340"
+    CanResize="False"
+    Title="Firmware Update"
+    WindowStartupLocation="CenterOwner"
+    mc:Ignorable="d">
+    <Grid RowDefinitions="Auto,*,Auto" Margin="20">
+        <StackPanel Spacing="12">
+            <TextBlock FontSize="22" FontWeight="SemiBold" Text="{Binding AvailableVersionText}" />
+            <Border Background="#442222" BorderBrush="#AA4444" BorderThickness="1" CornerRadius="8" Padding="12">
+                <TextBlock Text="{Binding WarningMessage}" TextWrapping="Wrap" />
+            </Border>
+        </StackPanel>
+
+        <StackPanel Grid.Row="1" Margin="0,20,0,0" Spacing="12">
+            <TextBlock FontSize="16" Text="{Binding StatusMessage}" TextWrapping="Wrap" />
+            <ProgressBar Height="18" Minimum="0" Maximum="100" Value="{Binding ProgressPercent}" />
+            <TextBlock HorizontalAlignment="Right" Text="{Binding ProgressPercent, StringFormat='{}{0:F0}%'}" />
+        </StackPanel>
+
+        <StackPanel Grid.Row="2" HorizontalAlignment="Right" Orientation="Horizontal" Spacing="10">
+            <Button Content="Update Now" Command="{Binding UpdateNowCommand}" IsEnabled="{Binding CanStartUpdate}" MinWidth="120" />
+            <Button Content="{Binding CancelButtonText}" Command="{Binding CancelCommand}" IsEnabled="{Binding CanUseCancelButton}" MinWidth="120" />
+        </StackPanel>
+    </Grid>
+</Window>

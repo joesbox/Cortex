@@ -26,7 +26,7 @@ namespace Cortex.Services
             {
                 lock (_lock)
                 {
-                    LogEntries.Add(entry);
+                    LogEntries.Insert(0, entry);
                 }
             });
         }

@@ -40,8 +40,8 @@ namespace Cortex.Models
 
             for (int i = 0; i < Constants.NUM_OUTPUT_CHANNELS; i++)
             {
-                channelsLiveData.Add(new OutputChannel());
-                channelsStaticData.Add(new OutputChannel());
+                channelsLiveData.Add(new OutputChannel { ChannelNumber = i + 1 });
+                channelsStaticData.Add(new OutputChannel { ChannelNumber = i + 1 });
             }
 
             digitalInputsLiveData = new ObservableCollection<DigitalInput>();
@@ -58,8 +58,8 @@ namespace Cortex.Models
 
             for (int i = 0; i < Constants.NUM_ANALOGUE_INPUTS; i++)
             {
-                analogueInputsStaticData.Add(new AnalogueInput(i + 1, false, false, true, true, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0));
-                analogueInputsLiveData.Add(new AnalogueInput(i + 1, false, false, true, true, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0));
+                analogueInputsStaticData.Add(new AnalogueInput(i + 1, false, false, null));
+                analogueInputsLiveData.Add(new AnalogueInput(i + 1, false, false, null));
             }
 
             systemParams = new SystemParameters();

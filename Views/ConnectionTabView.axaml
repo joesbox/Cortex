@@ -1,0 +1,124 @@
+﻿<UserControl
+    x:Class="Cortex.Views.ConnectionTabView"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:vm="using:Cortex.ViewModels"
+    x:DataType="vm:MainWindowViewModel"
+    mc:Ignorable="d">
+    <Grid RowDefinitions="Auto, *">
+        <Border
+            Grid.Row="0"
+            Width="340"
+            Height="100"
+            Margin="5"
+            HorizontalAlignment="Left"
+            VerticalAlignment="Top"
+            BorderBrush="#443553"
+            BorderThickness="1"
+            CornerRadius="10">
+            <Border.Background>
+                <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                    <GradientStop Color="#FF141722" Offset="0" />
+                    <GradientStop Color="#FF221C34" Offset="0.5" />
+                    <GradientStop Color="#FF302042" Offset="1" />
+                </LinearGradientBrush>
+            </Border.Background>
+            <Grid RowDefinitions="Auto, Auto">
+                <ComboBox
+                    Grid.Row="0"
+                    Width="315"
+                    Margin="10"
+                    ItemsSource="{Binding SerialPorts}"
+                    SelectedItem="{Binding SelectedSerialPort, Mode=TwoWay}" />
+                <Grid
+                    Grid.Row="1"
+                    ColumnDefinitions="Auto,Auto,Auto"
+                    ColumnSpacing="8">
+                    <Button
+                        Grid.Column="0"
+                        Width="110"
+                        Margin="10,0,0,0"
+                        HorizontalAlignment="Center"
+                        HorizontalContentAlignment="Center"
+                        Command="{Binding DisconnectCommand}"
+                        Content="DISCONNECT"
+                        IsEnabled="{Binding IsConnected}" />
+                    <Button
+                        Grid.Column="1"
+                        Width="90"
+                        Margin="5,0,5,0"
+                        HorizontalAlignment="Center"
+                        HorizontalContentAlignment="Center"
+                        Command="{Binding RefreshSerialPortsCommand}"
+                        Content="REFRESH"
+                        IsEnabled="{Binding !IsConnected}" />
+                    <Button
+                        Grid.Column="2"
+                        Width="90"
+                        Margin="0,0,10,0"
+                        HorizontalAlignment="Center"
+                        HorizontalContentAlignment="Center"
+                        Command="{Binding ConnectCommand}"
+                        CommandParameter="{Binding SelectedSerialPort}"
+                        Content="CONNECT"
+                        IsEnabled="{Binding !IsConnected}" />
+                </Grid>
+            </Grid>
+        </Border>
+        <DockPanel Grid.Row="1" LastChildFill="True">
+            <Border
+                Margin="5"
+                HorizontalAlignment="Stretch"
+                VerticalAlignment="Stretch"
+                BorderBrush="#443553"
+                BorderThickness="1"
+                CornerRadius="10">
+                <Border.Background>
+                    <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                        <GradientStop Color="#FF141722" Offset="0" />
+                        <GradientStop Color="#FF221C34" Offset="0.5" />
+                        <GradientStop Color="#FF302042" Offset="1" />
+                    </LinearGradientBrush>
+                </Border.Background>
+                <Grid
+                    Margin="10,0,10,20"
+                    HorizontalAlignment="Stretch"
+                    VerticalAlignment="Stretch"
+                    RowDefinitions="Auto, *">
+                    <Rectangle
+                        Grid.Row="0"
+                        Height="35"
+                        RadiusX="5"
+                        RadiusY="5"
+                        Margin="0"
+                        Fill="#ff302042" />
+                    <TextBlock
+                        Grid.Row="0"
+                        Margin="5"
+                        Padding="10"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Top"
+                        FontSize="17"
+                        Text="System Log" />
+                    <ScrollViewer
+                        Name="LogScrollViewer"
+                        Grid.Row="1"
+                        Margin="0,20,0,0"
+                        Height="{Binding $parent.Bounds.Height}"
+                        HorizontalScrollBarVisibility="Disabled"
+                        VerticalScrollBarVisibility="Auto">
+                        <ItemsControl ItemsSource="{Binding LogEntries}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Margin="4" FontSize="16" FontWeight="Light" Classes="log" Text="{Binding}" />
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+        </DockPanel>
+    </Grid>
+</UserControl>

@@ -1,0 +1,73 @@
+<Window
+    x:Class="Cortex.Views.SplashWindow"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:Cortex.ViewModels"
+    x:DataType="vm:SplashViewModel"
+    Title="Cortex Loading"
+    Width="560"
+    Height="295"
+    CanResize="False"
+    ShowInTaskbar="False"
+    Topmost="True"
+    SystemDecorations="None"
+    Background="#00000000"
+    WindowStartupLocation="CenterScreen">
+
+    <Border
+        Margin="10"
+        Padding="24"
+        CornerRadius="12"
+        BorderThickness="1"
+        BorderBrush="#443553">
+        <Border.Background>
+            <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                <GradientStop Color="#FF141722" Offset="0" />
+                <GradientStop Color="#FF221C34" Offset="0.5" />
+                <GradientStop Color="#FF302042" Offset="1" />
+            </LinearGradientBrush>
+        </Border.Background>
+        <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="12">
+            <Image
+                Grid.Row="0"
+                Width="64"
+                Height="64"
+                HorizontalAlignment="Center"
+                Source="avares://Cortex/Assets/cortex.ico" />
+
+            <TextBlock
+                Grid.Row="1"
+                FontSize="38"
+                FontWeight="Bold"
+                HorizontalAlignment="Center"
+                Text="C O R T E X" />
+
+            <TextBlock
+                Grid.Row="2"
+                FontSize="14"
+                HorizontalAlignment="Center"
+                Opacity="0.85"
+                Text="Initializing application..." />
+
+            <ProgressBar
+                Grid.Row="3"
+                Height="18"
+                Minimum="0"
+                Maximum="100"
+                Value="{Binding ProgressValue}" />
+
+            <TextBlock
+                Grid.Row="4"
+                FontSize="13"
+                HorizontalAlignment="Center"
+                Text="{Binding ProgressStatus}" />
+
+            <TextBlock
+                Grid.Row="5"
+                HorizontalAlignment="Right"
+                FontSize="12"
+                Opacity="0.75"
+                Text="{Binding VersionText}" />
+        </Grid>
+    </Border>
+</Window>

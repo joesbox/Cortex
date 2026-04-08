@@ -1,5 +1,4 @@
 ﻿using Avalonia.Controls;
-using Avalonia.Interactivity;
 using Avalonia.Xaml.Interactivity;
 using System;
 using System.Linq;

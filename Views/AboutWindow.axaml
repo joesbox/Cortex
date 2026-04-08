@@ -1,0 +1,69 @@
+<Window
+    x:Class="Cortex.Views.AboutWindow"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:Cortex.ViewModels"
+    x:DataType="vm:AboutWindowViewModel"
+    Title="About Cortex"
+    Width="520"
+    Height="320"
+    CanResize="False"
+    WindowStartupLocation="CenterOwner"
+    Icon="/Assets/cortex.ico">
+
+    <Grid RowDefinitions="*,Auto" Margin="16" RowSpacing="14">
+        <Border
+            Grid.Row="0"
+            Padding="16"
+            CornerRadius="10"
+            BorderBrush="#302042"
+            BorderThickness="1"
+            Background="#15151f">
+            <Grid RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="10">
+                <Image
+                    Grid.Row="0"
+                    Width="74"
+                    Height="74"
+                    HorizontalAlignment="Center"
+                    Source="avares://Cortex/Assets/cortex.ico" />
+
+                <TextBlock
+                    Grid.Row="1"
+                    FontSize="34"
+                    FontWeight="Bold"
+                    HorizontalAlignment="Center"
+                    Text="C O R T E X" />
+
+                <TextBlock
+                    Grid.Row="2"
+                    HorizontalAlignment="Center"
+                    FontSize="16"
+                    Text="{Binding VersionText}" />
+
+                <StackPanel
+                    Grid.Row="3"
+                    HorizontalAlignment="Center"
+                    Orientation="Horizontal"
+                    Spacing="8">
+                    <TextBlock VerticalAlignment="Center" Text="Wiki:" />
+                    <Button
+                        VerticalAlignment="Center"
+                        Command="{Binding OpenWikiCommand}"
+                        Content="https://wiki.joeblogs.uk"
+                        Padding="2,0"
+                        Background="Transparent"
+                        BorderBrush="Transparent"
+                        HorizontalContentAlignment="Center"
+                        Foreground="#66c2ff" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Button
+            Grid.Row="1"
+            Width="100"
+            HorizontalAlignment="Right"
+            Command="{Binding CloseCommand}"
+            Content="CLOSE" />
+    </Grid>
+</Window>

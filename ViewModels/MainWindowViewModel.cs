@@ -1,28 +1,45 @@
-﻿using CommunityToolkit.Mvvm.ComponentModel;
+﻿using Avalonia.Media;
+using Avalonia.Threading;
+using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Cortex.Models;
 using Cortex.Services;
 using LiveChartsCore;
 using LiveChartsCore.Defaults;
 using LiveChartsCore.Kernel.Sketches;
+using LiveChartsCore.Measure;
 using LiveChartsCore.SkiaSharpView;
 using LiveChartsCore.SkiaSharpView.Painting;
 using SkiaSharp;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
+using System.IO;
 using System.IO.Ports;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Timers;
+using static Cortex.ViewModels.MainWindowViewModel;
 
 /*
 
  * Version history:
     Date              Version       Description
-    ----              -------       ------------------------------------------------------------
+    ----              -------       ----------------------------------------------------------------------------------------------------------------------------------------------------
+    2026-02-25        v0.1.4        Soft start/stop and inrush current parameters added to OutputChannel and config sending updated to include them.
+                                    Save and load config file functionality added to UI, using JSON format for readability and ease of debugging. Config file operations are asynchronous to prevent UI blocking.
+                                    Working analogue threshold and scaled parameters. Moved to channel configuration.
+                                    Log download and visualisation.
+                                    Splash screen and about window.
+                                    New intermittent channel type.
+                                    Firmware update functionality added, including checking for updates from GitHub and updating via local file selection.
     2026-02-16        v0.1.3        Added new CAN bus system parameters and updated config sending to include them.
     2026-01-20        v0.1.2        Added motion detect system parameters and corrected byte padding for system parameters.
     2025-12-12        v0.1.1        Removed LiPo backup battery gauges and serial comms data.
@@ -35,6 +52,9 @@ namespace Cortex.ViewModels
 {
     public partial class MainWindowViewModel : ObservableObject
     {
+        private const byte TimeZoneFixedDateFlag = 0x80;
+        private const byte TimeZoneDayMask = 0x1F;
+
         [ObservableProperty]
         private DataStructures liveDataView = new(); // For live/status data
 
@@ -48,7 +68,50 @@ namespace Cortex.ViewModels
         private bool commsEstablished;
 
         [ObservableProperty]
+        private string firmwareUpdateButtonText = "No firmware available";
+
+        [ObservableProperty]
+        private IBrush firmwareUpdateButtonBackground = FirmwareIdleBrush;
+
+        [ObservableProperty]
+        private bool isFirmwareUpdateAvailable;
+
+        [ObservableProperty]
+        private bool isCheckingFirmwareUpdate;
+
+        [ObservableProperty]
+        private string controllerFirmwareVersion = string.Empty;
+
+        [ObservableProperty]
         private string systemDateTime;
+
+        [ObservableProperty]
+        private DateTimeOffset? controllerRtcDate;
+
+        [ObservableProperty]
+        private TimeSpan? controllerRtcTime;
+
+        [ObservableProperty]
+        private TimeZoneDisplay? selectedTimeZoneDisplay;
+
+        [ObservableProperty]
+        private bool isSettingControllerRtc;
+
+        [ObservableProperty]
+        private bool isFactoryResetInProgress;
+
+        [ObservableProperty]
+        private string factoryResetStatusMessage = string.Empty;
+
+        public bool HasControllerSaveTimestamp => !string.IsNullOrWhiteSpace(SystemDateTime);
+
+        public bool CanSetControllerRtc => IsConnected && CommsEstablished && !IsLogBusy && !IsSettingControllerRtc && _portService != null;
+
+        public bool CanFactoryReset => IsConnected && CommsEstablished && !IsLogBusy && !IsFactoryResetInProgress && _portService != null;
+
+        public string SetControllerRtcButtonText => IsSettingControllerRtc ? "Setting..." : "Set controller clock";
+
+        public string FactoryResetButtonText => IsFactoryResetInProgress ? "Resetting..." : "Factory Reset PDM";
 
         [ObservableProperty]
         private bool sdOK;
@@ -69,7 +132,7 @@ namespace Cortex.ViewModels
         private bool gpsOK;
 
         [ObservableProperty]
-        private ObservableCollection<string> serialPorts = new();
+        private ObservableCollection<string> serialPorts = [];
 
         [ObservableProperty]
         private string? selectedSerialPort;
@@ -144,16 +207,37 @@ namespace Cortex.ViewModels
         private ChannelTypeDisplay? selectedChannelTypeDisplay;
 
         [ObservableProperty]
+        private ChannelCategoryDisplay? selectedChannelCategoryDisplay;
+
+        [ObservableProperty]
         private DigitalInput? selectedDigitalInput;
 
         [ObservableProperty]
-        private AnalogueInput? _selectedAnalogueInput;
+        private AnalogueInput? selectedAnalogueInput;
 
         [ObservableProperty]
-        private ObservableCollection<ISeries> seriesCollection = new();
+        private ObservableCollection<ISeries> seriesCollection = [];
 
         [ObservableProperty]
         private int selectedTimeWindowSeconds = 60;
+
+        [ObservableProperty]
+        private bool hasPendingConfigChanges;
+
+        [ObservableProperty]
+        private int selectedLogDetailTabIndex;
+
+        [ObservableProperty]
+        private ObservableCollection<LogMapGridRow> logMapGridRows = [];
+
+        [ObservableProperty]
+        private ObservableCollection<LogMapInspectionRow> logMapInspectionRows = [];
+
+        [ObservableProperty]
+        private int logMapDataVersion;
+
+        [ObservableProperty]
+        private int logMapRouteVersion;
 
         private readonly System.Timers.Timer updateTimer;
         private readonly DateTime startTime = DateTime.UtcNow;
@@ -162,6 +246,8 @@ namespace Cortex.ViewModels
         private DataStructures _pendingLiveData;
         private readonly object _pendingDataLock = new();
         private bool _hasPendingData = false;
+        private bool _pauseLiveUiUpdates;
+        private readonly DispatcherTimer _logViewportMonitorTimer;
 
         private InputDisplayItem? _selectedInputItem;
 
@@ -174,15 +260,46 @@ namespace Cortex.ViewModels
         private readonly System.Timers.Timer _commsTimer = new(1000); // Every 1000 millis
 
         private readonly IAppCloser _appCloser;
+        private readonly FirmwareUpdateService _firmwareUpdateService = new();
+        private CancellationTokenSource? _firmwareCheckCts;
+        private FirmwareReleaseInfo? _latestFirmwareRelease;
+        private FirmwareReleaseInfo? _availableFirmwareRelease;
 
-        // STM32 pin definitions
-        private static readonly byte[] DIChannelInputPins = { 79, 78, 77, 76, 75, 74, 73, 72 };
+        private readonly Dictionary<string, SKColor> _logSeriesColorRegistry = new(StringComparer.OrdinalIgnoreCase);
 
-        private static readonly byte[] ANAChannelInputPins = { 208, 209, 210, 211, 212, 213, 214, 215 };
+        private static readonly IBrush FirmwareIdleBrush = new SolidColorBrush(Color.Parse("#40404A"));
+        private static readonly IBrush FirmwareAvailableBrush = new SolidColorBrush(Color.Parse("#2C8F57"));
 
-        private static readonly byte[] AllInputPins = DIChannelInputPins.Concat(ANAChannelInputPins).ToArray();
+        private static readonly byte[] DIChannelInputPins = InputPinCatalog.DIChannelInputPins;
+
+        private static readonly byte[] ANAChannelInputPins = InputPinCatalog.ANAChannelInputPins;
+
+        private static readonly byte[] AllInputPins = InputPinCatalog.AllInputPins;
 
         public RelayCommand ExitCommand { get; }
+
+        public bool CanOpenFirmwareUpdateDialog =>
+            IsConnected &&
+            CommsEstablished &&
+            !IsCheckingFirmwareUpdate &&
+            IsFirmwareUpdateAvailable &&
+            _portService != null;
+
+        public bool CanOpenLocalFirmwareUpdateDialog =>
+            IsConnected &&
+            CommsEstablished &&
+            !IsCheckingFirmwareUpdate &&
+            _portService != null;
+
+        public string CurrentFirmwareVersionDisplay => string.IsNullOrWhiteSpace(ControllerFirmwareVersion)
+            ? "Unknown"
+            : ControllerFirmwareVersion;
+
+        public bool HasLatestFirmwareGitHubLink => !string.IsNullOrWhiteSpace(_latestFirmwareRelease?.GitHubUrl);
+
+        public string LatestFirmwareGitHubLinkText => string.IsNullOrWhiteSpace(_latestFirmwareRelease?.Version)
+            ? "Latest firmware on GitHub"
+            : $"Latest on GitHub: {_latestFirmwareRelease.Version}";
 
         public ObservableCollection<string> LogEntries => LoggingService.LogEntries;
 
@@ -190,9 +307,52 @@ namespace Cortex.ViewModels
 
         public ObservableCollection<ChannelTypeDisplay> ChannelTypes { get; }
 
+        public ObservableCollection<ChannelCategoryDisplay> ChannelCategories { get; }
+
+        public ObservableCollection<AnalogueTypeDisplay> AnalogueChannelTypes { get; }
+
+        public ObservableCollection<AnalogueUnitDisplay> AnalogueUnits { get; }
+
+        public ObservableCollection<byte> AnalogueCalibrationPointOptions { get; }
+
+        public ObservableCollection<CanIdOption> AvailableCanIds { get; }
+
+        public ObservableCollection<TimeZoneDisplay> TimeZones { get; }
+
+        public string SpeedUnit => SettingsDataView.SystemParamsStaticData.SpeedUnitPref ? "mph" : "km/h";
+        public string DistanceUnit => SettingsDataView.SystemParamsStaticData.DistanceUnitPref ? "feet" : "metres";
+
+        public IEnumerable<AnalogueUnitDisplay> FilteredAnalogueUnits
+        {
+            get
+            {
+                if (SelectedAnalogueInput == null)
+                {
+                    return AnalogueUnits;
+                }
+
+                return SelectedAnalogueInput.ChanType switch
+                {
+                    AnalogueInput.AnalogueChannelType.RawVoltage => AnalogueUnits.Where(unit => unit.Units == AnalogueInput.AnalogueUnits.Volts),
+                    AnalogueInput.AnalogueChannelType.Digital => AnalogueUnits.Where(unit => unit.Units == AnalogueInput.AnalogueUnits.Volts),
+                    AnalogueInput.AnalogueChannelType.NTC => AnalogueUnits.Where(unit => unit.Units == AnalogueInput.AnalogueUnits.Celsius || unit.Units == AnalogueInput.AnalogueUnits.Fahrenheit),
+                    _ => AnalogueUnits,
+                };
+            }
+        }
+
         private bool refreshStaticData = true;
 
         private readonly object _chartLock = new();
+
+        private bool _pendingRevertLog;
+        private bool _suppressDirtyTracking;
+        private bool _suppressTimeZoneSelectionWriteBack;
+        private DataStructures? _controllerConfigBaseline;
+        private double _activeLogFilterStartMs = double.NaN;
+        private double _activeLogFilterEndMs = double.NaN;
+        private double _lastRenderedLogViewportStartMs = double.NaN;
+        private double _lastRenderedLogViewportEndMs = double.NaN;
 
         public InputDisplayItem? SelectedInputItem
         {
@@ -212,8 +372,28 @@ namespace Cortex.ViewModels
 
         partial void OnSelectedPinNumberChanged(byte value)
         {
-            var index = Array.IndexOf(AllInputPins, value);
-            SelectedInputLabel = index >= 0 ? InputDisplayList.ElementAtOrDefault(index) : null;
+            SelectedInputLabel = InputDisplayList.FirstOrDefault(input => input.Pin == value);
+        }
+
+        partial void OnSystemDateTimeChanged(string value)
+        {
+            OnPropertyChanged(nameof(HasControllerSaveTimestamp));
+        }
+
+        partial void OnControllerRtcDateChanged(DateTimeOffset? value)
+        {
+            UpdateSelectedTimeZoneRule();
+        }
+
+        partial void OnSelectedTimeZoneDisplayChanged(TimeZoneDisplay? value)
+        {
+            if (_suppressTimeZoneSelectionWriteBack)
+            {
+                return;
+            }
+
+            SettingsDataView.SystemParamsStaticData.TimeZoneId = value?.Id;
+            UpdateSelectedTimeZoneRule();
         }
 
         partial void OnSelectedChannelIndexChanged(int oldValue, int newValue)
@@ -225,9 +405,14 @@ namespace Cortex.ViewModels
 
             if (SelectedChannel != null)
             {
-                SelectedPinNumber = SelectedChannel.InputControlPin;
                 SelectedChannelTypeDisplay = ChannelTypes.FirstOrDefault(ctd => ctd.ChannelType == SelectedChannel.ChanType);
+                SelectedChannelCategoryDisplay = ChannelCategories.FirstOrDefault(category => category.Category == SelectedChannel.Category);
+                RefreshInputDisplayList(SelectedChannel.ChanType);
+                SelectedPinNumber = SelectedChannel.InputControlPin;
                 SelectedChannelName = new string(SelectedChannel.Name).TrimEnd('\0');
+
+                // Update the IsPWMChannel property when channel changes
+                IsPWMChannel = SelectedChannel.IsPWMChannel;
             }
         }
 
@@ -245,9 +430,43 @@ namespace Cortex.ViewModels
             // Check that both the selected channel and the new value are not null
             if (SelectedChannel != null && value != null)
             {
+                bool typeChanged = SelectedChannel.ChanType != value.ChannelType;
+
                 // Update the ChanType property of the SelectedChannel with the new enum value
                 SelectedChannel.ChanType = value.ChannelType;
+
+                if (typeChanged && value.ChannelType == OutputChannel.ChannelType.Intermittent)
+                {
+                    SelectedChannel.IntermittentOnTime = 1.0f;
+                    SelectedChannel.IntermittentOffTime = 1.0f;
+                }
+
+                RefreshInputDisplayList(value.ChannelType);
+                SelectedPinNumber = SelectedChannel.InputControlPin;
+
+                // Update IsPWMChannel when channel type changes
+                IsPWMChannel = SelectedChannel.IsPWMChannel;
+                NotifyAnalogueChannelUiContextChanged();
             }
+        }
+
+        partial void OnSelectedChannelCategoryDisplayChanged(ChannelCategoryDisplay? value)
+        {
+            if (SelectedChannel != null && value != null)
+            {
+                SelectedChannel.Category = value.Category;
+            }
+        }
+
+        partial void OnSelectedChannelChanged(OutputChannel? value)
+        {
+            NotifyAnalogueChannelUiContextChanged();
+        }
+
+        partial void OnSelectedAnalogueInputChanged(AnalogueInput? value)
+        {
+            NotifyAnalogueChannelUiContextChanged();
+            OnPropertyChanged(nameof(FilteredAnalogueUnits));
         }
 
         partial void OnSelectedChannelNameChanged(string? value)
@@ -265,8 +484,584 @@ namespace Cortex.ViewModels
         {
             if (SelectedChannel != null && value != null)
             {
-                SelectedChannel.InputControlPin = AllInputPins[value.Index];
+                SelectedChannel.InputControlPin = value.Pin;
+                NotifyAnalogueChannelUiContextChanged();
             }
+        }
+
+        private static bool IsAnalogueChannelType(OutputChannel.ChannelType channelType)
+        {
+            return channelType == OutputChannel.ChannelType.Analogue ||
+                   channelType == OutputChannel.ChannelType.AnalogueScaled;
+        }
+
+        private static OutputChannel.ChannelType DefaultToAnalogueType(OutputChannel.ChannelType currentType)
+        {
+            return currentType switch
+            {
+                OutputChannel.ChannelType.Digital => OutputChannel.ChannelType.Analogue,
+                OutputChannel.ChannelType.PWM => OutputChannel.ChannelType.AnalogueScaled,
+                OutputChannel.ChannelType.Intermittent => OutputChannel.ChannelType.Analogue,
+                _ => currentType,
+            };
+        }
+
+        private static OutputChannel.ChannelType DefaultToDigitalType(OutputChannel.ChannelType currentType)
+        {
+            return currentType switch
+            {
+                OutputChannel.ChannelType.Analogue => OutputChannel.ChannelType.Digital,
+                OutputChannel.ChannelType.AnalogueScaled => OutputChannel.ChannelType.PWM,
+                _ => currentType,
+            };
+        }
+
+        private void SyncChannelTypeForAssignedInput(OutputChannel channel)
+        {
+            int analogueInputIndex = Array.IndexOf(ANAChannelInputPins, channel.InputControlPin);
+            if (analogueInputIndex < 0 || analogueInputIndex >= SettingsDataView.AnalogueInputsStaticData.Count)
+            {
+                return;
+            }
+
+            var analogueInput = SettingsDataView.AnalogueInputsStaticData[analogueInputIndex];
+            var syncedType = analogueInput.ChanType == AnalogueInput.AnalogueChannelType.Digital
+                ? DefaultToDigitalType(channel.ChanType)
+                : DefaultToAnalogueType(channel.ChanType);
+
+            if (syncedType != channel.ChanType)
+            {
+                channel.ChanType = syncedType;
+            }
+        }
+
+        private void DefaultChannelsForAnalogueInput(int analogueInputIndex)
+        {
+            if (analogueInputIndex < 0 || analogueInputIndex >= ANAChannelInputPins.Length)
+            {
+                return;
+            }
+
+            byte analoguePin = ANAChannelInputPins[analogueInputIndex];
+            foreach (var channel in SettingsDataView.ChannelsStaticData)
+            {
+                if (channel.InputControlPin != analoguePin)
+                {
+                    continue;
+                }
+
+                SyncChannelTypeForAssignedInput(channel);
+            }
+
+            if (SelectedChannel != null)
+            {
+                SelectedChannelTypeDisplay = ChannelTypes.FirstOrDefault(ctd => ctd.ChannelType == SelectedChannel.ChanType);
+                RefreshInputDisplayList(SelectedChannel.ChanType);
+                SelectedPinNumber = SelectedChannel.InputControlPin;
+                IsPWMChannel = SelectedChannel.IsPWMChannel;
+            }
+        }
+
+        private AnalogueInput? GetAssociatedAnalogueInputConfig(byte inputControlPin)
+        {
+            int analogueInputIndex = Array.IndexOf(ANAChannelInputPins, inputControlPin);
+            if (analogueInputIndex < 0 || analogueInputIndex >= SettingsDataView.AnalogueInputsStaticData.Count)
+            {
+                return null;
+            }
+
+            return SettingsDataView.AnalogueInputsStaticData[analogueInputIndex];
+        }
+
+        private static string GetUnitsSuffix(AnalogueInput.AnalogueUnits units)
+        {
+            return units switch
+            {
+                AnalogueInput.AnalogueUnits.Volts => "V",
+                AnalogueInput.AnalogueUnits.Amps => "A",
+                AnalogueInput.AnalogueUnits.Celsius => "°C",
+                AnalogueInput.AnalogueUnits.Fahrenheit => "°F",
+                AnalogueInput.AnalogueUnits.Percent => "%",
+                AnalogueInput.AnalogueUnits.RPM => "RPM",
+                AnalogueInput.AnalogueUnits.KPH => "kph",
+                AnalogueInput.AnalogueUnits.MPH => "mph",
+                AnalogueInput.AnalogueUnits.Bar => "bar",
+                AnalogueInput.AnalogueUnits.PSI => "psi",
+                _ => ""
+            };
+        }
+
+        private static bool UseDecimalPrecision(AnalogueInput.AnalogueUnits units)
+        {
+            return units == AnalogueInput.AnalogueUnits.Volts ||
+                   units == AnalogueInput.AnalogueUnits.Amps ||
+                   units == AnalogueInput.AnalogueUnits.Bar;
+        }
+
+        private static (double Min, double Max) GetInputRangeForAnalogueConfig(AnalogueInput input)
+        {
+            if (input.ChanType == AnalogueInput.AnalogueChannelType.NTC)
+            {
+                if (input.Units == AnalogueInput.AnalogueUnits.Fahrenheit)
+                {
+                    return (-22.0, 302.0);
+                }
+
+                return (-30.0, 150.0);
+            }
+
+            if (input.ChanType == AnalogueInput.AnalogueChannelType.RawVoltage)
+            {
+                return (0.0, 5.0);
+            }
+
+            double min = Math.Min(input.ConfigRangeMin, input.ConfigRangeMax);
+            double max = Math.Max(input.ConfigRangeMin, input.ConfigRangeMax);
+            if (Math.Abs(max - min) < 0.001)
+            {
+                max = min + 1.0;
+            }
+
+            return (min, max);
+        }
+
+        public string SelectedChannelInputUnits
+        {
+            get
+            {
+                if (SelectedChannel == null)
+                {
+                    return "V";
+                }
+
+                var input = GetAssociatedAnalogueInputConfig(SelectedChannel.InputControlPin);
+                if (input == null)
+                {
+                    return "V";
+                }
+
+                return GetUnitsSuffix(input.Units);
+            }
+        }
+
+        public int SelectedChannelInputDecimalPlaces
+        {
+            get
+            {
+                if (SelectedChannel == null)
+                {
+                    return 1;
+                }
+
+                var input = GetAssociatedAnalogueInputConfig(SelectedChannel.InputControlPin);
+                if (input == null)
+                {
+                    return 1;
+                }
+
+                return UseDecimalPrecision(input.Units) ? 1 : 0;
+            }
+        }
+
+        public double SelectedChannelInputTickFrequency => SelectedChannelInputDecimalPlaces == 0 ? 1.0 : 0.1;
+
+        private string FormatSelectedChannelValue(float value)
+        {
+            return value.ToString(SelectedChannelInputDecimalPlaces == 0 ? "F0" : "F1");
+        }
+
+        public string SelectedChannelOnThresholdDisplay
+        {
+            get
+            {
+                if (SelectedChannel == null)
+                {
+                    return "0";
+                }
+
+                return FormatSelectedChannelValue(SelectedChannel.OnThreshold);
+            }
+        }
+
+        public bool SelectedChannelUsesNegativeGoingThreshold
+        {
+            get => SelectedChannel != null && SelectedChannel.OnThreshold < SelectedChannel.OffThreshold;
+            set
+            {
+                if (SelectedChannel == null)
+                {
+                    return;
+                }
+
+                bool currentValue = SelectedChannel.OnThreshold < SelectedChannel.OffThreshold;
+                if (currentValue == value)
+                {
+                    return;
+                }
+
+                float previousOnThreshold = SelectedChannel.OnThreshold;
+                SelectedChannel.OnThreshold = SelectedChannel.OffThreshold;
+                SelectedChannel.OffThreshold = previousOnThreshold;
+                NotifyAnalogueChannelUiContextChanged();
+            }
+        }
+
+        public string SelectedChannelOffThresholdDisplay
+        {
+            get
+            {
+                if (SelectedChannel == null)
+                {
+                    return "0";
+                }
+
+                return FormatSelectedChannelValue(SelectedChannel.OffThreshold);
+            }
+        }
+
+        public string SelectedChannelScaleMinDisplay
+        {
+            get
+            {
+                if (SelectedChannel == null)
+                {
+                    return "0";
+                }
+
+                return FormatSelectedChannelValue(SelectedChannel.ScaleMin);
+            }
+        }
+
+        public string SelectedChannelScaleMaxDisplay
+        {
+            get
+            {
+                if (SelectedChannel == null)
+                {
+                    return "0";
+                }
+
+                return FormatSelectedChannelValue(SelectedChannel.ScaleMax);
+            }
+        }
+
+        public double SelectedChannelInputMinimum
+        {
+            get
+            {
+                if (SelectedChannel == null)
+                {
+                    return 0.0;
+                }
+
+                var input = GetAssociatedAnalogueInputConfig(SelectedChannel.InputControlPin);
+                if (input == null)
+                {
+                    return 0.0;
+                }
+
+                return GetInputRangeForAnalogueConfig(input).Min;
+            }
+        }
+
+        public double SelectedChannelInputMaximum
+        {
+            get
+            {
+                if (SelectedChannel == null)
+                {
+                    return 5.0;
+                }
+
+                var input = GetAssociatedAnalogueInputConfig(SelectedChannel.InputControlPin);
+                if (input == null)
+                {
+                    return 5.0;
+                }
+
+                return GetInputRangeForAnalogueConfig(input).Max;
+            }
+        }
+
+        public double SelectedChannelOnThresholdMinimum
+        {
+            get
+            {
+                if (SelectedChannel == null)
+                {
+                    return 0.0;
+                }
+
+                return SelectedChannelUsesNegativeGoingThreshold
+                    ? SelectedChannelInputMinimum
+                    : SelectedChannel.OffThreshold;
+            }
+        }
+
+        public double SelectedChannelOnThresholdMaximum
+        {
+            get
+            {
+                if (SelectedChannel == null)
+                {
+                    return 5.0;
+                }
+
+                return SelectedChannelUsesNegativeGoingThreshold
+                    ? SelectedChannel.OffThreshold
+                    : SelectedChannelInputMaximum;
+            }
+        }
+
+        public double SelectedChannelOffThresholdMinimum
+        {
+            get
+            {
+                if (SelectedChannel == null)
+                {
+                    return 0.0;
+                }
+
+                return SelectedChannelUsesNegativeGoingThreshold
+                    ? SelectedChannel.OnThreshold
+                    : SelectedChannelInputMinimum;
+            }
+        }
+
+        public double SelectedChannelOffThresholdMaximum
+        {
+            get
+            {
+                if (SelectedChannel == null)
+                {
+                    return 5.0;
+                }
+
+                return SelectedChannelUsesNegativeGoingThreshold
+                    ? SelectedChannelInputMaximum
+                    : SelectedChannel.OnThreshold;
+            }
+        }
+
+        public string SelectedChannelThresholdDirectionSummary => SelectedChannelUsesNegativeGoingThreshold
+            ? "Turns ON below the lower threshold and OFF above the upper threshold"
+            : "Turns ON above the upper threshold and OFF below the lower threshold";
+
+        public string SelectedChannelOnThresholdLabel => SelectedChannelUsesNegativeGoingThreshold
+            ? $"On below ({SelectedChannelInputUnits})"
+            : $"On above ({SelectedChannelInputUnits})";
+
+        public string SelectedChannelOffThresholdLabel => SelectedChannelUsesNegativeGoingThreshold
+            ? $"Off above ({SelectedChannelInputUnits})"
+            : $"Off below ({SelectedChannelInputUnits})";
+
+        public string SelectedChannelOnThresholdTooltip => SelectedChannelUsesNegativeGoingThreshold
+            ? "Channel turns ON below this value"
+            : "Channel turns ON above this value";
+
+        public string SelectedChannelOffThresholdTooltip => SelectedChannelUsesNegativeGoingThreshold
+            ? "Channel turns OFF above this value"
+            : "Channel turns OFF below this value";
+
+        public string SelectedChannelScaleLabel => $"Analogue input range ({SelectedChannelInputUnits})";
+
+        public CanIdOption? SelectedSystemDataCanId
+        {
+            get => GetCanIdOption(SettingsDataView.SystemParamsStaticData.SystemDataCANID);
+            set
+            {
+                if (value != null)
+                {
+                    SettingsDataView.SystemParamsStaticData.SystemDataCANID = value.Value;
+                }
+            }
+        }
+
+        public CanIdOption? SelectedSystemConfigCanId
+        {
+            get => GetCanIdOption(SettingsDataView.SystemParamsStaticData.SystemConfigCANID);
+            set
+            {
+                if (value != null)
+                {
+                    SettingsDataView.SystemParamsStaticData.SystemConfigCANID = value.Value;
+                }
+            }
+        }
+
+        public CanIdOption? SelectedChannelDataCanId
+        {
+            get => GetCanIdOption(SettingsDataView.SystemParamsStaticData.ChannelDataCANID);
+            set
+            {
+                if (value != null)
+                {
+                    SettingsDataView.SystemParamsStaticData.ChannelDataCANID = value.Value;
+                }
+            }
+        }
+
+        public CanIdOption? SelectedConfigDataCanId
+        {
+            get => GetCanIdOption(SettingsDataView.SystemParamsStaticData.ConfigDataCANID);
+            set
+            {
+                if (value != null)
+                {
+                    SettingsDataView.SystemParamsStaticData.ConfigDataCANID = value.Value;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Called by the view when the user taps a GPS point on the map.
+        /// Populates the inspection grid with the 10 Hz rows associated with that second.
+        /// </summary>
+        public void SelectLogMapPoint(LogMapGridRow row)
+        {
+            var columns = GetSelectedLogMapParameterColumns();
+
+            var newRows = new ObservableCollection<LogMapInspectionRow>();
+            foreach (var parsedRow in row.AssociatedRows)
+            {
+                var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                values["_ts"] = parsedRow.Timestamp
+                    .LocalDateTime.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture);
+
+                foreach (var col in columns)
+                {
+                    if (parsedRow.NumericValues.TryGetValue(col.Key, out double value))
+                    {
+                        string text = FormatLogMapNumericValue(value);
+                        if (TryGetLogSeriesUnit(col.Key, out string? unit) && !string.IsNullOrWhiteSpace(unit))
+                            text = $"{text} {unit}";
+                        values[col.ColumnId] = text;
+                    }
+                }
+
+                newRows.Add(new LogMapInspectionRow(values));
+            }
+
+            LogMapInspectionRows = newRows;
+        }
+
+        private void NotifyAnalogueChannelUiContextChanged()
+        {
+            OnPropertyChanged(nameof(SelectedChannelInputUnits));
+            OnPropertyChanged(nameof(SelectedChannelInputMinimum));
+            OnPropertyChanged(nameof(SelectedChannelInputMaximum));
+            OnPropertyChanged(nameof(SelectedChannelInputDecimalPlaces));
+            OnPropertyChanged(nameof(SelectedChannelInputTickFrequency));
+            OnPropertyChanged(nameof(SelectedChannelUsesNegativeGoingThreshold));
+            OnPropertyChanged(nameof(SelectedChannelThresholdDirectionSummary));
+            OnPropertyChanged(nameof(SelectedChannelOnThresholdLabel));
+            OnPropertyChanged(nameof(SelectedChannelOffThresholdLabel));
+            OnPropertyChanged(nameof(SelectedChannelOnThresholdTooltip));
+            OnPropertyChanged(nameof(SelectedChannelOffThresholdTooltip));
+            OnPropertyChanged(nameof(SelectedChannelOnThresholdMinimum));
+            OnPropertyChanged(nameof(SelectedChannelOnThresholdMaximum));
+            OnPropertyChanged(nameof(SelectedChannelOffThresholdMinimum));
+            OnPropertyChanged(nameof(SelectedChannelOffThresholdMaximum));
+            OnPropertyChanged(nameof(SelectedChannelScaleLabel));
+            OnPropertyChanged(nameof(SelectedChannelOnThresholdDisplay));
+            OnPropertyChanged(nameof(SelectedChannelOffThresholdDisplay));
+            OnPropertyChanged(nameof(SelectedChannelScaleMinDisplay));
+            OnPropertyChanged(nameof(SelectedChannelScaleMaxDisplay));
+        }
+
+        private float? GetAssociatedAnalogueInputVoltage(byte inputControlPin)
+        {
+            int analogueInputIndex = Array.IndexOf(ANAChannelInputPins, inputControlPin);
+            if (analogueInputIndex < 0 || analogueInputIndex >= LiveDataView.AnalogueInputsLiveData.Count)
+            {
+                return null;
+            }
+
+            return LiveDataView.AnalogueInputsLiveData[analogueInputIndex].InputVoltage;
+        }
+
+        private void UpdateChannelAnalogueVoltageDisplayValues()
+        {
+            foreach (var channel in LiveDataView.ChannelsLiveData)
+            {
+                if (channel == null)
+                {
+                    continue;
+                }
+
+                string displayValue = "-";
+                if (channel.ChanType == OutputChannel.ChannelType.Analogue ||
+                    channel.ChanType == OutputChannel.ChannelType.AnalogueScaled)
+                {
+                    int analogueInputIndex = Array.IndexOf(ANAChannelInputPins, channel.InputControlPin);
+                    if (analogueInputIndex >= 0 && analogueInputIndex < LiveDataView.AnalogueInputsLiveData.Count)
+                    {
+                        var anaInput = LiveDataView.AnalogueInputsLiveData[analogueInputIndex];
+                        float? liveValue = anaInput.InputValue ?? anaInput.InputVoltage;
+                        if (liveValue.HasValue)
+                        {
+                            string valueText = UseDecimalPrecision(anaInput.Units)
+                                ? liveValue.Value.ToString("F1")
+                                : liveValue.Value.ToString("F0");
+                            displayValue = $"{valueText} {GetUnitsSuffix(anaInput.Units)}";
+                        }
+                    }
+                }
+
+                if (channel.AnalogueInputVoltageDisplay != displayValue)
+                {
+                    channel.AnalogueInputVoltageDisplay = displayValue;
+                }
+            }
+        }
+
+        private static string GetInputLabelForPin(byte pin)
+        {
+            if (pin == InputPinCatalog.IgnitionInputPin)
+            {
+                return "Ignition";
+            }
+
+            var digitalIndex = Array.IndexOf(InputPinCatalog.DIChannelInputPins, pin);
+            if (digitalIndex >= 0)
+            {
+                return $"Digital {digitalIndex + 1}";
+            }
+
+            var analogueIndex = Array.IndexOf(InputPinCatalog.ANAChannelInputPins, pin);
+            if (analogueIndex >= 0)
+            {
+                return $"Ana/Dig {analogueIndex + 1}";
+            }
+
+            return $"Pin {pin}";
+        }
+
+        private void RefreshInputDisplayList(OutputChannel.ChannelType channelType)
+        {
+            var allowedPins = IsAnalogueChannelType(channelType)
+                ? InputPinCatalog.ANAChannelInputPins
+                : InputPinCatalog.AllInputPins;
+
+            InputDisplayList = new ObservableCollection<InputLabel>(
+                allowedPins.Select(pin => new InputLabel(pin, GetInputLabelForPin(pin))));
+
+            if (SelectedChannel == null)
+            {
+                SelectedInputLabel = null;
+                return;
+            }
+
+            var selectedInput = InputDisplayList.FirstOrDefault(input => input.Pin == SelectedChannel.InputControlPin);
+
+            if (selectedInput == null && InputDisplayList.Count > 0)
+            {
+                selectedInput = InputDisplayList[0];
+                SelectedChannel.InputControlPin = selectedInput.Pin;
+            }
+
+            SelectedInputLabel = selectedInput;
         }
 
         public MainWindowViewModel(IAppCloser appCloser)
@@ -288,18 +1083,65 @@ namespace Cortex.ViewModels
     .Select(i => new ChannelLabel(i)));
 
             InputDisplayList = new ObservableCollection<InputLabel>(
-    Enumerable.Range(0, Constants.NUM_DIGITAL_INPUTS + Constants.NUM_ANALOGUE_INPUTS)
-    .Select(i => new InputLabel(i)));
+                InputPinCatalog.AllInputPins.Select(pin => new InputLabel(pin, GetInputLabelForPin(pin))));
 
             ChannelTypes = new ObservableCollection<ChannelTypeDisplay>
     {
         new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.Digital, Label = "Digital Input" },
         new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.PWM, Label = "Digital PWM" },
+        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.Intermittent, Label = "Digital intermittent" },
         new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.Analogue, Label = "Analogue threshold" },
         new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.AnalogueScaled, Label = "Analogue scaled PWM" },
         new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.CAN, Label = "CAN Digital" },
         new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.CAN_PWM, Label = "CAN PWM" },
     };
+
+            ChannelCategories = new ObservableCollection<ChannelCategoryDisplay>
+            {
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.ECUPower, Label = "ECU Power" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.IgnitionCoils, Label = "Ignition Coils" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.FuelPump, Label = "Fuel Pump" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.FuelInjectors, Label = "Fuel Injectors" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.EngineSensorsSupply, Label = "Engine Sensors Supply" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.DriveByWire, Label = "Drive-by-Wire" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.Headlights, Label = "Headlights" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.BrakeLights, Label = "Brake Lights" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.Indicators, Label = "Indicators" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.HazardLights, Label = "Hazard Lights" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.Horn, Label = "Horn" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.Wipers, Label = "Wipers" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.WasherPump, Label = "Washer Pump" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.ABSBrakeSystem, Label = "ABS / Brake System" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.PowerSteering, Label = "Power Steering" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.CoolingFan, Label = "Cooling Fan" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.OilCoolerFan, Label = "Oil Cooler Fan" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.WaterPump, Label = "Water Pump" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.IntercoolerPump, Label = "Intercooler Pump" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.TransmissionPump, Label = "Transmission Pump" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.TailLights, Label = "Tail Lights" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.DRL, Label = "DRL" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.ReverseLights, Label = "Reverse Lights" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.InteriorLights, Label = "Interior Lights" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.DashCluster, Label = "Dash / Cluster" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.GearSelector, Label = "Gear Selector" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.HeatedSeats, Label = "Heated Seats" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.HeatedSteeringWheel, Label = "Heated Steering Wheel" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.HVACBlower, Label = "HVAC Blower" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.ACClutch, Label = "AC Clutch" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.Infotainment, Label = "Infotainment" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.USBAccessoryPower, Label = "USB / Accessory Power" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.DataLogger, Label = "Data Logger" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.Telemetry, Label = "Telemetry" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.CameraSystem, Label = "Camera System" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.LapTimer, Label = "Lap Timer" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.CoolSuitPump, Label = "Cool Suit Pump" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.FireSuppression, Label = "Fire Suppression" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.RainLight, Label = "Rain Light" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.PitLimiter, Label = "Pit Limiter" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.Auxiliary, Label = "Auxiliary" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.Spare, Label = "Spare" },
+                new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.Custom, Label = "Custom" },
+            };
 
             SelectedChannelLabel = ChannelDisplayList.FirstOrDefault();
 
@@ -312,10 +1154,45 @@ namespace Cortex.ViewModels
             UpperAnalogueTH = 5.0;
             UpperPWMRange = 100;
 
+            AnalogueChannelTypes = new ObservableCollection<AnalogueTypeDisplay>
+            {
+                new AnalogueTypeDisplay { Type = AnalogueInput.AnalogueChannelType.RawVoltage, Label = "Raw voltage" },
+                new AnalogueTypeDisplay { Type = AnalogueInput.AnalogueChannelType.Digital, Label = "Digital" },
+                new AnalogueTypeDisplay { Type = AnalogueInput.AnalogueChannelType.Active, Label = "Active sensor" },
+                new AnalogueTypeDisplay { Type = AnalogueInput.AnalogueChannelType.Passive, Label = "Passive sensor" },
+                new AnalogueTypeDisplay { Type = AnalogueInput.AnalogueChannelType.NTC, Label = "NTC thermistor" },
+            };
+
+            AnalogueUnits = new ObservableCollection<AnalogueUnitDisplay>
+            {
+                new AnalogueUnitDisplay { Units = AnalogueInput.AnalogueUnits.Volts, Label = "Volts (V)" },
+                new AnalogueUnitDisplay { Units = AnalogueInput.AnalogueUnits.Amps, Label = "Amps (A)" },
+                new AnalogueUnitDisplay { Units = AnalogueInput.AnalogueUnits.Celsius, Label = "Celsius (°C)" },
+                new AnalogueUnitDisplay { Units = AnalogueInput.AnalogueUnits.Fahrenheit, Label = "Fahrenheit (°F)" },
+                new AnalogueUnitDisplay { Units = AnalogueInput.AnalogueUnits.Percent, Label = "Percent (%)" },
+                new AnalogueUnitDisplay { Units = AnalogueInput.AnalogueUnits.RPM, Label = "RPM" },
+                new AnalogueUnitDisplay { Units = AnalogueInput.AnalogueUnits.KPH, Label = "KPH" },
+                new AnalogueUnitDisplay { Units = AnalogueInput.AnalogueUnits.MPH, Label = "MPH" },
+                new AnalogueUnitDisplay { Units = AnalogueInput.AnalogueUnits.Bar, Label = "Bar" },
+                new AnalogueUnitDisplay { Units = AnalogueInput.AnalogueUnits.PSI, Label = "PSI" },
+            };
+
+            AnalogueCalibrationPointOptions = new ObservableCollection<byte> { 2, 3 };
+
+            AvailableCanIds = new ObservableCollection<CanIdOption>(
+                Enumerable.Range(0, 0x800)
+                    .Select(value => new CanIdOption((ushort)value, $"0x{value:X3}")));
+
+            TimeZones = new ObservableCollection<TimeZoneDisplay>(BuildTimeZoneOptions());
+
             _appCloser = appCloser;
             ExitCommand = new RelayCommand(OnExit);
 
-            SystemDateTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+            SystemDateTime = string.Empty;
+            var now = DateTimeOffset.Now;
+            ControllerRtcDate = now.Date;
+            ControllerRtcTime = now.TimeOfDay;
+            SyncSelectedTimeZoneFromSettings();
 
             LoadSerialPorts();
 
@@ -324,7 +1201,7 @@ namespace Cortex.ViewModels
 
             _commsTimer.Elapsed += (s, e) => HandleComms();
             _commsTimer.Start();
-            SettingsDataView.PropertyChanged += SettingsDataView_PropertyChanged;
+            AttachSettingsTracking(SettingsDataView);
             SelectedChannel.PropertyChanged += SelectedChannel_PropertyChanged;
 
             // Create a LineSeries for each channel
@@ -341,6 +1218,8 @@ namespace Cortex.ViewModels
                     GeometryStroke = null,
                     GeometryFill = null,
                     Fill = null,
+                    LineSmoothness = 0,
+                    AnimationsSpeed = TimeSpan.Zero,
                 };
 
                 seriesCollection.Add(series);
@@ -362,18 +1241,153 @@ namespace Cortex.ViewModels
             _uiUpdateTimer.Elapsed += OnUIUpdateTimerElapsed;
             _uiUpdateTimer.AutoReset = true;
             _uiUpdateTimer.Start();
+
+            _logViewportMonitorTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(250),
+            };
+            _logViewportMonitorTimer.Tick += (_, _) => RefreshLogSeriesForViewportIfNeeded();
+            _logViewportMonitorTimer.Start();
+
+            BuildLogParameterSelections();
+            InitializeDefaultLogRange();
+            if (LogXAxes.FirstOrDefault() is Axis logXAxis)
+            {
+                logXAxis.Labeler = value => FormatLogTimestampLabel(value);
+            }
+            UpdateLogCrosshairState();
+            _ = RefreshAvailableLogFilesAsync();
         }
 
         private void ConfigSaved(object? sender, EventArgs e)
         {
-            _ = ShowUpdateMessage();
+            _controllerConfigBaseline = DeepCopyDataStructures(SettingsDataView);
+            HasPendingConfigChanges = false;
+            SystemDateTime = $"Last updated: {DateTime.Now:yyyy/MM/dd HH:mm:ss}";
+            _ = FlashLastUpdatedAsync();
         }
 
-        public async Task ShowUpdateMessage()
+        public async Task FlashLastUpdatedAsync()
         {
-            UpdateMessageOpacity = 1;      // Fade in
-            await Task.Delay(5000);
-            UpdateMessageOpacity = 0;      // Fade out
+            LastUpdatedHighlightOpacity = 1;
+            await Task.Delay(1200);
+            LastUpdatedHighlightOpacity = 0;
+        }
+
+        private void UpdateFirmwareButtonPresentation()
+        {
+            if (!IsConnected || !CommsEstablished)
+            {
+                FirmwareUpdateButtonText = "No firmware available";
+                FirmwareUpdateButtonBackground = FirmwareIdleBrush;
+                OnPropertyChanged(nameof(CanOpenFirmwareUpdateDialog));
+                return;
+            }
+
+            if (IsCheckingFirmwareUpdate)
+            {
+                FirmwareUpdateButtonText = "Checking firmware...";
+                FirmwareUpdateButtonBackground = FirmwareIdleBrush;
+                OnPropertyChanged(nameof(CanOpenFirmwareUpdateDialog));
+                return;
+            }
+
+            if (_availableFirmwareRelease != null)
+            {
+                FirmwareUpdateButtonText = $"Update {_availableFirmwareRelease.Version}";
+                FirmwareUpdateButtonBackground = FirmwareAvailableBrush;
+                OnPropertyChanged(nameof(CanOpenFirmwareUpdateDialog));
+                return;
+            }
+
+            FirmwareUpdateButtonText = string.IsNullOrWhiteSpace(ControllerFirmwareVersion)
+                ? "No firmware available"
+                : "Firmware up to date";
+            FirmwareUpdateButtonBackground = FirmwareIdleBrush;
+            OnPropertyChanged(nameof(CanOpenFirmwareUpdateDialog));
+        }
+
+        private void NotifyFirmwareInfoChanged()
+        {
+            OnPropertyChanged(nameof(CurrentFirmwareVersionDisplay));
+            OnPropertyChanged(nameof(HasLatestFirmwareGitHubLink));
+            OnPropertyChanged(nameof(LatestFirmwareGitHubLinkText));
+        }
+
+        private void ResetFirmwareUpdateState()
+        {
+            _firmwareCheckCts?.Cancel();
+            _firmwareCheckCts = null;
+            _latestFirmwareRelease = null;
+            _availableFirmwareRelease = null;
+            IsFirmwareUpdateAvailable = false;
+            IsCheckingFirmwareUpdate = false;
+            ControllerFirmwareVersion = string.Empty;
+            NotifyFirmwareInfoChanged();
+            UpdateFirmwareButtonPresentation();
+        }
+
+        private async Task RefreshFirmwareUpdateStateAsync()
+        {
+            if (!IsConnected || !CommsEstablished || _portService == null)
+            {
+                ResetFirmwareUpdateState();
+                return;
+            }
+
+            _firmwareCheckCts?.Cancel();
+            var checkCts = new CancellationTokenSource();
+            _firmwareCheckCts = checkCts;
+
+            IsCheckingFirmwareUpdate = true;
+            _availableFirmwareRelease = null;
+            IsFirmwareUpdateAvailable = false;
+            UpdateFirmwareButtonPresentation();
+
+            try
+            {
+                string? controllerVersion = await _portService.RequestFirmwareVersionAsync();
+                if (_firmwareCheckCts != checkCts || checkCts.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                ControllerFirmwareVersion = controllerVersion?.Trim() ?? string.Empty;
+                _latestFirmwareRelease = await _firmwareUpdateService.GetLatestReleaseAsync(checkCts.Token);
+                if (_firmwareCheckCts != checkCts || checkCts.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                _availableFirmwareRelease = FirmwareUpdateService.IsVersionNewerThanCurrent(_latestFirmwareRelease?.Version, ControllerFirmwareVersion)
+                    ? _latestFirmwareRelease
+                    : null;
+                IsFirmwareUpdateAvailable = _availableFirmwareRelease != null;
+                NotifyFirmwareInfoChanged();
+                if (_availableFirmwareRelease != null)
+                {
+                    AddLog($"Firmware update available: {_availableFirmwareRelease.Version} (controller {ControllerFirmwareVersion}).");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                _latestFirmwareRelease = null;
+                _availableFirmwareRelease = null;
+                IsFirmwareUpdateAvailable = false;
+                NotifyFirmwareInfoChanged();
+                AddLog($"Firmware update check failed: {ex.Message}");
+            }
+            finally
+            {
+                if (_firmwareCheckCts == checkCts)
+                {
+                    IsCheckingFirmwareUpdate = false;
+                    UpdateFirmwareButtonPresentation();
+                }
+            }
         }
 
         public ICartesianAxis[] YAxes { get; set; } = [
@@ -456,6 +1470,106 @@ namespace Cortex.ViewModels
             Debug.WriteLine("Channel property changed: " + e.PropertyName);
         }
 
+        private void SettingsModelItem_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+        {
+            if (sender is AnalogueInput analogueInput && e.PropertyName == nameof(AnalogueInput.ChanType))
+            {
+                int analogueIndex = SettingsDataView.AnalogueInputsStaticData.IndexOf(analogueInput);
+                DefaultChannelsForAnalogueInput(analogueIndex);
+            }
+
+            if (sender is OutputChannel outputChannel &&
+                (e.PropertyName == nameof(OutputChannel.InputControlPin) || e.PropertyName == nameof(OutputChannel.ChanType)))
+            {
+                SyncChannelTypeForAssignedInput(outputChannel);
+            }
+
+            if (!_suppressDirtyTracking && _controllerConfigBaseline != null)
+            {
+                HasPendingConfigChanges = true;
+            }
+
+            NotifyAnalogueChannelUiContextChanged();
+
+            if (sender is SystemParameters)
+            {
+                OnPropertyChanged(nameof(SelectedSystemDataCanId));
+                OnPropertyChanged(nameof(SelectedSystemConfigCanId));
+                OnPropertyChanged(nameof(SelectedChannelDataCanId));
+                OnPropertyChanged(nameof(SelectedConfigDataCanId));
+            }
+
+            if (e.PropertyName == nameof(AnalogueInput.ChanType) || e.PropertyName == nameof(AnalogueInput.Units))
+            {
+                OnPropertyChanged(nameof(FilteredAnalogueUnits));
+            }
+        }
+
+        private void AttachSettingsTracking(DataStructures data)
+        {
+            data.PropertyChanged += SettingsDataView_PropertyChanged;
+
+            foreach (var channel in data.ChannelsStaticData)
+            {
+                channel.PropertyChanged += SettingsModelItem_PropertyChanged;
+            }
+
+            foreach (var digitalInput in data.DigitalInputsStaticData)
+            {
+                digitalInput.PropertyChanged += SettingsModelItem_PropertyChanged;
+            }
+
+            foreach (var analogueInput in data.AnalogueInputsStaticData)
+            {
+                analogueInput.PropertyChanged += SettingsModelItem_PropertyChanged;
+            }
+
+            data.SystemParamsStaticData.PropertyChanged += SettingsModelItem_PropertyChanged;
+        }
+
+        private void DetachSettingsTracking(DataStructures data)
+        {
+            data.PropertyChanged -= SettingsDataView_PropertyChanged;
+
+            foreach (var channel in data.ChannelsStaticData)
+            {
+                channel.PropertyChanged -= SettingsModelItem_PropertyChanged;
+            }
+
+            foreach (var digitalInput in data.DigitalInputsStaticData)
+            {
+                digitalInput.PropertyChanged -= SettingsModelItem_PropertyChanged;
+            }
+
+            foreach (var analogueInput in data.AnalogueInputsStaticData)
+            {
+                analogueInput.PropertyChanged -= SettingsModelItem_PropertyChanged;
+            }
+
+            data.SystemParamsStaticData.PropertyChanged -= SettingsModelItem_PropertyChanged;
+        }
+
+        private void ReplaceSettingsData(DataStructures newData)
+        {
+            DetachSettingsTracking(SettingsDataView);
+            SettingsDataView = newData;
+            AttachSettingsTracking(SettingsDataView);
+            SyncSelectedTimeZoneFromSettings();
+        }
+
+        private void RecalculatePendingConfigChanges()
+        {
+            if (_controllerConfigBaseline == null)
+            {
+                HasPendingConfigChanges = false;
+                return;
+            }
+
+            string current = ConfigFileSerializer.SerializeSettings(SettingsDataView);
+            string baseline = ConfigFileSerializer.SerializeSettings(_controllerConfigBaseline);
+            HasPendingConfigChanges = !string.Equals(current, baseline, StringComparison.Ordinal);
+        }
+
         private void SettingsDataView_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
         {
             if (SelectedChannel == null)
@@ -491,7 +1605,17 @@ namespace Cortex.ViewModels
 
         private void LoadSerialPorts()
         {
-            SerialPorts = new ObservableCollection<string>(SerialPort.GetPortNames());
+            string? currentSelection = SelectedSerialPort;
+            var availablePorts = SerialPort.GetPortNames();
+            SerialPorts = new ObservableCollection<string>(availablePorts);
+
+            if (!string.IsNullOrWhiteSpace(currentSelection) && availablePorts.Contains(currentSelection, StringComparer.Ordinal))
+            {
+                SelectedSerialPort = currentSelection;
+                return;
+            }
+
+            SelectedSerialPort = SerialPorts.FirstOrDefault();
         }
 
         private void OnExit() => _appCloser.CloseApp();
@@ -510,18 +1634,119 @@ namespace Cortex.ViewModels
         }
 
         [RelayCommand]
-        private void Connect(string selectedPort)
+        private async Task ShowAbout()
         {
-            _portService = new SerialPortService(selectedPort);
+            await _appCloser.ShowAboutAsync();
+        }
+
+        [RelayCommand]
+        private async Task OpenFirmwareUpdate()
+        {
+            if (!CanOpenFirmwareUpdateDialog || _portService == null || _availableFirmwareRelease == null)
+            {
+                return;
+            }
+
+            var release = _availableFirmwareRelease;
+            var dialogViewModel = new FirmwareUpdateWindowViewModel(
+                $"Firmware {release.Version} available",
+                (progress, cancellationToken) => _firmwareUpdateService.InstallReleaseAsync(release, _portService, progress, cancellationToken));
+            await _appCloser.ShowFirmwareUpdateDialogAsync(dialogViewModel);
+
+            if (dialogViewModel.IsUpdateComplete)
+            {
+                ControllerFirmwareVersion = release.Version;
+                _availableFirmwareRelease = null;
+                IsFirmwareUpdateAvailable = false;
+                UpdateFirmwareButtonPresentation();
+                AddLog($"Firmware update installed: {release.Version}");
+            }
+        }
+
+        [RelayCommand]
+        private async Task OpenLocalFirmwareUpdate()
+        {
+            if (!CanOpenLocalFirmwareUpdateDialog || _portService == null)
+            {
+                return;
+            }
+
+            LocalFirmwareUpdateSelection? selection;
+            try
+            {
+                selection = await _appCloser.BrowseLocalFirmwareUpdateFilesAsync();
+            }
+            catch (Exception ex)
+            {
+                AddLog(ex.Message);
+                return;
+            }
+
+            if (selection == null)
+            {
+                return;
+            }
+
+            var dialogViewModel = new FirmwareUpdateWindowViewModel(
+                $"Local firmware: {selection.DisplayName}",
+                (progress, cancellationToken) => _firmwareUpdateService.InstallLocalFilesAsync(selection, _portService, progress, cancellationToken));
+            await _appCloser.ShowFirmwareUpdateDialogAsync(dialogViewModel);
+
+            if (dialogViewModel.IsUpdateComplete)
+            {
+                AddLog($"Local firmware update installed from {selection.DisplayName}");
+            }
+        }
+
+        [RelayCommand]
+        private async Task OpenLatestFirmwareOnGitHub()
+        {
+            string? gitHubUrl = _latestFirmwareRelease?.GitHubUrl;
+            if (string.IsNullOrWhiteSpace(gitHubUrl))
+            {
+                return;
+            }
+
+            try
+            {
+                await _appCloser.OpenUrlAsync(gitHubUrl);
+            }
+            catch (Exception ex)
+            {
+                AddLog($"Couldn't open firmware link: {ex.Message}");
+            }
+        }
+
+        [RelayCommand]
+        private void Connect(string? selectedPort)
+        {
+            string? portName = string.IsNullOrWhiteSpace(selectedPort)
+                ? SelectedSerialPort
+                : selectedPort;
+
+            if (string.IsNullOrWhiteSpace(portName))
+            {
+                AddLog("Select a serial port before connecting.");
+                return;
+            }
+
+            _portService = new SerialPortService(portName);
             _portService.DataUpdated += _portService_DataUpdated;
             _portService.ConfigurationSaved += ConfigSaved;
+            refreshStaticData = true;
             IsConnected = _portService.Open();
 
             if (IsConnected)
             {
-                AddLog("Connecting to PDM on " + selectedPort + "...");
+                AddLog("Connecting to PDM on " + portName + "...");
+                _portService.InitComms();
+                return;
             }
-            _portService.InitComms();
+
+            AddLog(_portService.LastError ?? $"Failed to open serial port {portName}.");
+            _portService.DataUpdated -= _portService_DataUpdated;
+            _portService.ConfigurationSaved -= ConfigSaved;
+            _portService = null;
         }
 
         [RelayCommand]
@@ -529,14 +1754,283 @@ namespace Cortex.ViewModels
         {
             if (IsConnected && _portService != null)
             {
+                _controllerConfigBaseline = DeepCopyDataStructures(SettingsDataView);
                 _portService.StartSendConfig();
+            }
+        }
+
+        [RelayCommand]
+        private async Task SetControllerDateTimeAsync()
+        {
+            if (!CanSetControllerRtc || _portService == null)
+            {
+                AddLog("Controller clock update unavailable. Check connection and controller comms.");
+                return;
+            }
+
+            if (!TryComposeControllerDateTime(ControllerRtcDate, ControllerRtcTime, SelectedTimeZoneDisplay?.TimeZone, out DateTimeOffset controllerDateTime, out string? dateTimeError))
+            {
+                AddLog(dateTimeError ?? "Select a controller date before setting the clock.");
+                return;
+            }
+
+            if (controllerDateTime.Year < 2000 || controllerDateTime.Year > 2099)
+            {
+                AddLog("Controller clock year must be between 2000 and 2099.");
+                return;
+            }
+
+            if (!TryBuildTimeZoneRuleBlob(SelectedTimeZoneDisplay, controllerDateTime, out byte[] timeZoneRule, out string? timeZoneError))
+            {
+                AddLog(timeZoneError ?? "Selected time zone is not supported for controller DST automation.");
+                return;
+            }
+
+            IsSettingControllerRtc = true;
+            try
+            {
+                AddLog($"Applying controller time zone {SelectedTimeZoneDisplay?.Label ?? "Local"}...");
+                bool timeZoneSuccess = await _portService.SetControllerTimeZoneRuleAsync(timeZoneRule);
+                if (!timeZoneSuccess)
+                {
+                    AddLog("Controller rejected the time zone update or did not acknowledge it.");
+                    return;
+                }
+
+                AddLog($"Setting controller clock to {controllerDateTime:yyyy/MM/dd HH:mm:ss}...");
+                bool success = await _portService.SetControllerRtcAsync(controllerDateTime);
+                if (success)
+                {
+                    AddLog($"Controller clock set to {controllerDateTime:yyyy/MM/dd HH:mm:ss} ({SelectedTimeZoneDisplay?.Label ?? "Local"}).");
+                }
+                else
+                {
+                    AddLog("Controller rejected the clock update or did not acknowledge it.");
+                }
+            }
+            catch (Exception ex)
+            {
+                AddLog($"Failed to set controller clock: {ex.Message}");
+            }
+            finally
+            {
+                IsSettingControllerRtc = false;
+            }
+        }
+
+        [RelayCommand]
+        private async Task FactoryResetAsync()
+        {
+            if (!CanFactoryReset || _portService == null)
+            {
+                AddLog("Factory reset unavailable. Check connection and controller comms.");
+                return;
+            }
+
+            bool confirmed = await _appCloser.ConfirmAsync(
+                "Factory Reset",
+                "Proceed with factory reset? This will erase controller EEPROM settings and restore defaults.",
+                "PROCEED",
+                "CANCEL");
+
+            if (!confirmed)
+            {
+                return;
+            }
+
+            try
+            {
+                AddLog("Factory reset requested. Restoring controller defaults...");
+                IsFactoryResetInProgress = true;
+                FactoryResetStatusMessage = "Resetting controller and refreshing settings...";
+                bool success = await _portService.FactoryResetAsync();
+                if (!success)
+                {
+                    IsFactoryResetInProgress = false;
+                    FactoryResetStatusMessage = string.Empty;
+                    AddLog("Factory reset was rejected by the controller or timed out.");
+                    return;
+                }
+
+                refreshStaticData = true;
+                _portService.RequestStaticSnapshot();
+                AddLog("Factory reset complete. Controller defaults restored.");
+            }
+            catch (Exception ex)
+            {
+                IsFactoryResetInProgress = false;
+                FactoryResetStatusMessage = string.Empty;
+                AddLog($"Factory reset failed: {ex.Message}");
+            }
+        }
+
+        [RelayCommand]
+        private async Task SaveConfigFile()
+        {
+            try
+            {
+                string content = ConfigFileSerializer.SerializeSettings(SettingsDataView);
+                bool saved = await _appCloser.SavePdmFileContentAsync(content);
+
+                if (saved)
+                {
+                    AddLog("Configuration saved to .pdm file.");
+                }
+            }
+            catch (Exception ex)
+            {
+                AddLog($"Failed to save configuration file: {ex.Message}");
+            }
+        }
+
+        [RelayCommand]
+        private async Task OpenConfigFile()
+        {
+            try
+            {
+                string? content = await _appCloser.OpenPdmFileContentAsync();
+                if (string.IsNullOrWhiteSpace(content))
+                {
+                    return;
+                }
+
+                if (!ConfigFileSerializer.TryDeserialize(content, out var snapshot, out var error) || snapshot == null)
+                {
+                    AddLog(error ?? "Failed to load configuration file.");
+                    return;
+                }
+
+                ConfigFileSerializer.ApplySnapshot(SettingsDataView, snapshot);
+                ForceRefreshSettingsBindings();
+
+                AddLog("Configuration loaded from .pdm file. Save to controller to apply permanently.");
+            }
+            catch (Exception ex)
+            {
+                AddLog($"Failed to open configuration file: {ex.Message}");
+            }
+        }
+
+        private void ForceRefreshSettingsBindings()
+        {
+            int channelIndex = SelectedChannelIndex;
+            int digitalIndex = (SelectedDigitalInput?.InputNumber ?? 1) - 1;
+            int analogueIndex = (SelectedAnalogueInput?.InputNumber ?? 1) - 1;
+
+            ReplaceSettingsData(DeepCopyDataStructures(SettingsDataView));
+            _portService?.UpdateSettingsData(SettingsDataView);
+
+            if (SettingsDataView.DigitalInputsStaticData.Count > 0)
+            {
+                int clampedDigitalIndex = Math.Clamp(digitalIndex, 0, SettingsDataView.DigitalInputsStaticData.Count - 1);
+                SelectedDigitalInput = SettingsDataView.DigitalInputsStaticData.ElementAtOrDefault(clampedDigitalIndex)
+                    ?? SettingsDataView.DigitalInputsStaticData.FirstOrDefault();
+            }
+            else
+            {
+                SelectedDigitalInput = null;
+            }
+
+            if (SettingsDataView.AnalogueInputsStaticData.Count > 0)
+            {
+                int clampedAnalogueIndex = Math.Clamp(analogueIndex, 0, SettingsDataView.AnalogueInputsStaticData.Count - 1);
+                SelectedAnalogueInput = SettingsDataView.AnalogueInputsStaticData.ElementAtOrDefault(clampedAnalogueIndex)
+                    ?? SettingsDataView.AnalogueInputsStaticData.FirstOrDefault();
+            }
+            else
+            {
+                SelectedAnalogueInput = null;
+            }
+
+            if (SettingsDataView.ChannelsStaticData.Count > 0)
+            {
+                SelectedChannelIndex = Math.Clamp(channelIndex, 0, SettingsDataView.ChannelsStaticData.Count - 1);
+                OnSelectedChannelIndexChanged(SelectedChannelIndex, SelectedChannelIndex);
+            }
+            else
+            {
+                SelectedChannel = null;
+            }
+
+            OnPropertyChanged(nameof(SettingsDataView));
+            OnPropertyChanged(nameof(SelectedChannel));
+            RecalculatePendingConfigChanges();
+        }
+
+        private void RestoreSettingsFromBaseline(DataStructures snapshot)
+        {
+            int channelIndex = SelectedChannelIndex;
+            int digitalIndex = (SelectedDigitalInput?.InputNumber ?? 1) - 1;
+            int analogueIndex = (SelectedAnalogueInput?.InputNumber ?? 1) - 1;
+
+            _suppressDirtyTracking = true;
+            try
+            {
+                ReplaceSettingsData(DeepCopyDataStructures(snapshot));
+                _portService?.UpdateSettingsData(SettingsDataView);
+
+                if (SettingsDataView.DigitalInputsStaticData.Count > 0)
+                {
+                    int clampedDigitalIndex = Math.Clamp(digitalIndex, 0, SettingsDataView.DigitalInputsStaticData.Count - 1);
+                    SelectedDigitalInput = SettingsDataView.DigitalInputsStaticData.ElementAtOrDefault(clampedDigitalIndex)
+                        ?? SettingsDataView.DigitalInputsStaticData.FirstOrDefault();
+                }
+                else
+                {
+                    SelectedDigitalInput = null;
+                }
+
+                if (SettingsDataView.AnalogueInputsStaticData.Count > 0)
+                {
+                    int clampedAnalogueIndex = Math.Clamp(analogueIndex, 0, SettingsDataView.AnalogueInputsStaticData.Count - 1);
+                    SelectedAnalogueInput = SettingsDataView.AnalogueInputsStaticData.ElementAtOrDefault(clampedAnalogueIndex)
+                        ?? SettingsDataView.AnalogueInputsStaticData.FirstOrDefault();
+                }
+                else
+                {
+                    SelectedAnalogueInput = null;
+                }
+
+                if (SettingsDataView.ChannelsStaticData.Count > 0)
+                {
+                    SelectedChannelIndex = Math.Clamp(channelIndex, 0, SettingsDataView.ChannelsStaticData.Count - 1);
+                    OnSelectedChannelIndexChanged(SelectedChannelIndex, SelectedChannelIndex);
+                }
+                else
+                {
+                    SelectedChannel = null;
+                }
+
+                HasPendingConfigChanges = false;
+                OnPropertyChanged(nameof(SettingsDataView));
+                OnPropertyChanged(nameof(SelectedChannel));
+            }
+            finally
+            {
+                _suppressDirtyTracking = false;
             }
         }
 
         [RelayCommand]
         public void RevertChanges()
         {
+            if (_controllerConfigBaseline != null)
+            {
+                RestoreSettingsFromBaseline(_controllerConfigBaseline);
+                AddLog("Pending changes reverted.");
+                return;
+            }
+
+            if (!IsConnected || _portService == null)
+            {
+                AddLog("Connect to PDM to restore controller parameters.");
+                return;
+            }
+
             refreshStaticData = true;
+            _portService.RequestStaticSnapshot();
+            _pendingRevertLog = true;
+            AddLog("Restoring parameters from controller...");
         }
 
         private void _portService_DataUpdated(DataStructures obj)
@@ -550,6 +2044,11 @@ namespace Cortex.ViewModels
 
         private void OnUIUpdateTimerElapsed(object sender, ElapsedEventArgs e)
         {
+            if (_pauseLiveUiUpdates)
+            {
+                return;
+            }
+
             DataStructures dataToProcess;
 
             lock (_pendingDataLock)
@@ -579,14 +2078,53 @@ namespace Cortex.ViewModels
             UpdateErrorFlags();
 
             // Handle static data refresh
-            if (refreshStaticData)
+            if (refreshStaticData && (_portService == null || !_portService.UpdateStaticData))
             {
                 refreshStaticData = false;
-                SettingsDataView = DeepCopyDataStructures(data);
-                _portService?.UpdateSettingsData(SettingsDataView);
-                OnSelectedChannelIndexChanged(SelectedChannelIndex, SelectedChannelIndex);
-                SelectedAnalogueInput = SettingsDataView.AnalogueInputsStaticData.FirstOrDefault();
-                SelectedDigitalInput = SettingsDataView.DigitalInputsStaticData.FirstOrDefault();
+                _suppressDirtyTracking = true;
+                try
+                {
+                    string? preservedTimeZoneId = SettingsDataView.SystemParamsStaticData.TimeZoneId;
+                    byte[] preservedTimeZoneRule = SettingsDataView.SystemParamsStaticData.TimeZoneRule?.ToArray() ?? Array.Empty<byte>();
+
+                    ReplaceSettingsData(DeepCopyDataStructures(data));
+                    if (!HasTimeZoneRuleBlob(SettingsDataView.SystemParamsStaticData.TimeZoneRule)
+                        && string.IsNullOrWhiteSpace(SettingsDataView.SystemParamsStaticData.TimeZoneId)
+                        && !string.IsNullOrWhiteSpace(preservedTimeZoneId))
+                    {
+                        SettingsDataView.SystemParamsStaticData.TimeZoneId = preservedTimeZoneId;
+                    }
+
+                    if (!HasTimeZoneRuleBlob(SettingsDataView.SystemParamsStaticData.TimeZoneRule)
+                        && HasTimeZoneRuleBlob(preservedTimeZoneRule))
+                    {
+                        SettingsDataView.SystemParamsStaticData.TimeZoneRule = preservedTimeZoneRule;
+                    }
+
+                    SyncSelectedTimeZoneFromSettings();
+                    _controllerConfigBaseline = DeepCopyDataStructures(SettingsDataView);
+                    HasPendingConfigChanges = false;
+                    _portService?.UpdateSettingsData(SettingsDataView);
+                    OnSelectedChannelIndexChanged(SelectedChannelIndex, SelectedChannelIndex);
+                    SelectedAnalogueInput = SettingsDataView.AnalogueInputsStaticData.FirstOrDefault();
+                    SelectedDigitalInput = SettingsDataView.DigitalInputsStaticData.FirstOrDefault();
+                }
+                finally
+                {
+                    _suppressDirtyTracking = false;
+                }
+
+                if (IsFactoryResetInProgress)
+                {
+                    IsFactoryResetInProgress = false;
+                    FactoryResetStatusMessage = string.Empty;
+                }
+
+                if (_pendingRevertLog)
+                {
+                    _pendingRevertLog = false;
+                    AddLog("PDM values restored to UI");
+                }
             }
         }
 
@@ -690,28 +2228,30 @@ namespace Cortex.ViewModels
                 {
                     target.PWMSetDuty = source.PWMSetDuty;
                 }
-            }
 
-            // Update analogue inputs
-            int analogueCount = Math.Min(newData.AnalogueInputsLiveData.Count, LiveDataView.AnalogueInputsLiveData.Count);
-            for (int i = 0; i < analogueCount; i++)
-            {
-                var target = LiveDataView.AnalogueInputsLiveData[i];
-                var source = newData.AnalogueInputsLiveData[i];
-
-                if (target.PullUpEnable != source.PullUpEnable)
+                if (target.SoftStartEnabled != source.SoftStartEnabled)
                 {
-                    target.PullUpEnable = source.PullUpEnable;
+                    target.SoftStartEnabled = source.SoftStartEnabled;
                 }
 
-                if (target.PullDownEnable != source.PullDownEnable)
+                if (target.SoftStartTime != source.SoftStartTime)
                 {
-                    target.PullDownEnable = source.PullDownEnable;
+                    target.SoftStartTime = source.SoftStartTime;
                 }
 
-                if (target.IsDigital != source.IsDigital)
+                if (target.SoftStopEnabled != source.SoftStopEnabled)
                 {
-                    target.IsDigital = source.IsDigital;
+                    target.SoftStopEnabled = source.SoftStopEnabled;
+                }
+
+                if (target.SoftStopTime != source.SoftStopTime)
+                {
+                    target.SoftStopTime = source.SoftStopTime;
+                }
+
+                if (target.InrushCurrentLimit != source.InrushCurrentLimit)
+                {
+                    target.InrushCurrentLimit = source.InrushCurrentLimit;
                 }
 
                 if (target.OnThreshold != source.OnThreshold)
@@ -724,26 +2264,121 @@ namespace Cortex.ViewModels
                     target.OffThreshold = source.OffThreshold;
                 }
 
-                if (target.InputScaleLow != source.InputScaleLow)
+                if (target.ScaleMin != source.ScaleMin)
                 {
-                    target.InputScaleLow = source.InputScaleLow;
+                    target.ScaleMin = source.ScaleMin;
                 }
 
-                if (target.InputScaleHigh != source.InputScaleHigh)
+                if (target.ScaleMax != source.ScaleMax)
                 {
-                    target.InputScaleHigh = source.InputScaleHigh;
+                    target.ScaleMax = source.ScaleMax;
                 }
 
-                if (target.PwmLowValue != source.PwmLowValue)
+                if (target.PWMMin != source.PWMMin)
                 {
-                    target.PwmLowValue = source.PwmLowValue;
+                    target.PWMMin = source.PWMMin;
                 }
 
-                if (target.PwmHighValue != source.PwmHighValue)
+                if (target.PWMMax != source.PWMMax)
                 {
-                    target.PwmHighValue = source.PwmHighValue;
+                    target.PWMMax = source.PWMMax;
+                }
+
+                if (target.IntermittentOnTime != source.IntermittentOnTime)
+                {
+                    target.IntermittentOnTime = source.IntermittentOnTime;
+                }
+
+                if (target.IntermittentOffTime != source.IntermittentOffTime)
+                {
+                    target.IntermittentOffTime = source.IntermittentOffTime;
                 }
             }
+
+            // Update analogue inputs
+            int analogueCount = Math.Min(newData.AnalogueInputsLiveData.Count, LiveDataView.AnalogueInputsLiveData.Count);
+            for (int i = 0; i < analogueCount; i++)
+            {
+                var target = LiveDataView.AnalogueInputsLiveData[i];
+                var source = newData.AnalogueInputsLiveData[i];
+
+                if (target.ChanType != source.ChanType)
+                {
+                    target.ChanType = source.ChanType;
+                }
+
+                if (target.Units != source.Units)
+                {
+                    target.Units = source.Units;
+                }
+
+                if (target.CalibrationPoints != source.CalibrationPoints)
+                {
+                    target.CalibrationPoints = source.CalibrationPoints;
+                }
+
+                if (target.PullUpEnable != source.PullUpEnable)
+                {
+                    target.PullUpEnable = source.PullUpEnable;
+                }
+
+                if (target.PullDownEnable != source.PullDownEnable)
+                {
+                    target.PullDownEnable = source.PullDownEnable;
+                }
+
+                if (target.InputVoltage != source.InputVoltage)
+                {
+                    target.InputVoltage = source.InputVoltage;
+                }
+
+                if (target.InputValue != source.InputValue)
+                {
+                    target.InputValue = source.InputValue;
+                }
+
+                if (target.CalibrationVolt1 != source.CalibrationVolt1)
+                {
+                    target.CalibrationVolt1 = source.CalibrationVolt1;
+                }
+
+                if (target.CalibrationValue1 != source.CalibrationValue1)
+                {
+                    target.CalibrationValue1 = source.CalibrationValue1;
+                }
+
+                if (target.CalibrationVolt2 != source.CalibrationVolt2)
+                {
+                    target.CalibrationVolt2 = source.CalibrationVolt2;
+                }
+
+                if (target.CalibrationValue2 != source.CalibrationValue2)
+                {
+                    target.CalibrationValue2 = source.CalibrationValue2;
+                }
+
+                if (target.CalibrationVolt3 != source.CalibrationVolt3)
+                {
+                    target.CalibrationVolt3 = source.CalibrationVolt3;
+                }
+
+                if (target.CalibrationValue3 != source.CalibrationValue3)
+                {
+                    target.CalibrationValue3 = source.CalibrationValue3;
+                }
+
+                if (target.NtcBeta != source.NtcBeta)
+                {
+                    target.NtcBeta = source.NtcBeta;
+                }
+
+                if (target.NtcNominalResistance != source.NtcNominalResistance)
+                {
+                    target.NtcNominalResistance = source.NtcNominalResistance;
+                }
+            }
+
+            UpdateChannelAnalogueVoltageDisplayValues();
 
             // Update digital inputs
             int digitalCount = Math.Min(newData.DigitalInputsStaticData.Count, LiveDataView.DigitalInputsLiveData.Count);
@@ -765,6 +2400,16 @@ namespace Cortex.ViewModels
             if (targetSys.SystemTemperature != sourceSys.SystemTemperature)
             {
                 targetSys.SystemTemperature = sourceSys.SystemTemperature;
+            }
+
+            if (targetSys.SIMModuleTemp != sourceSys.SIMModuleTemp)
+            {
+                targetSys.SIMModuleTemp = sourceSys.SIMModuleTemp;
+            }
+
+            if (targetSys.IMUTemp != sourceSys.IMUTemp)
+            {
+                targetSys.IMUTemp = sourceSys.IMUTemp;
             }
 
             if (targetSys.CANResEnabled != sourceSys.CANResEnabled)
@@ -844,16 +2489,16 @@ namespace Cortex.ViewModels
 
         }
 
-        private double _updateMessageOpacity;
+        private double _lastUpdatedHighlightOpacity;
 
-        public double UpdateMessageOpacity
+        public double LastUpdatedHighlightOpacity
         {
-            get => _updateMessageOpacity;
+            get => _lastUpdatedHighlightOpacity;
             set
             {
-                if (_updateMessageOpacity != value)
+                if (_lastUpdatedHighlightOpacity != value)
                 {
-                    _updateMessageOpacity = value;
+                    _lastUpdatedHighlightOpacity = value;
                     OnPropertyChanged();
                 }
             }
@@ -861,20 +2506,19 @@ namespace Cortex.ViewModels
 
 
         private const int MAX_CHART_POINTS = 2000;
+        private const double LiveChartYAxisHeadroomAmps = 1.0;
 
         private void UpdateCharts(DataStructures data)
         {
-            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            var cutoff = now - (SelectedTimeWindowSeconds * 1000);
+            long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            long cutoffMs = nowMs - (SelectedTimeWindowSeconds * 1000L);
+            double? maxVisibleCurrent = null;
 
             for (int i = 0; i < data.ChannelsLiveData.Count && i < SeriesCollection.Count; i++)
             {
                 if (SeriesCollection[i] is not LineSeries<ObservablePoint> series)
                     continue;
 
-                var ch = data.ChannelsLiveData[i];
-
-                // REUSE existing collection
                 if (series.Values is not ObservableCollection<ObservablePoint> values)
                 {
                     values = new ObservableCollection<ObservablePoint>();
@@ -886,44 +2530,53 @@ namespace Cortex.ViewModels
                     paint.StrokeThickness = 1.0f;
                 }
 
-                // Add new point
-                values.Add(new ObservablePoint(now, ch.CurrentValue));
+                double current = data.ChannelsLiveData[i].CurrentValue;
+                if (double.IsNaN(current) || double.IsInfinity(current))
+                    continue;
 
-                // Remove old points in batch
-                int removeCount = 0;
-                for (int j = 0; j < values.Count; j++)
+                long x = nowMs;
+                if (values.Count > 0 && values[^1].X.HasValue)
                 {
-                    if (values[j].X < cutoff)
-                        removeCount++;
-                    else
-                        break; // Points are in order, stop when we hit valid ones
+                    long lastX = (long)values[^1].X!.Value;
+                    if (x <= lastX)
+                        x = lastX + 1;
                 }
 
-                // Remove from front
-                for (int j = 0; j < removeCount; j++)
-                {
-                    values.RemoveAt(0);
-                }
+                values.Add(new ObservablePoint(x, current));
 
-                // Enforce max limit
-                int excessCount = values.Count - MAX_CHART_POINTS;
-                for (int j = 0; j < excessCount; j++)
-                {
+                while (values.Count > 0 && values[0].X < cutoffMs)
                     values.RemoveAt(0);
+
+                while (values.Count > MAX_CHART_POINTS)
+                    values.RemoveAt(0);
+
+                foreach (var point in values)
+                {
+                    if (!point.Y.HasValue)
+                        continue;
+
+                    double y = point.Y.Value;
+                    if (double.IsNaN(y) || double.IsInfinity(y))
+                        continue;
+
+                    maxVisibleCurrent = maxVisibleCurrent.HasValue
+                        ? Math.Max(maxVisibleCurrent.Value, y)
+                        : y;
                 }
             }
 
-            // Update axes
             if (XAxes is { Length: > 0 })
             {
-                XAxes[0].MinLimit = cutoff;
-                XAxes[0].MaxLimit = now;
+                XAxes[0].MinLimit = cutoffMs;
+                XAxes[0].MaxLimit = nowMs;
             }
 
             if (YAxes is { Length: > 0 })
             {
                 YAxes[0].MinLimit = null;
-                YAxes[0].MaxLimit = null;
+                YAxes[0].MaxLimit = maxVisibleCurrent.HasValue
+                    ? maxVisibleCurrent.Value + LiveChartYAxisHeadroomAmps
+                    : null;
             }
         }
 
@@ -961,6 +2614,10 @@ namespace Cortex.ViewModels
                         }
                     }
                 }
+                else if (_portService != null)
+                {
+                    _portService.EnsureLiveRequestPolling();
+                }
             }
         }
 
@@ -984,6 +2641,7 @@ namespace Cortex.ViewModels
                 _portService = null;
             }
 
+            CommsEstablished = false;
             IsConnected = false;
             AddLog("Disconnected from PDM.");
         }
@@ -1004,7 +2662,3061 @@ namespace Cortex.ViewModels
             if (value)
                 PullUpEnabled = false;
         }
+
+        [ObservableProperty]
+        private bool isLogBusy;
+
+        [ObservableProperty]
+        private string logStatusMessage = string.Empty;
+
+        [ObservableProperty]
+        private double logDownloadProgress;
+
+        [ObservableProperty]
+        private bool isLogProgressIndeterminate;
+
+        [ObservableProperty]
+        private ObservableCollection<LogFile> availableLogFiles = new();
+
+        [ObservableProperty]
+        private LogFile? selectedLogFile;
+
+        [ObservableProperty]
+        private DateTimeOffset? logRangeStartDate;
+
+        [ObservableProperty]
+        private TimeSpan? logRangeStartTime;
+
+        [ObservableProperty]
+        private DateTimeOffset? logRangeEndDate;
+
+        [ObservableProperty]
+        private TimeSpan? logRangeEndTime;
+
+        [ObservableProperty]
+        private ObservableCollection<LogParameterSelection> systemParameterSelections = new();
+
+        [ObservableProperty]
+        private bool areAllSystemParametersSelected;
+
+        [ObservableProperty]
+        private ObservableCollection<LogChannelSelection> channelSelections = new();
+
+        [ObservableProperty]
+        private bool areAllChannelsSelected;
+
+        [ObservableProperty]
+        private ObservableCollection<LogParameterSelection> channelFieldSelections = new();
+
+        [ObservableProperty]
+        private bool areAllChannelFieldsSelected;
+
+        [ObservableProperty]
+        private ObservableCollection<LogParameterSelection> digitalInputSelections = new();
+
+        [ObservableProperty]
+        private bool areAllDigitalInputsSelected;
+
+        [ObservableProperty]
+        private ObservableCollection<LogParameterSelection> analogueInputSelections = new();
+
+        [ObservableProperty]
+        private bool areAllAnalogueInputsSelected;
+
+        [ObservableProperty]
+        private bool isLogCrosshairEnabled = true;
+
+        [ObservableProperty]
+        private ObservableCollection<ISeries> logSeriesCollection = new();
+
+        [ObservableProperty]
+        private ObservableCollection<LogMetricRow> logMetricRows = new();
+
+        public bool CanDownloadSelectedLog => !IsLogBusy && SelectedLogFile is not null && !SelectedLogFile.IsDownloaded;
+
+        public bool CanCancelLogDownload => IsLogBusy;
+
+        public bool CanResetLogs => !IsLogBusy && IsConnected;
+
+        public bool CanAccessOperationalTabs => IsConnected && !IsLogBusy;
+
+        public FindingStrategy LogFindingStrategy => FindingStrategy.CompareOnlyXTakeClosest;
+
+        public ICartesianAxis[] LogYAxes { get; set; } =
+        [
+            new Axis
+            {
+                Name = "Value",
+                Labeler = value => value.ToString("F2"),
+                SeparatorsPaint = new SolidColorPaint
+                {
+                    StrokeThickness = 1,
+                    Color = new SKColor(200, 200, 200),
+                },
+                SubseparatorsPaint = new SolidColorPaint
+                {
+                    Color = new SKColor(50, 50, 50),
+                    StrokeThickness = 0.5f,
+                },
+                SubseparatorsCount = 9,
+                ZeroPaint = new SolidColorPaint
+                {
+                    Color = new SKColor(200, 200, 200),
+                    StrokeThickness = 2,
+                },
+                TicksPaint = new SolidColorPaint
+                {
+                    Color = new SKColor(200, 200, 200),
+                    StrokeThickness = 1.5f,
+                },
+                SubticksPaint = new SolidColorPaint
+                {
+                    Color = new SKColor(50, 50, 50),
+                    StrokeThickness = 1,
+                },
+            }
+        ];
+
+        public ICartesianAxis[] LogXAxes { get; set; } =
+        [
+            new Axis
+            {
+                Name = "Time",
+                Labeler = value => value.ToString("F0"),
+                SeparatorsPaint = new SolidColorPaint
+                {
+                    StrokeThickness = 1,
+                    Color = new SKColor(200, 200, 200),
+                },
+                SubseparatorsPaint = new SolidColorPaint
+                {
+                    Color = new SKColor(50, 50, 50),
+                    StrokeThickness = 0.5f,
+                },
+                SubseparatorsCount = 9,
+                ZeroPaint = new SolidColorPaint
+                {
+                    Color = new SKColor(200, 200, 200),
+                    StrokeThickness = 2,
+                },
+                TicksPaint = new SolidColorPaint
+                {
+                    Color = new SKColor(200, 200, 200),
+                    StrokeThickness = 1.5f,
+                },
+                SubticksPaint = new SolidColorPaint
+                {
+                    Color = new SKColor(50, 50, 50),
+                    StrokeThickness = 1,
+                },
+            }
+        ];
+
+        private readonly List<ParsedLogRow> _parsedLogRows = [];
+        private readonly Dictionary<string, List<LogSeriesPoint>> _parsedLogSeries = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> _parsedLogSeriesUnits = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> _downloadedLogCache = new(StringComparer.OrdinalIgnoreCase);
+        private Dictionary<string, List<LogSeriesPoint>> _activeFilteredLogSeries = new(StringComparer.OrdinalIgnoreCase);
+        private List<string> _activeLogSeriesKeys = [];
+        private IReadOnlyDictionary<string, string> _activeSystemDisplayNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private CancellationTokenSource? _logLoadCts;
+        private int _selectedLogLoadVersion;
+        private bool _updatingLogSelectionMasterState;
+        private bool _bulkUpdatingLogSelections;
+        private const int MaxRenderedLogPointsPerSeries = 1800;
+        private const int MinimumViewportRenderedPointsPerSeries = 600;
+        private static readonly SKColor[] LogSeriesPalette =
+        {
+            new(33, 150, 243),
+            new(244, 67, 54),
+            new(76, 175, 80),
+            new(255, 193, 7),
+            new(156, 39, 176),
+            new(255, 87, 34),
+            new(0, 188, 212),
+            new(205, 220, 57),
+        };
+
+        private static readonly string[] SystemHeaderFields =
+        {
+            "Date",
+            "Time",
+            "System Temp",
+            "SIM Module Temp",
+            "IMU Temp",
+            "System Voltage",
+            "System Current",
+            "Error Flags",
+            "IMU Accel X",
+            "IMU Accel Y",
+            "IMU Accel Z",
+            "IMU Gyro X",
+            "IMU Gyro Y",
+            "IMU Gyro Z",
+            "IMU Mag X",
+            "IMU Mag Y",
+            "IMU Mag Z",
+            "Lat",
+            "Lon",
+            "Alt",
+            "Speed",
+            "Accuracy"
+        };
+
+        private static readonly string[] ChannelHeaderFields =
+        {
+            "Channel Type",
+            "Enabled",
+            "Current Value",
+            "Current Threshold High",
+            "Current Threshold Low",
+            "Multi-Channel",
+            "Group Number",
+            "Channel Error Flags",
+            "Analogue Input"
+        };
+
+        private static readonly string[] DigitalInputHeaderFields =
+        {
+            "Digital Input 1",
+            "Digital Input 2",
+            "Digital Input 3",
+            "Digital Input 4",
+            "Digital Input 5",
+            "Digital Input 6",
+            "Digital Input 7",
+            "Digital Input 8"
+        };
+
+        private static readonly string[] AnalogueInputHeaderFields =
+        {
+            "Analogue Input 1",
+            "Analogue Input 2",
+            "Analogue Input 3",
+            "Analogue Input 4",
+            "Analogue Input 5",
+            "Analogue Input 6",
+            "Analogue Input 7",
+            "Analogue Input 8"
+        };
+
+        private static readonly Regex NumericWithUnitRegex = new(
+            @"^\s*(?<value>[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)\s*(?<unit>.*)?$",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        private static readonly Regex LogFileTimestampRegex = new(
+            @"(?<timestamp>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:\.[^.]+)?$",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        private static readonly Regex LegacyLogFileTimestampRegex = new(
+            @"(?<date>\d{6})-(?<time>\d{6})(?:\.[^.]+)?$",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        private static readonly string PreferredDownloadedLogDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            "Synapse PDM Logs");
+
+        partial void OnSelectedLogFileChanged(LogFile? value)
+        {
+            OnPropertyChanged(nameof(CanDownloadSelectedLog));
+            _ = HandleSelectedLogFileChangedAsync(value);
+        }
+
+        partial void OnIsLogBusyChanged(bool value)
+        {
+            OnPropertyChanged(nameof(CanDownloadSelectedLog));
+            OnPropertyChanged(nameof(CanCancelLogDownload));
+            OnPropertyChanged(nameof(CanResetLogs));
+            OnPropertyChanged(nameof(CanAccessOperationalTabs));
+            OnPropertyChanged(nameof(CanSetControllerRtc));
+            OnPropertyChanged(nameof(CanFactoryReset));
+        }
+
+        partial void OnIsConnectedChanged(bool value)
+        {
+            OnPropertyChanged(nameof(CanResetLogs));
+            OnPropertyChanged(nameof(CanAccessOperationalTabs));
+            OnPropertyChanged(nameof(CanOpenFirmwareUpdateDialog));
+            OnPropertyChanged(nameof(CanOpenLocalFirmwareUpdateDialog));
+            OnPropertyChanged(nameof(CanSetControllerRtc));
+            OnPropertyChanged(nameof(CanFactoryReset));
+
+            if (!value)
+            {
+                IsFactoryResetInProgress = false;
+                FactoryResetStatusMessage = string.Empty;
+                ResetFirmwareUpdateState();
+            }
+            else
+            {
+                UpdateFirmwareButtonPresentation();
+            }
+        }
+
+        partial void OnCommsEstablishedChanged(bool value)
+        {
+            OnPropertyChanged(nameof(CanOpenFirmwareUpdateDialog));
+            OnPropertyChanged(nameof(CanOpenLocalFirmwareUpdateDialog));
+            OnPropertyChanged(nameof(CanSetControllerRtc));
+            OnPropertyChanged(nameof(CanFactoryReset));
+
+            if (!value)
+            {
+                _latestFirmwareRelease = null;
+                _availableFirmwareRelease = null;
+                IsFirmwareUpdateAvailable = false;
+                IsCheckingFirmwareUpdate = false;
+                NotifyFirmwareInfoChanged();
+                UpdateFirmwareButtonPresentation();
+                return;
+            }
+
+            _ = RefreshFirmwareUpdateStateAsync();
+        }
+
+        partial void OnIsCheckingFirmwareUpdateChanged(bool value)
+        {
+            OnPropertyChanged(nameof(CanOpenFirmwareUpdateDialog));
+            OnPropertyChanged(nameof(CanOpenLocalFirmwareUpdateDialog));
+            UpdateFirmwareButtonPresentation();
+        }
+
+        partial void OnIsFirmwareUpdateAvailableChanged(bool value)
+        {
+            OnPropertyChanged(nameof(CanOpenFirmwareUpdateDialog));
+            UpdateFirmwareButtonPresentation();
+        }
+
+        partial void OnControllerFirmwareVersionChanged(string value)
+        {
+            OnPropertyChanged(nameof(CurrentFirmwareVersionDisplay));
+        }
+
+        partial void OnIsSettingControllerRtcChanged(bool value)
+        {
+            OnPropertyChanged(nameof(CanSetControllerRtc));
+            OnPropertyChanged(nameof(SetControllerRtcButtonText));
+        }
+
+        partial void OnIsFactoryResetInProgressChanged(bool value)
+        {
+            OnPropertyChanged(nameof(CanFactoryReset));
+            OnPropertyChanged(nameof(FactoryResetButtonText));
+        }
+
+        partial void OnLogRangeStartDateChanged(DateTimeOffset? value)
+        {
+            ApplyLogFilters();
+            NotifyLogMapDataChanged();
+            NotifyLogMapRouteChanged();
+        }
+
+        partial void OnLogRangeStartTimeChanged(TimeSpan? value)
+        {
+            ApplyLogFilters();
+            NotifyLogMapDataChanged();
+            NotifyLogMapRouteChanged();
+        }
+
+        partial void OnLogRangeEndDateChanged(DateTimeOffset? value)
+        {
+            ApplyLogFilters();
+            NotifyLogMapDataChanged();
+            NotifyLogMapRouteChanged();
+        }
+
+        partial void OnLogRangeEndTimeChanged(TimeSpan? value)
+        {
+            ApplyLogFilters();
+            NotifyLogMapDataChanged();
+            NotifyLogMapRouteChanged();
+        }
+
+        partial void OnAreAllSystemParametersSelectedChanged(bool value)
+        {
+            if (_updatingLogSelectionMasterState)
+            {
+                return;
+            }
+
+            SetAllSelections(SystemParameterSelections, value);
+        }
+
+        partial void OnAreAllChannelsSelectedChanged(bool value)
+        {
+            if (_updatingLogSelectionMasterState)
+            {
+                return;
+            }
+
+            SetAllSelections(ChannelSelections, value);
+        }
+
+        partial void OnAreAllChannelFieldsSelectedChanged(bool value)
+        {
+            if (_updatingLogSelectionMasterState)
+            {
+                return;
+            }
+
+            SetAllSelections(ChannelFieldSelections, value);
+        }
+
+        partial void OnAreAllDigitalInputsSelectedChanged(bool value)
+        {
+            if (_updatingLogSelectionMasterState)
+            {
+                return;
+            }
+
+            SetAllSelections(DigitalInputSelections, value);
+        }
+
+        partial void OnAreAllAnalogueInputsSelectedChanged(bool value)
+        {
+            if (_updatingLogSelectionMasterState)
+            {
+                return;
+            }
+
+            SetAllSelections(AnalogueInputSelections, value);
+        }
+
+        partial void OnIsLogCrosshairEnabledChanged(bool value)
+        {
+            UpdateLogCrosshairState();
+        }
+
+        [RelayCommand]
+        private async Task RefreshAvailableLogFilesAsync()
+        {
+            if (IsLogBusy)
+            {
+                return;
+            }
+
+            IsLogBusy = true;
+            LogStatusMessage = "Loading available log files...";
+            LogDownloadProgress = 0;
+            IsLogProgressIndeterminate = true;
+
+            try
+            {
+                List<LogFile> files;
+                if (IsConnected && _portService != null)
+                {
+                    var controllerFiles = await _portService.RequestLogFileListAsync(5000);
+                    files = controllerFiles
+                        .Select((file, index) => new LogFile
+                        {
+                            FileName = file.FileName,
+                            FullPath = file.FileName,
+                            LastWriteTimeUtc = TryParseLogFileTimestampUtc(file.FileName) ?? DateTime.MinValue,
+                            FileSizeBytes = file.FileSizeBytes,
+                            IsDownloaded = HasDownloadedControllerLog(file.FileName, file.FileSizeBytes),
+                            IsControllerFile = true,
+                            ControllerIndex = index,
+                        })
+                        .ToList();
+                }
+                else
+                {
+                    files = [];
+                }
+
+                files = files
+                    .OrderByDescending(file => file.LastWriteTimeUtc)
+                    .ThenByDescending(file => file.ControllerIndex)
+                    .ThenByDescending(file => file.FileName, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                AvailableLogFiles = new ObservableCollection<LogFile>(files);
+
+                if (AvailableLogFiles.Count == 0)
+                {
+                    SelectedLogFile = null;
+                    LogStatusMessage = "Click refresh to retrieve PDM logs.";
+                    LogSeriesCollection = new ObservableCollection<ISeries>();
+                    _parsedLogRows.Clear();
+                    return;
+                }
+
+                LogStatusMessage = $"Found {AvailableLogFiles.Count} log files.";
+
+                if (SelectedLogFile == null || !AvailableLogFiles.Any(f => f.FullPath == SelectedLogFile.FullPath))
+                {
+                    SelectedLogFile = AvailableLogFiles.FirstOrDefault();
+                }
+            }
+            catch (Exception ex)
+            {
+                LogStatusMessage = "Failed to load log file list.";
+                AddLog($"Log list load failed: {ex.Message}");
+            }
+            finally
+            {
+                IsLogBusy = false;
+                IsLogProgressIndeterminate = false;
+            }
+        }
+
+        [RelayCommand]
+        private async Task DownloadSelectedLogFileAsync()
+        {
+            if (SelectedLogFile == null)
+            {
+                return;
+            }
+
+            string cacheKey = BuildLogCacheKey(SelectedLogFile);
+            if (_downloadedLogCache.TryGetValue(cacheKey, out string? cachedContent))
+            {
+                EnsureValidLogContent(cachedContent);
+                ParseLogContent(cachedContent);
+                ApplyLogFilters();
+                SelectedLogFile.IsDownloaded = true;
+                LogStatusMessage = $"Loaded cached {SelectedLogFile.FileName}.";
+                LogDownloadProgress = 100;
+                IsLogProgressIndeterminate = false;
+                OnPropertyChanged(nameof(CanDownloadSelectedLog));
+                return;
+            }
+
+            if (SelectedLogFile.IsControllerFile && TryGetStoredControllerLogCopy(SelectedLogFile, out string? storedLogPath))
+            {
+                string storedContent = await File.ReadAllTextAsync(storedLogPath!, CancellationToken.None);
+                EnsureValidLogContent(storedContent);
+                _downloadedLogCache[cacheKey] = storedContent;
+                ParseLogContent(storedContent);
+                ApplyLogFilters();
+                SelectedLogFile.IsDownloaded = true;
+                LogStatusMessage = $"Loaded saved copy of {SelectedLogFile.FileName}.";
+                LogDownloadProgress = 100;
+                IsLogProgressIndeterminate = false;
+                OnPropertyChanged(nameof(CanDownloadSelectedLog));
+                return;
+            }
+
+            _logLoadCts?.Cancel();
+            _logLoadCts = new CancellationTokenSource();
+            var token = _logLoadCts.Token;
+
+            _pauseLiveUiUpdates = true;
+            IsLogBusy = true;
+            LogStatusMessage = $"Downloading {SelectedLogFile.FileName}...";
+            LogDownloadProgress = 0;
+            IsLogProgressIndeterminate = true;
+
+            try
+            {
+                string content;
+                if (IsConnected && _portService != null && SelectedLogFile.IsControllerFile)
+                {
+                    int selectedIndex = SelectedLogFile.ControllerIndex;
+                    if (selectedIndex < 0)
+                    {
+                        throw new InvalidOperationException("Selected controller log index is invalid.");
+                    }
+
+                    AddLog($"Opening controller log: {SelectedLogFile.FileName}");
+
+                    _portService.BeginLogTransferSession();
+                    bool transferOpened = false;
+                    try
+                    {
+                        bool opened = await _portService.OpenLogTransferAsync((byte)selectedIndex);
+                        if (!opened)
+                        {
+                            throw new InvalidOperationException("Controller refused log transfer open request.");
+                        }
+
+                        transferOpened = true;
+                        content = await ReadLogFromControllerAsync(token);
+                    }
+                    finally
+                    {
+                        if (transferOpened)
+                        {
+                            _portService.CancelLogTransfer();
+                        }
+
+                        _portService.EndLogTransferSession();
+                    }
+                }
+                else
+                {
+                    if (IsConnected && _portService != null)
+                    {
+                        AddLog("Selected file is local; reading from disk.");
+                    }
+                    content = await ReadLogFileWithProgressAsync(SelectedLogFile.FullPath, token);
+                }
+
+                EnsureValidLogContent(content);
+
+                if (SelectedLogFile.IsControllerFile)
+                {
+                    await PersistDownloadedControllerLogAsync(SelectedLogFile, content, token);
+                }
+
+                _downloadedLogCache[cacheKey] = content;
+                SelectedLogFile.IsDownloaded = true;
+                OnPropertyChanged(nameof(CanDownloadSelectedLog));
+
+                ParseLogContent(content);
+                ApplyLogFilters();
+                LogStatusMessage = $"Loaded {SelectedLogFile.FileName}.";
+                LogDownloadProgress = 100;
+                IsLogProgressIndeterminate = false;
+            }
+            catch (OperationCanceledException)
+            {
+                LogStatusMessage = "Log download cancelled.";
+                _portService?.CancelLogTransfer();
+                _portService?.EndLogTransferSession();
+                IsLogProgressIndeterminate = false;
+            }
+            catch (Exception ex)
+            {
+                _parsedLogRows.Clear();
+                LogSeriesCollection = new ObservableCollection<ISeries>();
+                LogStatusMessage = "Failed to download selected log file.";
+                AddLog($"Log download failed: {ex.Message}");
+                LogDownloadProgress = 0;
+                _portService?.CancelLogTransfer();
+                _portService?.EndLogTransferSession();
+                IsLogProgressIndeterminate = false;
+            }
+            finally
+            {
+                IsLogBusy = false;
+                _pauseLiveUiUpdates = false;
+                OnPropertyChanged(nameof(CanDownloadSelectedLog));
+            }
+        }
+
+        private async Task HandleSelectedLogFileChangedAsync(LogFile? selectedFile)
+        {
+            int loadVersion = Interlocked.Increment(ref _selectedLogLoadVersion);
+
+            if (selectedFile == null)
+            {
+                ResetParsedLogContent();
+                LogStatusMessage = "No log file selected.";
+                return;
+            }
+
+            if (IsLogBusy)
+            {
+                return;
+            }
+
+            string cacheKey = BuildLogCacheKey(selectedFile);
+            if (_downloadedLogCache.TryGetValue(cacheKey, out string? cachedContent))
+            {
+                if (!IsSelectedLogLoadCurrent(selectedFile, loadVersion))
+                {
+                    return;
+                }
+
+                EnsureValidLogContent(cachedContent);
+                ParseLogContent(cachedContent);
+                ApplyLogFilters();
+                selectedFile.IsDownloaded = true;
+                LogStatusMessage = $"Loaded {selectedFile.FileName}.";
+                return;
+            }
+
+            if (selectedFile.IsControllerFile && TryGetStoredControllerLogCopy(selectedFile, out string? storedLogPath))
+            {
+                try
+                {
+                    string content = await File.ReadAllTextAsync(storedLogPath!);
+                    if (!IsSelectedLogLoadCurrent(selectedFile, loadVersion))
+                    {
+                        return;
+                    }
+
+                    EnsureValidLogContent(content);
+                    _downloadedLogCache[cacheKey] = content;
+                    selectedFile.IsDownloaded = true;
+                    ParseLogContent(content);
+                    ApplyLogFilters();
+                    LogStatusMessage = $"Loaded {selectedFile.FileName}.";
+                }
+                catch (Exception ex)
+                {
+                    if (!IsSelectedLogLoadCurrent(selectedFile, loadVersion))
+                    {
+                        return;
+                    }
+
+                    ResetParsedLogContent();
+                    LogStatusMessage = "Failed to load saved log copy.";
+                    AddLog($"Saved log load failed: {ex.Message}");
+                }
+
+                return;
+            }
+
+            if (!selectedFile.IsControllerFile && File.Exists(selectedFile.FullPath))
+            {
+                try
+                {
+                    string content = await File.ReadAllTextAsync(selectedFile.FullPath);
+                    if (!IsSelectedLogLoadCurrent(selectedFile, loadVersion))
+                    {
+                        return;
+                    }
+
+                    EnsureValidLogContent(content);
+                    _downloadedLogCache[cacheKey] = content;
+                    selectedFile.IsDownloaded = true;
+                    ParseLogContent(content);
+                    ApplyLogFilters();
+                    LogStatusMessage = $"Loaded {selectedFile.FileName}.";
+                }
+                catch (InvalidDataException ex)
+                {
+                    if (!IsSelectedLogLoadCurrent(selectedFile, loadVersion))
+                    {
+                        return;
+                    }
+
+                    ResetParsedLogContent();
+                    LogStatusMessage = ex.Message;
+                    AddLog($"Local log validation failed: {ex.Message}");
+                }
+                catch (Exception ex)
+                {
+                    if (!IsSelectedLogLoadCurrent(selectedFile, loadVersion))
+                    {
+                        return;
+                    }
+
+                    ResetParsedLogContent();
+                    LogStatusMessage = "Failed to load selected local log file.";
+                    AddLog($"Local log load failed: {ex.Message}");
+                }
+
+                return;
+            }
+
+            if (!IsSelectedLogLoadCurrent(selectedFile, loadVersion))
+            {
+                return;
+            }
+
+            ResetParsedLogContent();
+            LogStatusMessage = $"Selected {selectedFile.FileName}. Download to load chart data.";
+        }
+
+        [RelayCommand]
+        private void CancelLogDownload()
+        {
+            if (!IsLogBusy)
+            {
+                return;
+            }
+
+            _logLoadCts?.Cancel();
+            _portService?.CancelLogTransfer();
+            LogStatusMessage = "Cancelling log download...";
+        }
+
+        [RelayCommand]
+        private async Task BrowseLocalLogFileAsync()
+        {
+            if (IsLogBusy)
+            {
+                return;
+            }
+
+            string? selectedPath = await _appCloser.BrowseLocalLogFilePathAsync(PreferredDownloadedLogDirectory);
+            if (string.IsNullOrWhiteSpace(selectedPath))
+            {
+                return;
+            }
+
+            try
+            {
+                var fileInfo = new FileInfo(selectedPath);
+                if (!fileInfo.Exists)
+                {
+                    throw new FileNotFoundException("Selected log file could not be found.", selectedPath);
+                }
+
+                string content = await File.ReadAllTextAsync(fileInfo.FullName);
+                EnsureValidLogContent(content);
+
+                var logFile = new LogFile
+                {
+                    FileName = fileInfo.Name,
+                    FullPath = fileInfo.FullName,
+                    LastWriteTimeUtc = fileInfo.LastWriteTimeUtc,
+                    FileSizeBytes = fileInfo.Length,
+                    IsDownloaded = true,
+                    IsControllerFile = false,
+                    ControllerIndex = -1,
+                };
+
+                _downloadedLogCache[BuildLogCacheKey(logFile)] = content;
+                ParseLogContent(content);
+                ApplyLogFilters();
+                LogDownloadProgress = 100;
+                IsLogProgressIndeterminate = false;
+                LogStatusMessage = $"Local file {logFile.FileName} loaded";
+            }
+            catch (InvalidDataException ex)
+            {
+                LogStatusMessage = ex.Message;
+                AddLog($"Local log validation failed: {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                LogStatusMessage = "Failed to load selected local log file.";
+                AddLog($"Local log browse failed: {ex.Message}");
+            }
+        }
+
+        [RelayCommand]
+        private async Task ResetLogsAsync()
+        {
+            if (IsLogBusy || !IsConnected || _portService == null)
+            {
+                return;
+            }
+
+            bool confirmed = await _appCloser.ConfirmAsync(
+                "Reset Logs",
+                "This will erase all log files on the controller SD card and clear the log list. Continue?");
+
+            if (!confirmed)
+            {
+                return;
+            }
+
+            IsLogBusy = true;
+            _pauseLiveUiUpdates = true;
+            IsLogProgressIndeterminate = true;
+            LogStatusMessage = "Resetting controller logs...";
+
+            try
+            {
+                bool resetOk = await _portService.ResetLogStorageAsync(10000);
+                if (!resetOk)
+                {
+                    throw new InvalidOperationException("Controller log reset failed.");
+                }
+
+                _downloadedLogCache.Clear();
+                AvailableLogFiles.Clear();
+                SelectedLogFile = null;
+                _parsedLogRows.Clear();
+                LogSeriesCollection = new ObservableCollection<ISeries>();
+                LogDownloadProgress = 0;
+                LogStatusMessage = "Controller logs reset.";
+                AddLog("Controller log storage reset complete.");
+
+                await RefreshAvailableLogFilesAsync();
+            }
+            catch (Exception ex)
+            {
+                LogStatusMessage = "Failed to reset controller logs.";
+                AddLog($"Reset logs failed: {ex.Message}");
+            }
+            finally
+            {
+                IsLogBusy = false;
+                _pauseLiveUiUpdates = false;
+                IsLogProgressIndeterminate = false;
+                OnPropertyChanged(nameof(CanDownloadSelectedLog));
+                OnPropertyChanged(nameof(CanResetLogs));
+                OnPropertyChanged(nameof(CanCancelLogDownload));
+            }
+        }
+
+        private async Task<string> ReadLogFromControllerAsync(CancellationToken token)
+        {
+            if (_portService == null)
+            {
+                throw new InvalidOperationException("Serial port service is unavailable.");
+            }
+
+            AddLog("Downloading log.");
+            try
+            {
+                return await _portService.ReadLogBulkAsync(progress =>
+                {
+                    IsLogProgressIndeterminate = false;
+                    LogDownloadProgress = progress;
+                }, token);
+            }
+            catch (Exception ex) when (ex is IOException || ex is InvalidOperationException)
+            {
+                AddLog($"Stream download failed. Trying alternative download mode...");
+                _portService.CancelLogTransfer();
+                await Task.Delay(50, token);
+                return await ReadLogFromControllerPullAsync(token);
+            }
+        }
+
+        private async Task<string> ReadLogFromControllerPullAsync(CancellationToken token, StringBuilder? existingBuilder = null)
+        {
+            var builder = existingBuilder ?? new StringBuilder();
+            int consecutiveChunkFailures = 0;
+            const int maxConsecutiveChunkFailures = 12;
+            const int pullChunkTimeoutMs = 2000;
+            int processedChunkCount = 0;
+
+            while (true)
+            {
+                token.ThrowIfCancellationRequested();
+                var chunk = await _portService!.RequestLogChunkAsync(pullChunkTimeoutMs);
+                if (chunk == null)
+                {
+                    consecutiveChunkFailures++;
+                    if (consecutiveChunkFailures >= maxConsecutiveChunkFailures)
+                    {
+                        throw new IOException("Controller log chunk request timed out.");
+                    }
+
+                    int retryDelayMs = Math.Min(500, 75 * consecutiveChunkFailures);
+                    await Task.Delay(retryDelayMs, token);
+                    continue;
+                }
+
+                consecutiveChunkFailures = 0;
+
+                if (!string.IsNullOrEmpty(chunk.Text))
+                {
+                    builder.Append(chunk.Text);
+                }
+
+                IsLogProgressIndeterminate = false;
+                LogDownloadProgress = chunk.Progress;
+
+                if (chunk.Done)
+                {
+                    break;
+                }
+
+                processedChunkCount++;
+                if ((processedChunkCount % 16) == 0)
+                {
+                    await Task.Yield();
+                }
+            }
+
+            return builder.ToString();
+        }
+
+        private async Task<string> ReadLogFileWithProgressAsync(string filePath, CancellationToken token)
+        {
+            var fileInfo = new FileInfo(filePath);
+            long totalBytes = fileInfo.Exists ? fileInfo.Length : 0;
+
+            await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 4096, useAsync: true);
+            using var reader = new StreamReader(stream);
+
+            var builder = new StringBuilder();
+            int lineCounter = 0;
+
+            while (true)
+            {
+                token.ThrowIfCancellationRequested();
+                var line = await reader.ReadLineAsync(token);
+                if (line == null)
+                {
+                    break;
+                }
+
+                builder.AppendLine(line);
+                lineCounter++;
+
+                if (lineCounter % 25 == 0)
+                {
+                    LogDownloadProgress = totalBytes > 0
+                        ? Math.Min(100.0, (stream.Position * 100.0) / totalBytes)
+                        : 0;
+                    await Task.Yield();
+                }
+            }
+
+            return builder.ToString();
+        }
+
+        [RelayCommand]
+        private void ApplyLogFilters()
+        {
+            if (_parsedLogRows.Count == 0)
+            {
+                LogMetricRows = new ObservableCollection<LogMetricRow>();
+                ClearActiveLogSeries();
+                return;
+            }
+
+            DateTimeOffset start = ComposeDateTime(LogRangeStartDate, LogRangeStartTime) ?? _parsedLogRows.First().Timestamp;
+            DateTimeOffset end = ComposeDateTime(LogRangeEndDate, LogRangeEndTime) ?? _parsedLogRows.Last().Timestamp;
+
+            if (end < start)
+            {
+                LogMetricRows = new ObservableCollection<LogMetricRow>();
+                LogStatusMessage = "End time is before start time.";
+                ClearActiveLogSeries();
+                return;
+            }
+
+            var filteredRows = _parsedLogRows
+                .Where(row => row.Timestamp >= start && row.Timestamp <= end)
+                .ToList();
+
+            UpdateLogMetrics(filteredRows);
+
+            var selectedSystemKeys = SystemParameterSelections
+                .Where(p => p.IsSelected)
+                .Select(p => p.Key)
+                .ToList();
+
+            var selectedChannels = ChannelSelections
+                .Where(selection => selection.IsSelected)
+                .Select(selection => selection.ChannelNumber)
+                .ToList();
+
+            var selectedChannelFields = ChannelFieldSelections
+                .Where(selection => selection.IsSelected)
+                .Select(selection => selection.Key)
+                .ToList();
+
+            var selectedChannelKeys = new List<string>();
+            foreach (int channelNumber in selectedChannels)
+            {
+                foreach (string fieldName in selectedChannelFields)
+                {
+                    selectedChannelKeys.Add($"CH{channelNumber}.{fieldName}");
+                }
+            }
+
+            var selectedInputKeys = DigitalInputSelections
+                .Where(selection => selection.IsSelected)
+                .Select(selection => selection.Key)
+                .Concat(AnalogueInputSelections
+                    .Where(selection => selection.IsSelected)
+                    .Select(selection => selection.Key))
+                .ToList();
+
+            var selectedKeys = selectedSystemKeys
+                .Concat(selectedChannelKeys)
+                .Concat(selectedInputKeys)
+                .ToList();
+
+            if (selectedKeys.Count == 0)
+            {
+                LogStatusMessage = "Select at least one parameter to chart.";
+                ClearActiveLogSeries();
+                return;
+            }
+
+            double startMs = start.ToUnixTimeMilliseconds();
+            double endMs = end.ToUnixTimeMilliseconds();
+            var filteredSeries = new Dictionary<string, List<LogSeriesPoint>>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (string key in selectedKeys)
+            {
+                if (!_parsedLogSeries.TryGetValue(key, out var sourcePoints) || sourcePoints.Count == 0)
+                {
+                    continue;
+                }
+
+                var visiblePoints = SliceLogSeries(sourcePoints, startMs, endMs);
+                if (visiblePoints.Count > 0)
+                {
+                    filteredSeries[key] = visiblePoints;
+                }
+            }
+
+            if (filteredSeries.Count == 0)
+            {
+                LogStatusMessage = "No data points in selected range.";
+                ClearActiveLogSeries();
+                return;
+            }
+
+            var systemDisplayNames = SystemParameterSelections.ToDictionary(
+                selection => selection.Key,
+                selection => selection.DisplayName);
+
+            _activeFilteredLogSeries = filteredSeries;
+            _activeLogSeriesKeys = selectedKeys.Where(filteredSeries.ContainsKey).ToList();
+            _activeSystemDisplayNames = systemDisplayNames;
+            _activeLogFilterStartMs = startMs;
+            _activeLogFilterEndMs = endMs;
+            _lastRenderedLogViewportStartMs = double.NaN;
+            _lastRenderedLogViewportEndMs = double.NaN;
+
+            if (LogXAxes is { Length: > 0 })
+            {
+                LogXAxes[0].MinLimit = startMs;
+                LogXAxes[0].MaxLimit = endMs;
+            }
+
+            RebuildDisplayedLogSeries(startMs, endMs);
+        }
+
+        private void UpdateLogMetrics(IReadOnlyList<ParsedLogRow> filteredRows)
+        {
+            if (filteredRows.Count == 0)
+            {
+                LogMetricRows = new ObservableCollection<LogMetricRow>();
+                return;
+            }
+
+            string speedUnit = GetLogMetricUnit("System.Speed", SpeedUnit);
+            string distanceUnit = GetDistanceMetricUnit(speedUnit);
+            string currentUnit = GetLogMetricUnit("System.System Current", "A");
+            string voltageUnit = GetLogMetricUnit("System.System Voltage", "V");
+            string temperatureUnit = GetLogMetricUnit("System.System Temp", "°C");
+            string simTemperatureUnit = GetLogMetricUnit("System.SIM Module Temp", "°C");
+            string imuTemperatureUnit = GetLogMetricUnit("System.IMU Temp", "°C");
+
+            var metrics = new List<LogMetricRow>();
+
+            AddLogMetricText(metrics, "Log duration", FormatLogDuration(filteredRows));
+            AddLogMetricText(metrics, "Data points", filteredRows.Count.ToString("N0", CultureInfo.InvariantCulture));
+
+            AddLogMetric(metrics, "Max. speed", GetMaxMetricValue(filteredRows, "System.Speed"), speedUnit, 1);
+            AddLogMetric(metrics, "Average speed", GetAverageMetricValue(filteredRows, "System.Speed"), speedUnit, 1);
+            AddLogMetric(metrics, "Distance travelled", CalculateDistanceTravelled(filteredRows), distanceUnit, 2);
+
+            AddLogMetric(metrics, "Max. system current", GetMaxMetricValue(filteredRows, "System.System Current"), currentUnit, 1);
+            AddLogMetric(metrics, "Average system current", GetAverageMetricValue(filteredRows, "System.System Current"), currentUnit, 1);
+            AddLogMetric(metrics, "Min. system voltage", GetMinMetricValue(filteredRows, "System.System Voltage"), voltageUnit, 2);
+            AddLogMetric(metrics, "Max. system voltage", GetMaxMetricValue(filteredRows, "System.System Voltage"), voltageUnit, 2);
+            AddLogMetric(metrics, "Average system voltage", GetAverageMetricValue(filteredRows, "System.System Voltage"), voltageUnit, 2);
+
+            AddLogMetric(metrics, "Max. system temp.", GetMaxMetricValue(filteredRows, "System.System Temp"), temperatureUnit, 1);
+            AddLogMetric(metrics, "Min. system temp.", GetMinMetricValue(filteredRows, "System.System Temp"), temperatureUnit, 1);
+            AddLogMetric(metrics, "Average system temp.", GetAverageMetricValue(filteredRows, "System.System Temp"), temperatureUnit, 1);
+            AddLogMetric(metrics, "Max. SIM module temp.", GetMaxMetricValue(filteredRows, "System.SIM Module Temp"), simTemperatureUnit, 1);
+            AddLogMetric(metrics, "Min. SIM module temp.", GetMinMetricValue(filteredRows, "System.SIM Module Temp"), simTemperatureUnit, 1);
+            AddLogMetric(metrics, "Average SIM module temp.", GetAverageMetricValue(filteredRows, "System.SIM Module Temp"), simTemperatureUnit, 1);
+            AddLogMetric(metrics, "Max. IMU temp.", GetMaxMetricValue(filteredRows, "System.IMU Temp"), imuTemperatureUnit, 1);
+            AddLogMetric(metrics, "Min. IMU temp.", GetMinMetricValue(filteredRows, "System.IMU Temp"), imuTemperatureUnit, 1);
+            AddLogMetric(metrics, "Average IMU temp.", GetAverageMetricValue(filteredRows, "System.IMU Temp"), imuTemperatureUnit, 1);
+
+            LogMetricRows = new ObservableCollection<LogMetricRow>(metrics);
+        }
+
+        private static void AddLogMetric(ICollection<LogMetricRow> metrics, string metric, double? value, string unit, int decimals)
+        {
+            metrics.Add(new LogMetricRow
+            {
+                Metric = metric,
+                Value = FormatLogMetricValue(value, unit, decimals),
+            });
+        }
+
+        private static void AddLogMetricText(ICollection<LogMetricRow> metrics, string metric, string value)
+        {
+            metrics.Add(new LogMetricRow
+            {
+                Metric = metric,
+                Value = value,
+            });
+        }
+
+        private static string FormatLogMetricValue(double? value, string unit, int decimals)
+        {
+            if (!value.HasValue || double.IsNaN(value.Value) || double.IsInfinity(value.Value))
+            {
+                return "—";
+            }
+
+            string number = value.Value.ToString($"F{decimals}", CultureInfo.InvariantCulture);
+            return string.IsNullOrWhiteSpace(unit)
+                ? number
+                : $"{number} {unit}";
+        }
+
+        private static double? GetMaxMetricValue(IEnumerable<ParsedLogRow> rows, string key)
+        {
+            var values = GetMetricValues(rows, key).ToList();
+            return values.Count == 0 ? null : values.Max();
+        }
+
+        private static double? GetMinMetricValue(IEnumerable<ParsedLogRow> rows, string key)
+        {
+            var values = GetMetricValues(rows, key).ToList();
+            return values.Count == 0 ? null : values.Min();
+        }
+
+        private static double? GetAverageMetricValue(IEnumerable<ParsedLogRow> rows, string key)
+        {
+            var values = GetMetricValues(rows, key).ToList();
+            return values.Count == 0 ? null : values.Average();
+        }
+
+        private static IEnumerable<double> GetMetricValues(IEnumerable<ParsedLogRow> rows, string key)
+        {
+            foreach (var row in rows)
+            {
+                if (row.NumericValues.TryGetValue(key, out double value))
+                {
+                    yield return value;
+                }
+            }
+        }
+
+        private string GetLogMetricUnit(string key, string fallbackUnit)
+        {
+            return TryGetLogSeriesUnit(key, out string? unit) && !string.IsNullOrWhiteSpace(unit)
+                ? unit
+                : fallbackUnit;
+        }
+
+        private static string GetDistanceMetricUnit(string speedUnit)
+        {
+            if (speedUnit.Contains("mph", StringComparison.OrdinalIgnoreCase))
+            {
+                return "miles";
+            }
+
+            if (speedUnit.Contains("km", StringComparison.OrdinalIgnoreCase) ||
+                speedUnit.Contains("kph", StringComparison.OrdinalIgnoreCase))
+            {
+                return "km";
+            }
+
+            return string.Empty;
+        }
+
+        private static string FormatLogDuration(IReadOnlyList<ParsedLogRow> rows)
+        {
+            if (rows.Count == 0)
+            {
+                return "—";
+            }
+
+            TimeSpan duration = rows[^1].Timestamp - rows[0].Timestamp;
+            if (duration < TimeSpan.Zero)
+            {
+                duration = TimeSpan.Zero;
+            }
+
+            return duration.TotalDays >= 1
+                ? $"{(int)duration.TotalDays}d {duration:hh\\:mm\\:ss}"
+                : duration.ToString("hh\\:mm\\:ss", CultureInfo.InvariantCulture);
+        }
+
+        private static double? CalculateDistanceTravelled(IReadOnlyList<ParsedLogRow> rows)
+        {
+            double distance = 0;
+            bool hasDistance = false;
+            double? previousSpeed = null;
+            DateTimeOffset previousTimestamp = default;
+
+            foreach (var row in rows)
+            {
+                if (!row.NumericValues.TryGetValue("System.Speed", out double speed))
+                {
+                    continue;
+                }
+
+                if (previousSpeed.HasValue)
+                {
+                    double elapsedHours = (row.Timestamp - previousTimestamp).TotalHours;
+                    if (elapsedHours > 0)
+                    {
+                        distance += ((previousSpeed.Value + speed) / 2.0) * elapsedHours;
+                        hasDistance = true;
+                    }
+                }
+
+                previousSpeed = speed;
+                previousTimestamp = row.Timestamp;
+            }
+
+            return hasDistance ? distance : null;
+        }
+
+        private void BuildLogParameterSelections()
+        {
+            SystemParameterSelections = new ObservableCollection<LogParameterSelection>(
+                SystemHeaderFields
+                .Skip(2)
+                .Select(field => new LogParameterSelection
+                {
+                    Key = $"System.{field}",
+                    DisplayName = field,
+                    IsSelected = false,
+                }));
+
+            var selectableChannels = new List<LogChannelSelection>();
+            for (int i = 0; i < Constants.NUM_OUTPUT_CHANNELS; i++)
+            {
+                selectableChannels.Add(new LogChannelSelection
+                {
+                    ChannelNumber = i + 1,
+                    IsSelected = false,
+                });
+            }
+
+            ChannelSelections = new ObservableCollection<LogChannelSelection>(selectableChannels);
+
+            var channelFields = ChannelHeaderFields
+                .Where(field => field != "Channel Type" && field != "Analogue Input")
+                .Select(field => new LogParameterSelection
+                {
+                    Key = field,
+                    DisplayName = field,
+                    IsSelected = false,
+                })
+                .ToList();
+
+            ChannelFieldSelections = new ObservableCollection<LogParameterSelection>(channelFields);
+
+            DigitalInputSelections = new ObservableCollection<LogParameterSelection>(
+                DigitalInputHeaderFields
+                    .Select((field, index) => new LogParameterSelection
+                    {
+                        Key = $"DI{index + 1}",
+                        DisplayName = field,
+                        IsSelected = false,
+                    }));
+
+            AnalogueInputSelections = new ObservableCollection<LogParameterSelection>(
+                AnalogueInputHeaderFields
+                    .Select((field, index) => new LogParameterSelection
+                    {
+                        Key = $"AI{index + 1}",
+                        DisplayName = field,
+                        IsSelected = false,
+                    }));
+
+            foreach (var selection in SystemParameterSelections)
+            {
+                selection.PropertyChanged += LogSelection_PropertyChanged;
+            }
+
+            foreach (var selection in ChannelFieldSelections)
+            {
+                selection.PropertyChanged += LogSelection_PropertyChanged;
+            }
+
+            foreach (var selection in DigitalInputSelections)
+            {
+                selection.PropertyChanged += LogSelection_PropertyChanged;
+            }
+
+            foreach (var selection in AnalogueInputSelections)
+            {
+                selection.PropertyChanged += LogSelection_PropertyChanged;
+            }
+
+            foreach (var selection in ChannelSelections)
+            {
+                selection.PropertyChanged += LogChannelSelection_PropertyChanged;
+            }
+
+            RefreshLogSelectionMasterStates();
+        }
+
+        private void LogSelection_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+        {
+            if (e.PropertyName == nameof(LogParameterSelection.IsSelected))
+            {
+                if (_bulkUpdatingLogSelections)
+                {
+                    return;
+                }
+
+                RefreshLogSelectionMasterStates();
+                ApplyLogFilters();
+                NotifyLogMapDataChanged();
+            }
+        }
+
+        private void LogChannelSelection_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+        {
+            if (e.PropertyName == nameof(LogChannelSelection.IsSelected))
+            {
+                if (_bulkUpdatingLogSelections)
+                {
+                    return;
+                }
+
+                RefreshLogSelectionMasterStates();
+                ApplyLogFilters();
+                NotifyLogMapDataChanged();
+            }
+        }
+
+        private void RefreshLogSelectionMasterStates()
+        {
+            _updatingLogSelectionMasterState = true;
+            try
+            {
+                AreAllSystemParametersSelected = SystemParameterSelections.Count > 0 && SystemParameterSelections.All(selection => selection.IsSelected);
+                AreAllChannelsSelected = ChannelSelections.Count > 0 && ChannelSelections.All(selection => selection.IsSelected);
+                AreAllChannelFieldsSelected = ChannelFieldSelections.Count > 0 && ChannelFieldSelections.All(selection => selection.IsSelected);
+                AreAllDigitalInputsSelected = DigitalInputSelections.Count > 0 && DigitalInputSelections.All(selection => selection.IsSelected);
+                AreAllAnalogueInputsSelected = AnalogueInputSelections.Count > 0 && AnalogueInputSelections.All(selection => selection.IsSelected);
+            }
+            finally
+            {
+                _updatingLogSelectionMasterState = false;
+            }
+        }
+
+        private void SetAllSelections(IEnumerable<LogParameterSelection> selections, bool isSelected)
+        {
+            _bulkUpdatingLogSelections = true;
+            try
+            {
+                foreach (var selection in selections)
+                {
+                    selection.IsSelected = isSelected;
+                }
+            }
+            finally
+            {
+                _bulkUpdatingLogSelections = false;
+            }
+
+            RefreshLogSelectionMasterStates();
+            ApplyLogFilters();
+            NotifyLogMapDataChanged();
+        }
+
+        private void SetAllSelections(IEnumerable<LogChannelSelection> selections, bool isSelected)
+        {
+            _bulkUpdatingLogSelections = true;
+            try
+            {
+                foreach (var selection in selections)
+                {
+                    selection.IsSelected = isSelected;
+                }
+            }
+            finally
+            {
+                _bulkUpdatingLogSelections = false;
+            }
+
+            RefreshLogSelectionMasterStates();
+            ApplyLogFilters();
+            NotifyLogMapDataChanged();
+        }
+
+        private string ResolveDisplayNameForKey(string key, IReadOnlyDictionary<string, string> systemDisplayNames)
+        {
+            if (systemDisplayNames.TryGetValue(key, out var systemName))
+            {
+                return systemName;
+            }
+
+            if (TryParseIndexedInputKey(key, 'D', out int digitalInputNumber))
+            {
+                return $"Digital Input {digitalInputNumber}";
+            }
+
+            if (TryParseIndexedInputKey(key, 'A', out int analogueInputNumber))
+            {
+                return $"Analogue Input {analogueInputNumber}";
+            }
+
+            var parts = key.Split('.', 2);
+            if (parts.Length == 2)
+            {
+                return $"{parts[0]} {parts[1]}";
+            }
+
+            return key;
+        }
+
+        private void InitializeDefaultLogRange()
+        {
+            var now = DateTimeOffset.Now;
+            LogRangeStartDate = now.Date;
+            LogRangeStartTime = TimeSpan.Zero;
+            LogRangeEndDate = now.Date;
+            LogRangeEndTime = now.TimeOfDay;
+        }
+
+        private void ParseLogContent(string csvContent)
+        {
+            _parsedLogRows.Clear();
+            _parsedLogSeries.Clear();
+            _parsedLogSeriesUnits.Clear();
+            ClearActiveLogSeries(resetAxisLimits: false);
+            LogMapGridRows = new ObservableCollection<LogMapGridRow>();
+            LogMapInspectionRows = new ObservableCollection<LogMapInspectionRow>();
+
+            if (string.IsNullOrWhiteSpace(csvContent))
+            {
+                NotifyLogMapDataChanged();
+                NotifyLogMapRouteChanged();
+                return;
+            }
+
+            var lines = csvContent.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+            if (lines.Length <= 1)
+            {
+                NotifyLogMapDataChanged();
+                NotifyLogMapRouteChanged();
+                return;
+            }
+
+            for (int lineIndex = 1; lineIndex < lines.Length; lineIndex++)
+            {
+                var columns = lines[lineIndex].Split(',');
+                int expectedColumnCount = SystemHeaderFields.Length +
+                                          (Constants.NUM_OUTPUT_CHANNELS * ChannelHeaderFields.Length) +
+                                          DigitalInputHeaderFields.Length +
+                                          AnalogueInputHeaderFields.Length;
+
+                if (columns.Length < expectedColumnCount)
+                {
+                    continue;
+                }
+
+                if (!TryParseTimestamp(columns[0], columns[1], out var timestamp))
+                {
+                    continue;
+                }
+
+                var row = new ParsedLogRow
+                {
+                    Timestamp = timestamp,
+                };
+
+                for (int i = 2; i < SystemHeaderFields.Length && i < columns.Length; i++)
+                {
+                    if (TryParseNumeric(columns[i], out double value, out string? unit))
+                    {
+                        string key = $"System.{SystemHeaderFields[i]}";
+                        row.NumericValues[key] = value;
+                        AddParsedLogPoint(key, timestamp, value, unit);
+                    }
+                }
+
+                int channelStartIndex = SystemHeaderFields.Length;
+                for (int channel = 0; channel < Constants.NUM_OUTPUT_CHANNELS; channel++)
+                {
+                    for (int field = 0; field < ChannelHeaderFields.Length; field++)
+                    {
+                        if (ChannelHeaderFields[field] == "Channel Type" || ChannelHeaderFields[field] == "Analogue Input")
+                        {
+                            continue;
+                        }
+
+                        int columnIndex = channelStartIndex + (channel * ChannelHeaderFields.Length) + field;
+                        if (columnIndex >= columns.Length)
+                        {
+                            break;
+                        }
+
+                        if (TryParseNumeric(columns[columnIndex], out double value, out string? unit))
+                        {
+                            string key = $"CH{channel + 1}.{ChannelHeaderFields[field]}";
+                            row.NumericValues[key] = value;
+                            AddParsedLogPoint(key, timestamp, value, unit);
+                        }
+                    }
+                }
+
+                int digitalInputStartIndex = channelStartIndex + (Constants.NUM_OUTPUT_CHANNELS * ChannelHeaderFields.Length);
+                for (int digitalInput = 0; digitalInput < DigitalInputHeaderFields.Length; digitalInput++)
+                {
+                    int columnIndex = digitalInputStartIndex + digitalInput;
+                    if (columnIndex >= columns.Length)
+                    {
+                        break;
+                    }
+
+                    if (TryParseNumeric(columns[columnIndex], out double value, out string? unit))
+                    {
+                        string key = $"DI{digitalInput + 1}";
+                        row.NumericValues[key] = value;
+                        AddParsedLogPoint(key, timestamp, value, unit);
+                    }
+                }
+
+                int analogueInputStartIndex = digitalInputStartIndex + DigitalInputHeaderFields.Length;
+                for (int analogueInput = 0; analogueInput < AnalogueInputHeaderFields.Length; analogueInput++)
+                {
+                    int columnIndex = analogueInputStartIndex + analogueInput;
+                    if (columnIndex >= columns.Length)
+                    {
+                        break;
+                    }
+
+                    if (TryParseNumeric(columns[columnIndex], out double value, out string? unit))
+                    {
+                        string key = $"AI{analogueInput + 1}";
+                        row.NumericValues[key] = value;
+                        AddParsedLogPoint(key, timestamp, value, unit);
+                    }
+                }
+
+                _parsedLogRows.Add(row);
+            }
+
+            if (_parsedLogRows.Count > 0)
+            {
+                LogRangeStartDate = _parsedLogRows.First().Timestamp.Date;
+                LogRangeStartTime = _parsedLogRows.First().Timestamp.TimeOfDay;
+                LogRangeEndDate = _parsedLogRows.Last().Timestamp.Date;
+                LogRangeEndTime = _parsedLogRows.Last().Timestamp.TimeOfDay;
+            }
+
+            NotifyLogMapDataChanged();
+            NotifyLogMapRouteChanged();
+        }
+
+        private static IReadOnlyList<string> BuildExpectedLogHeaderColumns()
+        {
+            var columns = new List<string>(
+                SystemHeaderFields.Length +
+                (Constants.NUM_OUTPUT_CHANNELS * ChannelHeaderFields.Length) +
+                DigitalInputHeaderFields.Length +
+                AnalogueInputHeaderFields.Length);
+
+            columns.AddRange(SystemHeaderFields);
+            for (int channel = 0; channel < Constants.NUM_OUTPUT_CHANNELS; channel++)
+            {
+                columns.AddRange(ChannelHeaderFields);
+            }
+
+            columns.AddRange(DigitalInputHeaderFields);
+            columns.AddRange(AnalogueInputHeaderFields);
+            return columns;
+        }
+
+        private static bool MatchesExpectedLogHeader(IReadOnlyList<string> actualHeader)
+        {
+            IReadOnlyList<string> expectedHeader = BuildExpectedLogHeaderColumns();
+            if (actualHeader.Count < expectedHeader.Count)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < expectedHeader.Count; index++)
+            {
+                if (!string.Equals(actualHeader[index].Trim(), expectedHeader[index], StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static void EnsureValidLogContent(string csvContent)
+        {
+            if (!TryValidateLogContent(csvContent, out string validationError))
+            {
+                throw new InvalidDataException(validationError);
+            }
+        }
+
+        private static bool TryValidateLogContent(string csvContent, out string validationError)
+        {
+            if (string.IsNullOrWhiteSpace(csvContent))
+            {
+                validationError = "Selected file is empty or not a valid Synapse PDM log.";
+                return false;
+            }
+
+            string[] lines = csvContent.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+            if (lines.Length == 0)
+            {
+                validationError = "Selected file is empty or not a valid Synapse PDM log.";
+                return false;
+            }
+
+            string[] actualHeader = lines[0].Split(',');
+            if (!MatchesExpectedLogHeader(actualHeader))
+            {
+                validationError = "Selected file is not a valid Synapse PDM log format.";
+                return false;
+            }
+
+            validationError = string.Empty;
+            return true;
+        }
+
+        private static bool TryParseTimestamp(string datePart, string timePart, out DateTimeOffset timestamp)
+        {
+            string combined = $"{datePart.Trim()} {timePart.Trim()}";
+            if (DateTimeOffset.TryParse(combined, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out timestamp))
+            {
+                return true;
+            }
+
+            return DateTimeOffset.TryParse(combined, CultureInfo.CurrentCulture, DateTimeStyles.AssumeLocal, out timestamp);
+        }
+
+        private static bool TryParseNumeric(string input, out double value, out string? unit)
+        {
+            unit = null;
+            if (double.TryParse(input, NumberStyles.Float, CultureInfo.InvariantCulture, out value) ||
+                double.TryParse(input, NumberStyles.Float, CultureInfo.CurrentCulture, out value))
+            {
+                return true;
+            }
+
+            Match match = NumericWithUnitRegex.Match(input);
+            if (!match.Success)
+            {
+                value = default;
+                return false;
+            }
+
+            string numericValue = match.Groups["value"].Value;
+            if (!double.TryParse(numericValue, NumberStyles.Float, CultureInfo.InvariantCulture, out value) &&
+                !double.TryParse(numericValue, NumberStyles.Float, CultureInfo.CurrentCulture, out value))
+            {
+                return false;
+            }
+
+            string parsedUnit = match.Groups["unit"].Value.Trim();
+            unit = string.IsNullOrWhiteSpace(parsedUnit) || parsedUnit == "-"
+                ? null
+                : NormalizeLoggedUnit(parsedUnit);
+            return true;
+        }
+
+        private static DateTimeOffset? ComposeDateTime(DateTimeOffset? date, TimeSpan? time)
+        {
+            if (date == null)
+            {
+                return null;
+            }
+
+            return date.Value.Date + (time ?? TimeSpan.Zero);
+        }
+
+        private static bool TryComposeControllerDateTime(DateTimeOffset? date, TimeSpan? time, TimeZoneInfo? timeZone, out DateTimeOffset controllerDateTime, out string? error)
+        {
+            controllerDateTime = default;
+            error = null;
+
+            if (date == null)
+            {
+                error = "Select a controller date before setting the clock.";
+                return false;
+            }
+
+            DateTime localDateTime = date.Value.DateTime.Date + (time ?? TimeSpan.Zero);
+            TimeZoneInfo effectiveTimeZone = timeZone ?? TimeZoneInfo.Local;
+
+            if (effectiveTimeZone.IsInvalidTime(localDateTime))
+            {
+                error = "The selected local time does not exist in the chosen time zone because of a DST transition.";
+                return false;
+            }
+
+            TimeSpan offset = effectiveTimeZone.GetUtcOffset(localDateTime);
+            if (effectiveTimeZone.IsAmbiguousTime(localDateTime))
+            {
+                offset = effectiveTimeZone.GetAmbiguousTimeOffsets(localDateTime)
+                    .OrderByDescending(value => value)
+                    .First();
+            }
+
+            controllerDateTime = new DateTimeOffset(localDateTime, offset);
+            return true;
+        }
+
+        private static IReadOnlyList<TimeZoneDisplay> BuildTimeZoneOptions()
+        {
+            var options = new List<TimeZoneDisplay>();
+
+            try
+            {
+                foreach (TimeZoneInfo timeZone in TimeZoneInfo.GetSystemTimeZones())
+                {
+                    try
+                    {
+                        options.Add(CreateTimeZoneDisplay(timeZone, DateTimeOffset.Now));
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"Skipping invalid time zone '{timeZone.Id}': {ex.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to enumerate system time zones: {ex.Message}");
+            }
+
+            if (options.Count == 0)
+            {
+                TimeZoneInfo fallbackZone = TimeZoneInfo.Local;
+                options.Add(new TimeZoneDisplay(
+                    fallbackZone.Id,
+                    $"(UTC{FormatOffsetLabel((int)Math.Round(fallbackZone.BaseUtcOffset.TotalMinutes))}) {fallbackZone.DisplayName}",
+                    fallbackZone,
+                    (int)Math.Round(fallbackZone.BaseUtcOffset.TotalMinutes),
+                    false,
+                    "Fell back to the local system time zone."));
+            }
+
+            return options
+                .OrderBy(option => option.BaseOffsetMinutes)
+                .ThenBy(option => option.Label, StringComparer.CurrentCulture)
+                .ToList();
+        }
+
+        private static TimeZoneDisplay CreateTimeZoneDisplay(TimeZoneInfo timeZone, DateTimeOffset reference)
+        {
+            bool supported = TryBuildTimeZoneRuleBlob(timeZone, reference, out _, out string? error);
+            int baseOffsetMinutes = (int)Math.Round(timeZone.BaseUtcOffset.TotalMinutes);
+            string offsetLabel = FormatOffsetLabel(baseOffsetMinutes);
+            string label = $"(UTC{offsetLabel}) {timeZone.DisplayName}";
+            if (!supported)
+            {
+                label += " [DST rule unsupported]";
+            }
+
+            return new TimeZoneDisplay(timeZone.Id, label, timeZone, baseOffsetMinutes, supported, error);
+        }
+
+        private static string FormatOffsetLabel(int offsetMinutes)
+        {
+            int absoluteMinutes = Math.Abs(offsetMinutes);
+            int hours = absoluteMinutes / 60;
+            int minutes = absoluteMinutes % 60;
+            return $"{(offsetMinutes >= 0 ? "+" : "-")}{hours:00}:{minutes:00}";
+        }
+
+        private void SyncSelectedTimeZoneFromSettings()
+        {
+            string? timeZoneId = SettingsDataView.SystemParamsStaticData.TimeZoneId;
+            byte[] timeZoneRule = SettingsDataView.SystemParamsStaticData.TimeZoneRule ?? Array.Empty<byte>();
+            TimeZoneDisplay? target = null;
+            bool hasRule = HasTimeZoneRuleBlob(timeZoneRule);
+
+            if (!string.IsNullOrWhiteSpace(timeZoneId))
+            {
+                TimeZoneDisplay? idMatch = TimeZones.FirstOrDefault(option => string.Equals(option.Id, timeZoneId, StringComparison.OrdinalIgnoreCase));
+                if (idMatch != null && (!hasRule || DoesTimeZoneMatchRule(idMatch, timeZoneRule)))
+                {
+                    target = idMatch;
+                }
+            }
+
+            if (target == null && hasRule)
+            {
+                target = FindTimeZoneDisplayByRule(timeZoneRule, timeZoneId);
+                if (target == null)
+                {
+                    ApplyResolvedTimeZoneSelection(null);
+                    return;
+                }
+            }
+
+            if (target == null)
+            {
+                string? localTimeZoneId = TryGetLocalTimeZoneId();
+                if (!string.IsNullOrWhiteSpace(localTimeZoneId))
+                {
+                    target = TimeZones.FirstOrDefault(option => string.Equals(option.Id, localTimeZoneId, StringComparison.OrdinalIgnoreCase));
+                }
+            }
+
+            target ??= TimeZones.FirstOrDefault();
+            ApplyResolvedTimeZoneSelection(target);
+        }
+
+        private void ApplyResolvedTimeZoneSelection(TimeZoneDisplay? target)
+        {
+            try
+            {
+                _suppressTimeZoneSelectionWriteBack = true;
+                if (!ReferenceEquals(SelectedTimeZoneDisplay, target))
+                {
+                    SelectedTimeZoneDisplay = target;
+                }
+            }
+            finally
+            {
+                _suppressTimeZoneSelectionWriteBack = false;
+            }
+
+            SettingsDataView.SystemParamsStaticData.TimeZoneId = target?.Id;
+            if (target != null)
+            {
+                UpdateSelectedTimeZoneRule();
+            }
+        }
+
+        private void UpdateSelectedTimeZoneRule()
+        {
+            if (SelectedTimeZoneDisplay == null)
+            {
+                if (!HasTimeZoneRuleBlob(SettingsDataView.SystemParamsStaticData.TimeZoneRule))
+                {
+                    SettingsDataView.SystemParamsStaticData.TimeZoneRule = Array.Empty<byte>();
+                }
+
+                return;
+            }
+
+            DateTimeOffset reference = ControllerRtcDate ?? DateTimeOffset.Now;
+            if (TryBuildTimeZoneRuleBlob(SelectedTimeZoneDisplay, reference, out byte[] timeZoneRule, out _))
+            {
+                SettingsDataView.SystemParamsStaticData.TimeZoneRule = timeZoneRule;
+            }
+            else
+            {
+                SettingsDataView.SystemParamsStaticData.TimeZoneRule = Array.Empty<byte>();
+            }
+        }
+
+        private bool DoesTimeZoneMatchRule(TimeZoneDisplay timeZoneDisplay, byte[] expectedRule)
+        {
+            DateTimeOffset reference = ControllerRtcDate ?? DateTimeOffset.Now;
+            return TryBuildTimeZoneRuleBlob(timeZoneDisplay, reference, out byte[] candidateRule, out _)
+                && ByteArraysEqual(candidateRule, expectedRule);
+        }
+
+        private TimeZoneDisplay? FindTimeZoneDisplayByRule(byte[] expectedRule, string? preferredId)
+        {
+            List<TimeZoneDisplay> matches = TimeZones
+                .Where(option => DoesTimeZoneMatchRule(option, expectedRule))
+                .ToList();
+
+            if (matches.Count == 0)
+            {
+                return null;
+            }
+
+            if (!string.IsNullOrWhiteSpace(preferredId))
+            {
+                TimeZoneDisplay? preferredMatch = matches.FirstOrDefault(option => string.Equals(option.Id, preferredId, StringComparison.OrdinalIgnoreCase));
+                if (preferredMatch != null)
+                {
+                    return preferredMatch;
+                }
+            }
+
+            string? localTimeZoneId = TryGetLocalTimeZoneId();
+            if (!string.IsNullOrWhiteSpace(localTimeZoneId))
+            {
+                TimeZoneDisplay? localMatch = matches.FirstOrDefault(option => string.Equals(option.Id, localTimeZoneId, StringComparison.OrdinalIgnoreCase));
+                if (localMatch != null)
+                {
+                    return localMatch;
+                }
+            }
+
+            return matches.FirstOrDefault();
+        }
+
+        private static string? TryGetLocalTimeZoneId()
+        {
+            try
+            {
+                return TimeZoneInfo.Local.Id;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static bool HasTimeZoneRuleBlob(byte[]? timeZoneRule)
+        {
+            return timeZoneRule != null && timeZoneRule.Length == Constants.TIME_ZONE_RULE_LENGTH;
+        }
+
+        private static bool ByteArraysEqual(byte[]? left, byte[]? right)
+        {
+            if (ReferenceEquals(left, right))
+            {
+                return true;
+            }
+
+            if (left == null || right == null || left.Length != right.Length)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < left.Length; i++)
+            {
+                if (left[i] != right[i])
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool TryBuildTimeZoneRuleBlob(TimeZoneDisplay? selectedTimeZone, DateTimeOffset reference, out byte[] timeZoneRule, out string? error)
+        {
+            if (selectedTimeZone == null)
+            {
+                timeZoneRule = Array.Empty<byte>();
+                error = "Select a time zone before setting the controller clock.";
+                return false;
+            }
+
+            return TryBuildTimeZoneRuleBlob(selectedTimeZone.TimeZone, reference, out timeZoneRule, out error);
+        }
+
+        private static bool TryBuildTimeZoneRuleBlob(TimeZoneInfo timeZone, DateTimeOffset reference, out byte[] timeZoneRule, out string? error)
+        {
+            timeZoneRule = new byte[Constants.TIME_ZONE_RULE_LENGTH];
+            error = null;
+
+            try
+            {
+                int standardOffsetMinutes = (int)Math.Round(timeZone.BaseUtcOffset.TotalMinutes);
+                if (standardOffsetMinutes < -720 || standardOffsetMinutes > 840)
+                {
+                    error = $"Time zone {timeZone.DisplayName} uses an unsupported UTC offset.";
+                    return false;
+                }
+
+                BitConverter.GetBytes((short)standardOffsetMinutes).CopyTo(timeZoneRule, 0);
+
+                TimeZoneInfo.AdjustmentRule? adjustmentRule = timeZone.GetAdjustmentRules()
+                    .LastOrDefault(rule => reference.Date >= rule.DateStart && reference.Date <= rule.DateEnd);
+
+                if (!timeZone.SupportsDaylightSavingTime || adjustmentRule == null || adjustmentRule.DaylightDelta == TimeSpan.Zero)
+                {
+                    return true;
+                }
+
+                int daylightDeltaMinutes = (int)Math.Round(adjustmentRule.DaylightDelta.TotalMinutes);
+                if (daylightDeltaMinutes <= 0 || daylightDeltaMinutes > 180)
+                {
+                    error = $"Time zone {timeZone.DisplayName} uses an unsupported DST offset.";
+                    return false;
+                }
+
+                BitConverter.GetBytes((short)daylightDeltaMinutes).CopyTo(timeZoneRule, 2);
+                timeZoneRule[4] = 1;
+                EncodeTransition(adjustmentRule.DaylightTransitionStart, timeZoneRule, 5);
+                EncodeTransition(adjustmentRule.DaylightTransitionEnd, timeZoneRule, 10);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = $"Time zone {timeZone.Id} could not be read: {ex.Message}";
+                Array.Clear(timeZoneRule, 0, timeZoneRule.Length);
+                return false;
+            }
+        }
+
+        private static void EncodeTransition(TimeZoneInfo.TransitionTime transition, byte[] destination, int startIndex)
+        {
+            destination[startIndex] = (byte)transition.Month;
+            if (transition.IsFixedDateRule)
+            {
+                destination[startIndex + 1] = (byte)(TimeZoneFixedDateFlag | (transition.Day & TimeZoneDayMask));
+                destination[startIndex + 2] = 0;
+            }
+            else
+            {
+                destination[startIndex + 1] = (byte)transition.Week;
+                destination[startIndex + 2] = (byte)transition.DayOfWeek;
+            }
+
+            destination[startIndex + 3] = (byte)transition.TimeOfDay.Hour;
+            destination[startIndex + 4] = (byte)transition.TimeOfDay.Minute;
+        }
+
+        private static string BuildLogCacheKey(LogFile file)
+        {
+            string identity = file.IsControllerFile
+                ? $"controller:{file.FileName}"
+                : $"local:{(string.IsNullOrWhiteSpace(file.FullPath) ? file.FileName : file.FullPath)}";
+
+            return $"{identity}|{file.FileSizeBytes}";
+        }
+
+        private CanIdOption? GetCanIdOption(ushort value)
+        {
+            int index = Math.Clamp((int)value, 0, 0x7FF);
+            return AvailableCanIds.ElementAtOrDefault(index);
+        }
+
+        private bool HasDownloadedControllerLog(string fileName, long fileSizeBytes)
+        {
+            var file = new LogFile
+            {
+                FileName = fileName,
+                FullPath = fileName,
+                FileSizeBytes = fileSizeBytes,
+                IsControllerFile = true,
+            };
+
+            return _downloadedLogCache.ContainsKey(BuildLogCacheKey(file)) || TryGetStoredControllerLogCopy(file, out _);
+        }
+
+        private static string GetStoredControllerLogPath(LogFile file)
+        {
+            string safeName = Path.GetFileName(string.IsNullOrWhiteSpace(file.FileName) ? "log.csv" : file.FileName);
+            return Path.Combine(PreferredDownloadedLogDirectory, safeName);
+        }
+
+        private static bool TryGetStoredControllerLogCopy(LogFile file, out string? storedPath)
+        {
+            storedPath = GetStoredControllerLogPath(file);
+            if (!File.Exists(storedPath))
+            {
+                storedPath = null;
+                return false;
+            }
+
+            if (file.FileSizeBytes > 0 && new FileInfo(storedPath).Length != file.FileSizeBytes)
+            {
+                storedPath = null;
+                return false;
+            }
+
+            return true;
+        }
+
+        private static async Task PersistDownloadedControllerLogAsync(LogFile file, string content, CancellationToken token)
+        {
+            Directory.CreateDirectory(PreferredDownloadedLogDirectory);
+            string destinationPath = GetStoredControllerLogPath(file);
+            await File.WriteAllTextAsync(destinationPath, content, token);
+        }
+
+        public IReadOnlyList<LogMapGridRow> BuildLogMapRows(int maxPointCount, LogMapViewport? viewport = null)
+        {
+            if (_parsedLogRows.Count == 0)
+                return [];
+
+            DateTimeOffset start = ComposeDateTime(LogRangeStartDate, LogRangeStartTime) ?? _parsedLogRows.First().Timestamp;
+            DateTimeOffset end = ComposeDateTime(LogRangeEndDate, LogRangeEndTime) ?? _parsedLogRows.Last().Timestamp;
+            if (end < start)
+                return [];
+
+            var selectedKeys = GetSelectedLogParameterKeys();
+            var systemDisplayNames = SystemParameterSelections.ToDictionary(
+                selection => selection.Key,
+                selection => selection.DisplayName);
+
+            // Group all rows by whole-second bucket — GPS is 1Hz so one unique
+            // coordinate exists per second; all 10Hz rows in that second are associated.
+            var secondGroups = _parsedLogRows
+                .Where(row => row.Timestamp >= start && row.Timestamp <= end)
+                .GroupBy(row => new DateTimeOffset(
+                    row.Timestamp.Year, row.Timestamp.Month, row.Timestamp.Day,
+                    row.Timestamp.Hour, row.Timestamp.Minute, row.Timestamp.Second,
+                    row.Timestamp.Offset))
+                .OrderBy(g => g.Key)
+                .ToList();
+
+            var result = new List<LogMapGridRow>();
+
+            foreach (var group in secondGroups)
+            {
+                // Use the first row in this second that has a valid coordinate
+                var gpsRow = group.FirstOrDefault(row => TryGetLogMapCoordinate(row, out _, out _));
+                if (gpsRow == null)
+                    continue;
+
+                TryGetLogMapCoordinate(gpsRow, out double latitude, out double longitude);
+                var associatedRows = group.OrderBy(row => row.Timestamp).ToList();
+
+                var parameterValuesByKey = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string key in selectedKeys)
+                {
+                    if (!gpsRow.NumericValues.TryGetValue(key, out double value))
+                        continue;
+
+                    string valueText = FormatLogMapNumericValue(value);
+                    if (TryGetLogSeriesUnit(key, out string? unit) && !string.IsNullOrWhiteSpace(unit))
+                        valueText = $"{valueText} {unit}";
+
+                    parameterValuesByKey[key] = valueText;
+                }
+
+                result.Add(new LogMapGridRow
+                {
+                    Timestamp = gpsRow.Timestamp,
+                    Latitude = latitude,
+                    Longitude = longitude,
+                    ParameterValuesByKey = parameterValuesByKey,
+                    AssociatedRows = associatedRows
+                });
+            }
+
+            return result;
+        }
+
+        public IReadOnlyList<LogMapParameterColumn> GetSelectedLogMapParameterColumns()
+        {
+            var selectedKeys = GetSelectedLogParameterKeys();
+            var systemDisplayNames = SystemParameterSelections.ToDictionary(
+                selection => selection.Key,
+                selection => selection.DisplayName);
+
+            var columns = new List<LogMapParameterColumn>(selectedKeys.Count);
+            for (int index = 0; index < selectedKeys.Count; index++)
+            {
+                string key = selectedKeys[index];
+                columns.Add(new LogMapParameterColumn
+                {
+                    ColumnId = $"P{index}",
+                    Key = key,
+                    Header = BuildLogSeriesDisplayName(key, systemDisplayNames),
+                });
+            }
+
+            return columns;
+        }
+
+        private bool IsSelectedLogLoadCurrent(LogFile selectedFile, int loadVersion)
+        {
+            return loadVersion == _selectedLogLoadVersion &&
+                   SelectedLogFile != null &&
+                   string.Equals(BuildLogCacheKey(SelectedLogFile), BuildLogCacheKey(selectedFile), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void ResetParsedLogContent()
+        {
+            _parsedLogRows.Clear();
+            _parsedLogSeries.Clear();
+            _parsedLogSeriesUnits.Clear();
+            ClearActiveLogSeries();
+            LogMetricRows = new ObservableCollection<LogMetricRow>();
+            LogMapGridRows = new ObservableCollection<LogMapGridRow>();
+            LogMapInspectionRows = new ObservableCollection<LogMapInspectionRow>();
+            NotifyLogMapDataChanged();
+            NotifyLogMapRouteChanged();
+            _logSeriesColorRegistry.Clear();
+        }
+
+        private static DateTime? TryParseLogFileTimestampUtc(string fileName)
+        {
+            if (string.IsNullOrWhiteSpace(fileName))
+            {
+                return null;
+            }
+
+            Match match = LogFileTimestampRegex.Match(fileName);
+            if (match.Success)
+            {
+                if (DateTime.TryParseExact(
+                    match.Groups["timestamp"].Value,
+                    "yyyy-MM-dd_HH-mm-ss",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeLocal,
+                    out DateTime parsedTimestamp))
+                {
+                    return parsedTimestamp.ToUniversalTime();
+                }
+            }
+
+            match = LegacyLogFileTimestampRegex.Match(fileName);
+            if (!match.Success)
+            {
+                return null;
+            }
+
+            string timestampText = $"{match.Groups["date"].Value}{match.Groups["time"].Value}";
+            if (!DateTime.TryParseExact(
+                timestampText,
+                "yyMMddHHmmss",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeLocal,
+                out DateTime localTimestamp))
+            {
+                return null;
+            }
+
+            return localTimestamp.ToUniversalTime();
+        }
+
+        private void AddParsedLogPoint(string key, DateTimeOffset timestamp, double value, string? unit = null)
+        {
+            if (!_parsedLogSeries.TryGetValue(key, out var points))
+            {
+                points = [];
+                _parsedLogSeries[key] = points;
+            }
+
+            points.Add(new LogSeriesPoint(timestamp.ToUnixTimeMilliseconds(), value));
+
+            if (!string.IsNullOrWhiteSpace(unit) && !_parsedLogSeriesUnits.ContainsKey(key))
+            {
+                _parsedLogSeriesUnits[key] = unit;
+            }
+        }
+
+        private void RefreshLogSeriesForViewportIfNeeded()
+        {
+            if (_activeFilteredLogSeries.Count == 0 || IsLogBusy)
+            {
+                return;
+            }
+
+            if (!TryGetCurrentLogViewport(out double viewportStartMs, out double viewportEndMs))
+            {
+                return;
+            }
+
+            if (Math.Abs(viewportStartMs - _lastRenderedLogViewportStartMs) < 1.0 &&
+                Math.Abs(viewportEndMs - _lastRenderedLogViewportEndMs) < 1.0)
+            {
+                return;
+            }
+
+            RebuildDisplayedLogSeries(viewportStartMs, viewportEndMs);
+        }
+
+        private bool TryGetCurrentLogViewport(out double viewportStartMs, out double viewportEndMs)
+        {
+            viewportStartMs = _activeLogFilterStartMs;
+            viewportEndMs = _activeLogFilterEndMs;
+
+            if (double.IsNaN(_activeLogFilterStartMs) || double.IsNaN(_activeLogFilterEndMs))
+            {
+                return false;
+            }
+
+            if (LogXAxes is not { Length: > 0 })
+            {
+                return true;
+            }
+
+            double? minLimit = LogXAxes[0].MinLimit;
+            double? maxLimit = LogXAxes[0].MaxLimit;
+
+            viewportStartMs = minLimit.HasValue
+                ? minLimit.Value
+                : _activeLogFilterStartMs;
+            viewportEndMs = maxLimit.HasValue
+                ? maxLimit.Value
+                : _activeLogFilterEndMs;
+
+            if (double.IsNaN(viewportStartMs) || double.IsInfinity(viewportStartMs) ||
+                double.IsNaN(viewportEndMs) || double.IsInfinity(viewportEndMs))
+            {
+                return false;
+            }
+
+            viewportStartMs = Math.Max(_activeLogFilterStartMs, viewportStartMs);
+            viewportEndMs = Math.Min(_activeLogFilterEndMs, viewportEndMs);
+
+            if (viewportEndMs <= viewportStartMs)
+            {
+                viewportStartMs = _activeLogFilterStartMs;
+                viewportEndMs = _activeLogFilterEndMs;
+            }
+
+            return true;
+        }
+
+        private void RebuildDisplayedLogSeries(double viewportStartMs, double viewportEndMs)
+        {
+            var newSeries = new ObservableCollection<ISeries>();
+            double filterSpanMs = Math.Max(1.0, _activeLogFilterEndMs - _activeLogFilterStartMs);
+            double viewportSpanMs = Math.Max(1.0, viewportEndMs - viewportStartMs);
+            double zoomFactor = Math.Max(1.0, filterSpanMs / viewportSpanMs);
+
+            foreach (string key in _activeLogSeriesKeys)
+            {
+                if (!_activeFilteredLogSeries.TryGetValue(key, out var sourcePoints) || sourcePoints.Count == 0)
+                {
+                    continue;
+                }
+
+                int desiredPointCount = Math.Max(
+                    MinimumViewportRenderedPointsPerSeries,
+                    (int)Math.Ceiling(MaxRenderedLogPointsPerSeries * zoomFactor));
+
+                var renderedPoints = BuildRenderedLogPoints(sourcePoints, desiredPointCount);
+                if (renderedPoints.Count == 0)
+                {
+                    continue;
+                }
+
+                newSeries.Add(new LineSeries<ObservablePoint>
+                {
+                    Values = renderedPoints,
+                    Name = BuildLogSeriesDisplayName(key, _activeSystemDisplayNames),
+                    GeometrySize = 0,
+                    GeometryStroke = null,
+                    GeometryFill = null,
+                    Fill = null,
+                    LineSmoothness = 0,
+                    AnimationsSpeed = TimeSpan.Zero,
+                    Stroke = new SolidColorPaint(GetOrAssignLogSeriesColor(key, _activeLogSeriesKeys))
+                    {
+                        StrokeThickness = 1.0f,
+                    },
+                });
+            }
+
+            LogSeriesCollection = newSeries;
+            _lastRenderedLogViewportStartMs = viewportStartMs;
+            _lastRenderedLogViewportEndMs = viewportEndMs;
+            LogStatusMessage = $"Showing {newSeries.Count} parameter series.";
+        }
+
+        private void ClearActiveLogSeries(bool resetAxisLimits = true)
+        {
+            _activeFilteredLogSeries = new Dictionary<string, List<LogSeriesPoint>>(StringComparer.OrdinalIgnoreCase);
+            _activeLogSeriesKeys = [];
+            _activeSystemDisplayNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            _activeLogFilterStartMs = double.NaN;
+            _activeLogFilterEndMs = double.NaN;
+            _lastRenderedLogViewportStartMs = double.NaN;
+            _lastRenderedLogViewportEndMs = double.NaN;
+            LogSeriesCollection = new ObservableCollection<ISeries>();
+
+            if (resetAxisLimits && LogXAxes is { Length: > 0 })
+            {
+                LogXAxes[0].MinLimit = null;
+                LogXAxes[0].MaxLimit = null;
+            }
+        }
+
+        private void UpdateLogCrosshairState()
+        {
+            var crosshairPaint = IsLogCrosshairEnabled
+                ? new SolidColorPaint(new SKColor(235, 235, 235, 180))
+                {
+                    StrokeThickness = 1,
+                }
+                : null;
+
+            foreach (var axis in LogXAxes.OfType<Axis>())
+            {
+                axis.CrosshairPaint = crosshairPaint;
+                axis.CrosshairSnapEnabled = IsLogCrosshairEnabled;
+            }
+
+            foreach (var axis in LogYAxes.OfType<Axis>())
+            {
+                axis.CrosshairPaint = crosshairPaint;
+                axis.CrosshairSnapEnabled = IsLogCrosshairEnabled;
+            }
+        }
+
+        private string BuildLogSeriesDisplayName(string key, IReadOnlyDictionary<string, string> systemDisplayNames)
+        {
+            string displayName = ResolveDisplayNameForKey(key, systemDisplayNames);
+            if (!TryGetLogSeriesUnit(key, out string? unit) || string.IsNullOrWhiteSpace(unit))
+            {
+                return displayName;
+            }
+
+            return $"{displayName} ({unit})";
+        }
+
+        private SKColor GetOrAssignLogSeriesColor(string key, IReadOnlyList<string> activeKeys)
+        {
+            if (_logSeriesColorRegistry.TryGetValue(key, out SKColor existing))
+                return existing;
+
+            // Find which palette indices are already taken by active series
+            var usedIndices = activeKeys
+                .Where(k => _logSeriesColorRegistry.ContainsKey(k))
+                .Select(k => Array.IndexOf(LogSeriesPalette, _logSeriesColorRegistry[k]))
+                .ToHashSet();
+
+            // Pick the first palette index not currently in use
+            int chosen = Enumerable.Range(0, LogSeriesPalette.Length)
+                .FirstOrDefault(i => !usedIndices.Contains(i), 0);
+
+            SKColor color = LogSeriesPalette[chosen];
+            _logSeriesColorRegistry[key] = color;
+            return color;
+        }
+
+        internal bool TryGetLogSeriesUnit(string key, out string? unit)
+        {
+            if (_parsedLogSeriesUnits.TryGetValue(key, out string? parsedUnit) && !string.IsNullOrWhiteSpace(parsedUnit))
+            {
+                unit = parsedUnit;
+                return true;
+            }
+
+            if (key.Equals("System.System Temp", StringComparison.OrdinalIgnoreCase) ||
+                key.Equals("System.SIM Module Temp", StringComparison.OrdinalIgnoreCase) ||
+                key.Equals("System.IMU Temp", StringComparison.OrdinalIgnoreCase))
+            {
+                unit = "°C";
+                return true;
+            }
+
+            if (key.Equals("System.System Voltage", StringComparison.OrdinalIgnoreCase))
+            {
+                unit = "V";
+                return true;
+            }
+
+            if (key.Equals("System.System Current", StringComparison.OrdinalIgnoreCase))
+            {
+                unit = "A";
+                return true;
+            }
+
+            if (key.EndsWith(".Current Value", StringComparison.OrdinalIgnoreCase) ||
+                key.EndsWith(".Current Threshold High", StringComparison.OrdinalIgnoreCase) ||
+                key.EndsWith(".Current Threshold Low", StringComparison.OrdinalIgnoreCase))
+            {
+                unit = "A";
+                return true;
+            }
+
+            if (key.Equals("System.IMU Accel X", StringComparison.OrdinalIgnoreCase) ||
+                key.Equals("System.IMU Accel Y", StringComparison.OrdinalIgnoreCase) ||
+                 key.Equals("System.IMU Accel Z", StringComparison.OrdinalIgnoreCase))
+            {
+                unit = "g";
+                return true;
+            }
+
+            if (key.Equals("System.IMU Gyro X", StringComparison.OrdinalIgnoreCase) ||
+                key.Equals("System.IMU Gyro Y", StringComparison.OrdinalIgnoreCase) ||
+                key.Equals("System.IMU Gyro Z", StringComparison.OrdinalIgnoreCase))
+            {
+                unit = "°/s";
+                return true;
+            }
+
+            if (key.Equals("System.Speed", StringComparison.OrdinalIgnoreCase))
+            {
+                unit = SpeedUnit;
+                return true;
+            }
+
+            if (key.Equals("System.Distance", StringComparison.OrdinalIgnoreCase))
+            {
+                unit = DistanceUnit;
+                return true;
+            }
+
+            if (key.Equals("System.Alt", StringComparison.OrdinalIgnoreCase))
+            {
+                unit = "m";
+                return true;
+            }
+
+            unit = null;
+            return false;
+        }
+
+        private static string NormalizeLoggedUnit(string unit)
+        {
+            return unit switch
+            {
+                "C" => "°C",
+                "F" => "°F",
+                _ => unit,
+            };
+        }
+
+        private string FormatLogTimestampLabel(double value)
+        {
+            try
+            {
+                var timestamp = DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Round(value)).LocalDateTime;
+                double viewportSpanMs = GetCurrentLogViewportSpanMs();
+
+                if (viewportSpanMs <= 30_000)
+                {
+                    return timestamp.ToString("HH:mm:ss.fff");
+                }
+
+                if (viewportSpanMs <= 43_200_000)
+                {
+                    return timestamp.ToString("HH:mm:ss");
+                }
+
+                return timestamp.ToString("yyyy-MM-dd HH:mm:ss");
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private double GetCurrentLogViewportSpanMs()
+        {
+            if (LogXAxes is { Length: > 0 })
+            {
+                double? minLimit = LogXAxes[0].MinLimit;
+                double? maxLimit = LogXAxes[0].MaxLimit;
+                if (minLimit.HasValue && maxLimit.HasValue && maxLimit.Value > minLimit.Value)
+                {
+                    return maxLimit.Value - minLimit.Value;
+                }
+            }
+
+            if (!double.IsNaN(_activeLogFilterStartMs) &&
+                !double.IsNaN(_activeLogFilterEndMs) &&
+                _activeLogFilterEndMs > _activeLogFilterStartMs)
+            {
+                return _activeLogFilterEndMs - _activeLogFilterStartMs;
+            }
+
+            if (_parsedLogRows.Count > 1)
+            {
+                return (_parsedLogRows[^1].Timestamp - _parsedLogRows[0].Timestamp).TotalMilliseconds;
+            }
+
+            return 0;
+        }
+
+        private static bool TryParseIndexedInputKey(string key, char inputPrefix, out int inputNumber)
+        {
+            inputNumber = 0;
+            if (key.Length < 3 || key[0] != inputPrefix || key[1] != 'I')
+            {
+                return false;
+            }
+
+            return int.TryParse(key.AsSpan(2), NumberStyles.Integer, CultureInfo.InvariantCulture, out inputNumber);
+        }
+
+        private static List<LogSeriesPoint> SliceLogSeries(List<LogSeriesPoint> sourcePoints, double startMs, double endMs)
+        {
+            if (sourcePoints.Count == 0)
+            {
+                return [];
+            }
+
+            int startIndex = FindFirstIndexAtOrAfter(sourcePoints, startMs);
+            if (startIndex >= sourcePoints.Count)
+            {
+                return [];
+            }
+
+            int endIndex = FindLastIndexAtOrBefore(sourcePoints, endMs);
+            if (endIndex < startIndex)
+            {
+                return [];
+            }
+
+            return sourcePoints.GetRange(startIndex, endIndex - startIndex + 1);
+        }
+
+        private static int FindFirstIndexAtOrAfter(List<LogSeriesPoint> sourcePoints, double targetMs)
+        {
+            int low = 0;
+            int high = sourcePoints.Count - 1;
+            int result = sourcePoints.Count;
+
+            while (low <= high)
+            {
+                int middle = low + ((high - low) / 2);
+                if (sourcePoints[middle].TimestampMs >= targetMs)
+                {
+                    result = middle;
+                    high = middle - 1;
+                }
+                else
+                {
+                    low = middle + 1;
+                }
+            }
+
+            return result;
+        }
+
+        private static int FindLastIndexAtOrBefore(List<LogSeriesPoint> sourcePoints, double targetMs)
+        {
+            int low = 0;
+            int high = sourcePoints.Count - 1;
+            int result = -1;
+
+            while (low <= high)
+            {
+                int middle = low + ((high - low) / 2);
+                if (sourcePoints[middle].TimestampMs <= targetMs)
+                {
+                    result = middle;
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle - 1;
+                }
+            }
+
+            return result;
+        }
+
+        private static List<ObservablePoint> BuildRenderedLogPoints(List<LogSeriesPoint> sourcePoints, int maxPointCount)
+        {
+            if (sourcePoints.Count <= maxPointCount)
+            {
+                return sourcePoints
+                    .Select(point => new ObservablePoint(point.TimestampMs, point.Value))
+                    .ToList();
+            }
+
+            int bucketCount = Math.Max(1, maxPointCount - 2);
+            double pointsPerBucket = (double)(sourcePoints.Count - 2) / bucketCount;
+            var renderedPoints = new List<ObservablePoint>(Math.Min(sourcePoints.Count, bucketCount + 2));
+
+            AppendRenderedPoint(renderedPoints, sourcePoints[0]);
+
+            for (int bucket = 0; bucket < bucketCount; bucket++)
+            {
+                int bucketStart = 1 + (int)Math.Floor(bucket * pointsPerBucket);
+                int bucketEndExclusive = 1 + (int)Math.Floor((bucket + 1) * pointsPerBucket);
+                bucketStart = Math.Clamp(bucketStart, 1, sourcePoints.Count - 1);
+                bucketEndExclusive = Math.Clamp(bucketEndExclusive, bucketStart + 1, sourcePoints.Count);
+
+                AppendRenderedPoint(renderedPoints, SelectRepresentativeLogPoint(sourcePoints, bucketStart, bucketEndExclusive));
+            }
+
+            AppendRenderedPoint(renderedPoints, sourcePoints[^1]);
+            return renderedPoints;
+        }
+
+        private static LogSeriesPoint SelectRepresentativeLogPoint(List<LogSeriesPoint> sourcePoints, int bucketStart, int bucketEndExclusive)
+        {
+            if (bucketEndExclusive <= bucketStart + 1)
+            {
+                return sourcePoints[bucketStart];
+            }
+
+            int previousIndex = Math.Max(0, bucketStart - 1);
+            int nextIndex = Math.Min(sourcePoints.Count - 1, bucketEndExclusive);
+            LogSeriesPoint previousPoint = sourcePoints[previousIndex];
+            LogSeriesPoint nextPoint = sourcePoints[nextIndex];
+
+            double interpolationSpan = nextPoint.TimestampMs - previousPoint.TimestampMs;
+            LogSeriesPoint representativePoint = sourcePoints[bucketStart];
+            double maxDeviation = double.MinValue;
+
+            for (int pointIndex = bucketStart; pointIndex < bucketEndExclusive; pointIndex++)
+            {
+                LogSeriesPoint candidatePoint = sourcePoints[pointIndex];
+                double expectedValue;
+                if (Math.Abs(interpolationSpan) < double.Epsilon)
+                {
+                    expectedValue = (previousPoint.Value + nextPoint.Value) / 2.0;
+                }
+                else
+                {
+                    double position = (candidatePoint.TimestampMs - previousPoint.TimestampMs) / interpolationSpan;
+                    expectedValue = previousPoint.Value + ((nextPoint.Value - previousPoint.Value) * position);
+                }
+
+                double deviation = Math.Abs(candidatePoint.Value - expectedValue);
+                if (deviation > maxDeviation)
+                {
+                    maxDeviation = deviation;
+                    representativePoint = candidatePoint;
+                }
+            }
+
+            return representativePoint;
+        }
+
+        private static void AppendRenderedPoint(List<ObservablePoint> renderedPoints, LogSeriesPoint point)
+        {
+            if (renderedPoints.Count > 0)
+            {
+                var lastPoint = renderedPoints[^1];
+                if (lastPoint.X.HasValue && lastPoint.Y.HasValue)
+                {
+                    double lastX = Convert.ToDouble(lastPoint.X.Value, CultureInfo.InvariantCulture);
+                    double lastY = Convert.ToDouble(lastPoint.Y.Value, CultureInfo.InvariantCulture);
+                    if (Math.Abs(lastX - point.TimestampMs) < 0.5 && Math.Abs(lastY - point.Value) < double.Epsilon)
+                    {
+                        return;
+                    }
+                }
+            }
+
+            renderedPoints.Add(new ObservablePoint(point.TimestampMs, point.Value));
+        }
+
+        private void NotifyLogMapDataChanged()
+        {
+            LogMapDataVersion++;
+            LogMapInspectionRows = new ObservableCollection<LogMapInspectionRow>(); // clear stale inspection
+        }
+
+        private void NotifyLogMapRouteChanged()
+        {
+            LogMapRouteVersion++;
+        }
+
+        private List<string> GetSelectedLogParameterKeys()
+        {
+            var selectedSystemKeys = SystemParameterSelections
+                .Where(p => p.IsSelected)
+                .Select(p => p.Key);
+
+            var selectedChannels = ChannelSelections
+                .Where(selection => selection.IsSelected)
+                .Select(selection => selection.ChannelNumber)
+                .ToList();
+
+            var selectedChannelFields = ChannelFieldSelections
+                .Where(selection => selection.IsSelected)
+                .Select(selection => selection.Key)
+                .ToList();
+
+            var selectedChannelKeys = new List<string>();
+            foreach (int channelNumber in selectedChannels)
+            {
+                foreach (string fieldName in selectedChannelFields)
+                {
+                    selectedChannelKeys.Add($"CH{channelNumber}.{fieldName}");
+                }
+            }
+
+            var selectedInputKeys = DigitalInputSelections
+                .Where(selection => selection.IsSelected)
+                .Select(selection => selection.Key)
+                .Concat(AnalogueInputSelections
+                    .Where(selection => selection.IsSelected)
+                    .Select(selection => selection.Key));
+
+            return selectedSystemKeys
+                .Concat(selectedChannelKeys)
+                .Concat(selectedInputKeys)
+                .ToList();
+        }
+
+        private LogMapGridRow CreateLogMapGridRow(
+            LogMapSample sample,
+            IReadOnlyList<string> selectedKeys,
+            IReadOnlyDictionary<string, string> systemDisplayNames)
+        {
+            var parameterValuesByKey = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string key in selectedKeys)
+            {
+                if (!sample.Row.NumericValues.TryGetValue(key, out double value))
+                {
+                    continue;
+                }
+
+                string displayName = ResolveDisplayNameForKey(key, systemDisplayNames);
+                string valueText = FormatLogMapNumericValue(value);
+                if (TryGetLogSeriesUnit(key, out string? unit) && !string.IsNullOrWhiteSpace(unit))
+                {
+                    valueText = $"{valueText} {unit}";
+                }
+
+                parameterValuesByKey[key] = valueText;
+            }
+
+            return new LogMapGridRow
+            {
+                Timestamp = sample.Row.Timestamp,
+                Latitude = sample.Latitude,
+                Longitude = sample.Longitude,
+                ParameterValuesByKey = parameterValuesByKey,
+            };
+        }
+
+        private static string FormatLogMapNumericValue(double value)
+        {
+            if (Math.Abs(value - Math.Round(value)) < 0.0001)
+            {
+                return Math.Round(value).ToString(CultureInfo.InvariantCulture);
+            }
+
+            return value.ToString("0.###", CultureInfo.InvariantCulture);
+        }
+
+        private static bool TryGetLogMapCoordinate(ParsedLogRow row, out double latitude, out double longitude)
+        {
+            latitude = 0;
+            longitude = 0;
+
+            if (!row.NumericValues.TryGetValue("System.Lat", out latitude) ||
+                !row.NumericValues.TryGetValue("System.Lon", out longitude))
+            {
+                return false;
+            }
+
+            if (double.IsNaN(latitude) || double.IsInfinity(latitude) ||
+                double.IsNaN(longitude) || double.IsInfinity(longitude))
+            {
+                return false;
+            }
+
+            if (Math.Abs(latitude) < double.Epsilon && Math.Abs(longitude) < double.Epsilon)
+            {
+                return false;
+            }
+
+            return latitude is >= -90 and <= 90 && longitude is >= -180 and <= 180;
+        }
+
+        private static List<LogMapSample> BuildRenderedLogMapSamples(List<LogMapSample> sourceSamples, int maxPointCount)
+        {
+            if (sourceSamples.Count <= maxPointCount)
+            {
+                return sourceSamples;
+            }
+
+            int bucketCount = Math.Max(1, maxPointCount - 2);
+            double samplesPerBucket = (double)(sourceSamples.Count - 2) / bucketCount;
+            var renderedSamples = new List<LogMapSample>(Math.Min(sourceSamples.Count, bucketCount + 2))
+            {
+                sourceSamples[0],
+            };
+
+            for (int bucket = 0; bucket < bucketCount; bucket++)
+            {
+                int bucketStart = 1 + (int)Math.Floor(bucket * samplesPerBucket);
+                int bucketEndExclusive = 1 + (int)Math.Floor((bucket + 1) * samplesPerBucket);
+                bucketStart = Math.Clamp(bucketStart, 1, sourceSamples.Count - 1);
+                bucketEndExclusive = Math.Clamp(bucketEndExclusive, bucketStart + 1, sourceSamples.Count);
+
+                AppendRenderedLogMapSample(renderedSamples, SelectRepresentativeLogMapSample(sourceSamples, bucketStart, bucketEndExclusive));
+            }
+
+            AppendRenderedLogMapSample(renderedSamples, sourceSamples[^1]);
+            return renderedSamples;
+        }
+
+        private static LogMapSample SelectRepresentativeLogMapSample(List<LogMapSample> sourceSamples, int bucketStart, int bucketEndExclusive)
+        {
+            if (bucketEndExclusive <= bucketStart + 1)
+            {
+                return sourceSamples[bucketStart];
+            }
+
+            int previousIndex = Math.Max(0, bucketStart - 1);
+            int nextIndex = Math.Min(sourceSamples.Count - 1, bucketEndExclusive);
+            LogMapSample previousSample = sourceSamples[previousIndex];
+            LogMapSample nextSample = sourceSamples[nextIndex];
+
+            double deltaLongitude = nextSample.Longitude - previousSample.Longitude;
+            double deltaLatitude = nextSample.Latitude - previousSample.Latitude;
+            double denominator = (deltaLongitude * deltaLongitude) + (deltaLatitude * deltaLatitude);
+
+            LogMapSample representativeSample = sourceSamples[bucketStart];
+            double maxDeviation = double.MinValue;
+
+            for (int sampleIndex = bucketStart; sampleIndex < bucketEndExclusive; sampleIndex++)
+            {
+                LogMapSample candidateSample = sourceSamples[sampleIndex];
+                double projectedLongitude;
+                double projectedLatitude;
+
+                if (denominator < double.Epsilon)
+                {
+                    projectedLongitude = previousSample.Longitude;
+                    projectedLatitude = previousSample.Latitude;
+                }
+                else
+                {
+                    double position = ((candidateSample.Longitude - previousSample.Longitude) * deltaLongitude) +
+                                      ((candidateSample.Latitude - previousSample.Latitude) * deltaLatitude);
+                    position = Math.Clamp(position / denominator, 0, 1);
+                    projectedLongitude = previousSample.Longitude + (deltaLongitude * position);
+                    projectedLatitude = previousSample.Latitude + (deltaLatitude * position);
+                }
+
+                double longitudeDeviation = candidateSample.Longitude - projectedLongitude;
+                double latitudeDeviation = candidateSample.Latitude - projectedLatitude;
+                double deviation = (longitudeDeviation * longitudeDeviation) + (latitudeDeviation * latitudeDeviation);
+
+                if (deviation > maxDeviation)
+                {
+                    maxDeviation = deviation;
+                    representativeSample = candidateSample;
+                }
+            }
+
+            return representativeSample;
+        }
+
+        private static void AppendRenderedLogMapSample(List<LogMapSample> renderedSamples, LogMapSample sample)
+        {
+            if (renderedSamples.Count > 0)
+            {
+                LogMapSample lastSample = renderedSamples[^1];
+                if (lastSample.Row.Timestamp == sample.Row.Timestamp &&
+                    Math.Abs(lastSample.Latitude - sample.Latitude) < 0.0000001 &&
+                    Math.Abs(lastSample.Longitude - sample.Longitude) < 0.0000001)
+                {
+                    return;
+                }
+            }
+
+            renderedSamples.Add(sample);
+        }
+
+        public sealed class ParsedLogRow
+        {
+            public DateTimeOffset Timestamp { get; set; }
+
+            public Dictionary<string, double> NumericValues { get; } = new(StringComparer.OrdinalIgnoreCase);
+        }
+
+        private readonly record struct LogSeriesPoint(long TimestampMs, double Value);
+        private readonly record struct LogMapSample(ParsedLogRow Row, double Latitude, double Longitude);
+
     }
+}
+
+public sealed class LogMapViewport
+{
+    public double MinLongitude { get; init; }
+    public double MinLatitude { get; init; }
+    public double MaxLongitude { get; init; }
+    public double MaxLatitude { get; init; }
+
+    public bool Contains(double longitude, double latitude)
+    {
+        return longitude >= MinLongitude && longitude <= MaxLongitude && latitude >= MinLatitude && latitude <= MaxLatitude;
+    }
+}
+
+public sealed class LogMapGridRow
+{
+    public DateTimeOffset Timestamp { get; init; }
+
+    public double Latitude { get; init; }
+
+    public double Longitude { get; init; }
+
+    public IReadOnlyDictionary<string, string> ParameterValuesByKey { get; init; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+    public string TimestampDisplay => Timestamp.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
+
+    public string LatitudeDisplay => Latitude.ToString("0.000000", CultureInfo.InvariantCulture);
+
+    public string LongitudeDisplay => Longitude.ToString("0.000000", CultureInfo.InvariantCulture);
+
+    public IReadOnlyList<ParsedLogRow> AssociatedRows { get; init; } = [];
+}
+
+public sealed class LogMapParameterColumn
+{
+    public string ColumnId { get; init; } = string.Empty;
+
+    public string Key { get; init; } = string.Empty;
+
+    public string Header { get; init; } = string.Empty;
+}
+
+public sealed class LogMapInspectionRow
+{
+    private readonly IReadOnlyDictionary<string, string> _values;
+
+    public LogMapInspectionRow(IReadOnlyDictionary<string, string> values)
+    {
+        _values = values;
+    }
+
+    public string this[string columnId] => _values.TryGetValue(columnId, out string? value) ? value : string.Empty;
 }
 
 public partial class ChannelLabel : ObservableObject
@@ -1020,12 +5732,13 @@ public partial class ChannelLabel : ObservableObject
 
 public partial class InputLabel : ObservableObject
 {
-    public int Index { get; }
-    public string Label => Index < 8 ? $"Digital {Index + 1}" : $"Ana/Dig {(Index - 8) + 1}";
+    public byte Pin { get; }
+    public string Label { get; }
 
-    public InputLabel(int index)
+    public InputLabel(byte pin, string label)
     {
-        Index = index;
+        Pin = pin;
+        Label = label;
     }
 }
 
@@ -1039,4 +5752,60 @@ public class ChannelTypeDisplay
 {
     public OutputChannel.ChannelType ChannelType { get; set; }
     public required string Label { get; set; }
+}
+
+public class ChannelCategoryDisplay
+{
+    public OutputChannel.ChannelCategory Category { get; set; }
+    public required string Label { get; set; }
+}
+
+public class AnalogueTypeDisplay
+{
+    public AnalogueInput.AnalogueChannelType Type { get; set; }
+    public required string Label { get; set; }
+}
+
+public class AnalogueUnitDisplay
+{
+    public AnalogueInput.AnalogueUnits Units { get; set; }
+    public required string Label { get; set; }
+}
+
+public sealed class CanIdOption
+{
+    public CanIdOption(ushort value, string label)
+    {
+        Value = value;
+        Label = label;
+    }
+
+    public ushort Value { get; }
+
+    public string Label { get; }
+}
+
+public sealed class TimeZoneDisplay
+{
+    public TimeZoneDisplay(string id, string label, TimeZoneInfo timeZone, int baseOffsetMinutes, bool isSupported, string? unsupportedReason)
+    {
+        Id = id;
+        Label = label;
+        TimeZone = timeZone;
+        BaseOffsetMinutes = baseOffsetMinutes;
+        IsSupported = isSupported;
+        UnsupportedReason = unsupportedReason;
+    }
+
+    public string Id { get; }
+
+    public string Label { get; }
+
+    public TimeZoneInfo TimeZone { get; }
+
+    public int BaseOffsetMinutes { get; }
+
+    public bool IsSupported { get; }
+
+    public string? UnsupportedReason { get; }
 }

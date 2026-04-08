@@ -14,6 +14,9 @@ namespace Cortex.Models
         public ChannelType _ChanType;           // Channel type
 
         [ObservableProperty]
+        public ChannelCategory _Category = ChannelCategory.Auxiliary;       // Output category
+
+        [ObservableProperty]
         public byte _PWMSetDuty;                // Current duty set percentage
 
         [ObservableProperty]
@@ -21,6 +24,9 @@ namespace Cortex.Models
 
         [ObservableProperty]
         public char[]? _Name;                   // Channel name (3 characters)
+
+        [ObservableProperty]
+        public int _ChannelNumber;             // 1-based channel number for UI display
 
         [ObservableProperty]
         public int _AnalogRaw;                  // Raw analog value. Used for calibration
@@ -44,6 +50,9 @@ namespace Cortex.Models
         public float _InrushDelay;              // Inrush delay in seconds
 
         [ObservableProperty]
+        public float _InrushCurrentLimit;       // Inrush current limit in amps
+
+        [ObservableProperty]
         public byte _MultiChannel;              // Grouped with other channels. Allows higher current loads
 
         [ObservableProperty]
@@ -59,6 +68,24 @@ namespace Cortex.Models
         public byte _InputControlPin;           // Digital input control pin (digital channels only)
 
         [ObservableProperty]
+        public float _OnThreshold;              // On threshold (voltage)
+
+        [ObservableProperty]
+        public float _OffThreshold;             // Off threshold (voltage)
+
+        [ObservableProperty]
+        public float _ScaleMin;                 // Minimum input scale value (voltage)
+
+        [ObservableProperty]
+        public float _ScaleMax;                 // Maximum input scale value (voltage)
+
+        [ObservableProperty]
+        public byte _PWMMin;                    // Minimum PWM value (0-100)
+
+        [ObservableProperty]
+        public byte _PWMMax;                    // Maximum PWM value (0-100)
+
+        [ObservableProperty]
         public byte _RunOn;                     // Run channel after ignition off
 
         [ObservableProperty]
@@ -70,8 +97,44 @@ namespace Cortex.Models
         [ObservableProperty]
         private double _holdProgress;           // Hold progress percentage for override button
 
+        [ObservableProperty]
+        private byte _SoftStartEnabled;          // Soft start enabled flag
+
+        [ObservableProperty]
+        private float _SoftStartTime;             // Soft start time in milliseconds
+
+        [ObservableProperty]
+        private byte _SoftStopEnabled;           // Soft stop enabled flag
+
+        [ObservableProperty]
+        private float _SoftStopTime;             // Soft stop time in milliseconds
+
+        [ObservableProperty]
+        private float _IntermittentOnTime;       // Intermittent on time in seconds
+
+        [ObservableProperty]
+        private float _IntermittentOffTime;      // Intermittent off time in seconds
+
+        [ObservableProperty]
+        private string _AnalogueInputVoltageDisplay = "-";
+
+
         public IAsyncRelayCommand HoldToggleCommand { get; }
         public IRelayCommand CancelHoldCommand { get; }
+
+        // Computed property for PWM channel detection
+        public bool IsPWMChannel => ChanType == ChannelType.PWM ||
+                        ChanType == ChannelType.CAN_PWM;
+
+        public bool IsAnalogueThresholdChannel => ChanType == ChannelType.Analogue;
+
+        public bool IsAnalogueScaledChannel => ChanType == ChannelType.AnalogueScaled;
+
+        public bool IsIntermittentChannel => ChanType == ChannelType.Intermittent;
+
+        public bool IsAnalogueChannel => IsAnalogueThresholdChannel || IsAnalogueScaledChannel;
+
+        public ChannelPriority Priority => GetPriority(Category);
 
         public OutputChannel()
         {
@@ -151,6 +214,77 @@ namespace Cortex.Models
             OnPropertyChanged(nameof(HasAnyError));
         }
 
+        // Notify IsPWMChannel when ChanType changes
+        partial void OnChanTypeChanged(ChannelType value)
+        {
+            OnPropertyChanged(nameof(IsPWMChannel));
+            OnPropertyChanged(nameof(IsAnalogueThresholdChannel));
+            OnPropertyChanged(nameof(IsAnalogueScaledChannel));
+            OnPropertyChanged(nameof(IsIntermittentChannel));
+            OnPropertyChanged(nameof(IsAnalogueChannel));
+        }
+
+        partial void OnCategoryChanged(ChannelCategory value)
+        {
+            OnPropertyChanged(nameof(Priority));
+        }
+
+        partial void OnOnThresholdChanged(float value)
+        {
+            if (UsesNegativeGoingThresholds())
+            {
+                if (OffThreshold < value)
+                {
+                    OffThreshold = value;
+                }
+            }
+            else if (OffThreshold > value)
+            {
+                OffThreshold = value;
+            }
+        }
+
+        partial void OnOffThresholdChanged(float value)
+        {
+            if (UsesNegativeGoingThresholds())
+            {
+                if (value < OnThreshold)
+                {
+                    OnThreshold = value;
+                }
+            }
+            else if (value > OnThreshold)
+            {
+                OnThreshold = value;
+            }
+        }
+
+        private bool UsesNegativeGoingThresholds() => OnThreshold < OffThreshold;
+
+        public static ChannelPriority GetPriority(ChannelCategory category)
+        {
+            return category switch
+            {
+                ChannelCategory.HeatedSeats => ChannelPriority.Low,
+                ChannelCategory.HeatedSteeringWheel => ChannelPriority.Low,
+                ChannelCategory.Infotainment => ChannelPriority.Low,
+                ChannelCategory.USBAccessoryPower => ChannelPriority.Low,
+                ChannelCategory.DataLogger => ChannelPriority.Low,
+                ChannelCategory.Telemetry => ChannelPriority.Low,
+                ChannelCategory.CameraSystem => ChannelPriority.Low,
+                ChannelCategory.LapTimer => ChannelPriority.Low,
+                ChannelCategory.CoolSuitPump => ChannelPriority.Low,
+                ChannelCategory.InteriorLights => ChannelPriority.Low,
+                ChannelCategory.Auxiliary => ChannelPriority.Low,
+                ChannelCategory.Spare => ChannelPriority.Low,
+                ChannelCategory.Custom => ChannelPriority.Low,
+                ChannelCategory.HVACBlower => ChannelPriority.Medium,
+                ChannelCategory.ACClutch => ChannelPriority.Medium,
+                ChannelCategory.PitLimiter => ChannelPriority.Medium,
+                _ => ChannelPriority.Critical,
+            };
+        }
+
         public enum ChannelType
         {
             Digital,                    // Digital input
@@ -158,7 +292,62 @@ namespace Cortex.Models
             Analogue,                   // Analog input (threshold detection)
             AnalogueScaled,             // Analog input, PWM output
             CAN,                        // CAN bus controlled digital output
-            CAN_PWM                     // CAN bus controlled PWM output
+            CAN_PWM,                    // CAN bus controlled PWM output
+            Intermittent                // Digital intermittent output
+        }
+
+        public enum ChannelCategory
+        {
+            ECUPower,
+            IgnitionCoils,
+            FuelPump,
+            FuelInjectors,
+            EngineSensorsSupply,
+            DriveByWire,
+            Headlights,
+            BrakeLights,
+            Indicators,
+            HazardLights,
+            Horn,
+            Wipers,
+            WasherPump,
+            ABSBrakeSystem,
+            PowerSteering,
+            CoolingFan,
+            OilCoolerFan,
+            WaterPump,
+            IntercoolerPump,
+            TransmissionPump,
+            TailLights,
+            DRL,
+            ReverseLights,
+            InteriorLights,
+            DashCluster,
+            GearSelector,
+            HeatedSeats,
+            HeatedSteeringWheel,
+            HVACBlower,
+            ACClutch,
+            Infotainment,
+            USBAccessoryPower,
+            DataLogger,
+            Telemetry,
+            CameraSystem,
+            LapTimer,
+            CoolSuitPump,
+            FireSuppression,
+            RainLight,
+            PitLimiter,
+            Auxiliary,
+            Spare,
+            Custom
+        }
+
+        public enum ChannelPriority
+        {
+            Critical,
+            Medium,
+            Low,
         }
     }
 }

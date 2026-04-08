@@ -1,17 +1,19 @@
 ﻿namespace Cortex.Views
 {
-    using System.Threading;
-    using System.Threading.Tasks;
     using Avalonia.Controls;
-    using Avalonia.Input;
-    using Avalonia.Threading;
+    using Avalonia.Platform.Storage;
     using Cortex.Models;
     using Cortex.Services;
     using Cortex.ViewModels;
+    using System;
+    using System.Diagnostics;
+    using System.IO;
+    using System.Linq;
+    using System.Threading.Tasks;
 
     public partial class MainWindow : Window, IAppCloser
     {
-        private CancellationTokenSource? _holdCts;
+        private bool _allowCloseWithoutUnsavedPrompt;
 
         public MainWindow()
         {
@@ -19,6 +21,33 @@
 
             var vm = new MainWindowViewModel(this);
             DataContext = vm;
+
+            Closing += async (_, args) =>
+            {
+                if (_allowCloseWithoutUnsavedPrompt)
+                {
+                    return;
+                }
+
+                if (DataContext is not MainWindowViewModel mainViewModel || !mainViewModel.HasPendingConfigChanges)
+                {
+                    return;
+                }
+
+                args.Cancel = true;
+
+                bool exitConfirmed = await ConfirmAsync(
+                    "Unsaved Changes",
+                    "Configuration changes have not been written to the controller. Exit anyway?");
+
+                if (!exitConfirmed)
+                {
+                    return;
+                }
+
+                _allowCloseWithoutUnsavedPrompt = true;
+                Close();
+            };
 
             vm.PropertyChanged += (_, args) =>
                 {
@@ -53,29 +82,228 @@
                     }
                 };
 
-            // Subscribe to CollectionChanged event to auto-scroll when new log entries are added
-            if (DataContext is MainWindowViewModel mainViewModel)
-            {
-                mainViewModel.LogEntries.CollectionChanged += LogEntries_CollectionChanged;
-            }
-
-            // Initial states
             UpdateConnectionState(vm.IsConnected);
             UpdateSDStatus(vm.SdOK);
             UpdateCurrentStatus(vm.OverCurrent);
             UpdateTempStatus(vm.OverTemperature);
             UpdateVoltStatus(vm.UnderVoltage);
             UpdateGPSStatus(vm.GpsOK);
-
-            ChannelChart.SizeChanged += (s, e) =>
-                    {
-                        ChannelChart?.CoreChart?.Update();
-                    };
         }
 
         public void CloseApp()
         {
             Close();
+        }
+
+        public async Task<string?> OpenPdmFileContentAsync()
+        {
+            var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+            {
+                Title = "Open Controller Configuration",
+                AllowMultiple = false,
+                FileTypeFilter =
+                [
+                    new FilePickerFileType("PDM Configuration")
+                    {
+                        Patterns = ["*.pdm"],
+                    },
+                    FilePickerFileTypes.All,
+                ],
+            });
+
+            var selectedFile = files.FirstOrDefault();
+            if (selectedFile == null)
+            {
+                return null;
+            }
+
+            await using var readStream = await selectedFile.OpenReadAsync();
+            using var reader = new StreamReader(readStream);
+            return await reader.ReadToEndAsync();
+        }
+
+        public async Task<string?> BrowseLocalLogFilePathAsync(string initialDirectory)
+        {
+            var options = new FilePickerOpenOptions
+            {
+                Title = "Open Synapse PDM Log",
+                AllowMultiple = false,
+                FileTypeFilter =
+                [
+                    new FilePickerFileType("Synapse PDM Log")
+                    {
+                        Patterns = ["*.csv"],
+                    },
+                    FilePickerFileTypes.All,
+                ],
+            };
+
+            if (!string.IsNullOrWhiteSpace(initialDirectory) && Directory.Exists(initialDirectory))
+            {
+                options.SuggestedStartLocation = await StorageProvider.TryGetFolderFromPathAsync(initialDirectory);
+            }
+
+            var selectedFile = (await StorageProvider.OpenFilePickerAsync(options)).FirstOrDefault();
+            return selectedFile?.TryGetLocalPath();
+        }
+
+        public async Task<bool> SavePdmFileContentAsync(string content)
+        {
+            var storageFile = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+            {
+                Title = "Save Controller Configuration",
+                SuggestedFileName = $"SynapsePDM_Config-{DateTime.Now:yyyyMMdd-HHmmss}",
+                DefaultExtension = "pdm",
+                FileTypeChoices =
+                [
+                    new FilePickerFileType("PDM Configuration")
+                    {
+                        Patterns = ["*.pdm"],
+                    },
+                ],
+            });
+
+            if (storageFile == null)
+            {
+                return false;
+            }
+
+            await using var writeStream = await storageFile.OpenWriteAsync();
+            writeStream.SetLength(0);
+
+            await using var writer = new StreamWriter(writeStream);
+            await writer.WriteAsync(content);
+            await writer.FlushAsync();
+            return true;
+        }
+
+        public async Task<bool> ConfirmAsync(string title, string message, string confirmButtonText = "CONFIRM", string cancelButtonText = "CANCEL")
+        {
+            var dialog = new Window
+            {
+                Title = title,
+                Width = 430,
+                Height = 190,
+                CanResize = false,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Content = new Grid
+                {
+                    Margin = new Avalonia.Thickness(16),
+                    RowDefinitions = new RowDefinitions("*,Auto"),
+                    Children =
+                    {
+                        new TextBlock
+                        {
+                            Text = message,
+                            TextWrapping = Avalonia.Media.TextWrapping.Wrap,
+                            VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                        },
+                        new StackPanel
+                        {
+                            Orientation = Avalonia.Layout.Orientation.Horizontal,
+                            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
+                            Spacing = 10,
+                            Children =
+                            {
+                                new Button
+                                {
+                                    Name = "CancelButton",
+                                    Content = cancelButtonText,
+                                    MinWidth = 90,
+                                },
+                                new Button
+                                {
+                                    Name = "ConfirmButton",
+                                    Content = confirmButtonText,
+                                    MinWidth = 90,
+                                },
+                            },
+                            [Grid.RowProperty] = 1,
+                        },
+                    },
+                },
+            };
+
+            if (dialog.Content is Grid grid && grid.Children.Count > 1 && grid.Children[1] is StackPanel buttonPanel)
+            {
+                var cancelButton = buttonPanel.Children.OfType<Button>().FirstOrDefault(b => b.Name == "CancelButton");
+                var confirmButton = buttonPanel.Children.OfType<Button>().FirstOrDefault(b => b.Name == "ConfirmButton");
+
+                cancelButton!.Click += (_, _) => dialog.Close(false);
+                confirmButton!.Click += (_, _) => dialog.Close(true);
+            }
+
+            var result = await dialog.ShowDialog<bool>(this);
+            return result;
+        }
+
+        public Task OpenUrlAsync(string url)
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = url,
+                UseShellExecute = true,
+            });
+
+            return Task.CompletedTask;
+        }
+
+        public async Task<LocalFirmwareUpdateSelection?> BrowseLocalFirmwareUpdateFilesAsync()
+        {
+            var file = (await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+            {
+                Title = "Select firmware update package",
+                AllowMultiple = false,
+                FileTypeFilter =
+                [
+                    new FilePickerFileType("Firmware Update Package")
+                    {
+                        Patterns = ["*.zip"],
+                    },
+                    FilePickerFileTypes.All,
+                ],
+            })).FirstOrDefault();
+
+            string? packagePath = file?.TryGetLocalPath();
+            if (string.IsNullOrWhiteSpace(packagePath))
+            {
+                return null;
+            }
+
+            return new LocalFirmwareUpdateSelection
+            {
+                PackagePath = packagePath,
+                DisplayName = Path.GetFileName(packagePath),
+            };
+        }
+
+        public async Task ShowAboutAsync()
+        {
+            var aboutWindow = new AboutWindow();
+            await aboutWindow.ShowDialog(this);
+        }
+
+        public async Task ShowFirmwareUpdateDialogAsync(FirmwareUpdateWindowViewModel viewModel)
+        {
+            var firmwareUpdateWindow = new FirmwareUpdateWindow
+            {
+                DataContext = viewModel,
+            };
+
+            void CloseRequested()
+            {
+                firmwareUpdateWindow.Close();
+            }
+
+            viewModel.CloseRequested += CloseRequested;
+            try
+            {
+                await firmwareUpdateWindow.ShowDialog(this);
+            }
+            finally
+            {
+                viewModel.CloseRequested -= CloseRequested;
+            }
         }
 
         private void UpdateConnectionState(bool isConnected)
@@ -130,94 +358,6 @@
 
             GPSIcon.Classes.Set("gpsOK", gpsOk);
             GPSIcon.Classes.Set("gpsError", !gpsOk);
-        }
-
-
-        private void LogEntries_CollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
-        {
-            // Ensure the scroll happens on the UI thread
-            Dispatcher.UIThread.Post(() =>
-                        {
-                            LogScrollViewer?.ScrollToEnd();
-                        });
-        }
-
-
-        private bool _holdCompleted = false;
-
-        private async void OnBorderPointerPressed(object? sender, PointerPressedEventArgs e)
-        {
-            if (sender is Border border && border.DataContext is OutputChannel item)
-            {
-                if (item.Override)
-                {
-                    // Already active → single click deactivates
-                    item.Override = false;
-                    item.HoldProgress = 0;
-
-                    // Send command to device
-                    if (DataContext is MainWindowViewModel vm)
-                    {
-                        vm.SendOverrideCommand(item);
-                    }
-
-                    return;
-                }
-
-                _holdCompleted = false;
-                _holdCts?.Cancel();
-                _holdCts = new CancellationTokenSource();
-                var start = System.DateTime.Now;
-                var holdTime = System.TimeSpan.FromSeconds(2);
-
-                try
-                {
-                    while ((System.DateTime.Now - start) < holdTime)
-                    {
-                        await Task.Delay(50, _holdCts.Token);
-                        var progress = (System.DateTime.Now - start).TotalMilliseconds / holdTime.TotalMilliseconds;
-                        item.HoldProgress = System.Math.Clamp(progress, 0, 1);
-                    }
-
-                    item.Override = true;
-
-                    // Send command to device
-                    if (DataContext is MainWindowViewModel vm)
-                    {
-                        vm.SendOverrideCommand(item);
-                    }
-
-                    item.HoldProgress = 0;
-                    _holdCompleted = true;
-                }
-                catch (TaskCanceledException)
-                {
-                    item.HoldProgress = 0;
-                    _holdCompleted = false;
-                }
-            }
-        }
-
-        private void OnBorderPointerReleased(object? sender, PointerReleasedEventArgs e)
-        {
-            _holdCts?.Cancel();
-
-            if (_holdCompleted)
-            {
-                _holdCompleted = false;
-                return;
-            }
-        }
-
-        private void OnBorderPointerExited(object? sender, PointerEventArgs e)
-        {
-            _holdCts?.Cancel();
-            _holdCompleted = false;
-
-            if (sender is Border border && border.DataContext is OutputChannel item)
-            {
-                item.HoldProgress = 0;
-            }
         }
     }
 }

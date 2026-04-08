@@ -10,6 +10,12 @@ namespace Cortex.Models
         public Int32 _SystemTemperature;        // Internal system (Teensy processor) temperature
 
         [ObservableProperty]
+        public float _SIMModuleTemp;            // SIM7600 internal module temperature
+
+        [ObservableProperty]
+        public float _IMUTemp;                  // BMI270 temperature
+
+        [ObservableProperty]
         public bool _CANResEnabled;             // CAN bus termination resistor enableda
 
         [ObservableProperty]
@@ -56,5 +62,11 @@ namespace Cortex.Models
 
         [ObservableProperty]
         public UInt16 _MobileSignalPercent;     // Mobile signal strength
+
+        [ObservableProperty]
+        public string? _TimeZoneId;             // Cortex-selected time zone identifier
+
+        [ObservableProperty]
+        public byte[] _TimeZoneRule = Array.Empty<byte>(); // Serialized controller time zone and DST rule
     }
 }
