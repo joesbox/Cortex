@@ -160,6 +160,8 @@ namespace Cortex.Services
                 target.SystemParamsStaticData.SystemCurrentLimit = snapshot.SystemParameters.SystemCurrentLimit ?? target.SystemParamsStaticData.SystemCurrentLimit;
                 target.SystemParamsStaticData.ErrorFlags = snapshot.SystemParameters.ErrorFlags ?? target.SystemParamsStaticData.ErrorFlags;
                 target.SystemParamsStaticData.ChannelDataCANID = snapshot.SystemParameters.ChannelDataCANID ?? target.SystemParamsStaticData.ChannelDataCANID;
+                target.SystemParamsStaticData.DigitalInputDataCANID = snapshot.SystemParameters.DigitalInputDataCANID ?? target.SystemParamsStaticData.DigitalInputDataCANID;
+                target.SystemParamsStaticData.AnalogueInputDataCANID = snapshot.SystemParameters.AnalogueInputDataCANID ?? target.SystemParamsStaticData.AnalogueInputDataCANID;
                 target.SystemParamsStaticData.SystemDataCANID = snapshot.SystemParameters.SystemDataCANID ?? target.SystemParamsStaticData.SystemDataCANID;
                 target.SystemParamsStaticData.SystemConfigCANID = snapshot.SystemParameters.SystemConfigCANID ?? target.SystemParamsStaticData.SystemConfigCANID;
                 target.SystemParamsStaticData.ConfigDataCANID = snapshot.SystemParameters.ConfigDataCANID ?? target.SystemParamsStaticData.ConfigDataCANID;
@@ -252,6 +254,8 @@ namespace Cortex.Services
                     SystemCurrentLimit = settingsData.SystemParamsStaticData.SystemCurrentLimit,
                     ErrorFlags = settingsData.SystemParamsStaticData.ErrorFlags,
                     ChannelDataCANID = settingsData.SystemParamsStaticData.ChannelDataCANID,
+                    DigitalInputDataCANID = settingsData.SystemParamsStaticData.DigitalInputDataCANID,
+                    AnalogueInputDataCANID = settingsData.SystemParamsStaticData.AnalogueInputDataCANID,
                     SystemDataCANID = settingsData.SystemParamsStaticData.SystemDataCANID,
                     SystemConfigCANID = settingsData.SystemParamsStaticData.SystemConfigCANID,
                     ConfigDataCANID = settingsData.SystemParamsStaticData.ConfigDataCANID,
@@ -431,6 +435,10 @@ namespace Cortex.Services
         public ushort? ErrorFlags { get; set; }
 
         public ushort? ChannelDataCANID { get; set; }
+
+        public ushort? DigitalInputDataCANID { get; set; }
+
+        public ushort? AnalogueInputDataCANID { get; set; }
 
         public ushort? SystemDataCANID { get; set; }
 

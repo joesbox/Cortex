@@ -341,7 +341,7 @@
             <Border
                 HorizontalAlignment="Right"
                 VerticalAlignment="Stretch"
-                IsVisible="{Binding HasControllerSaveTimestamp}">
+                IsVisible="{Binding HasControllerSaveStatus}">
                 <Grid>
                     <Border
                         Background="#01AD59"
@@ -360,7 +360,7 @@
                         Margin="10,0,10,0"
                         VerticalAlignment="Center"
                         FontSize="14"
-                        Text="{Binding SystemDateTime}"
+                        Text="{Binding ControllerSaveStatusText}"
                         ToolTip.Tip="Last time settings were saved to controller" />
                 </Grid>
             </Border>

@@ -1,4 +1,4 @@
-﻿<UserControl
+<UserControl
     x:Class="Cortex.Views.SettingsTabView"
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -236,7 +236,7 @@
                         HorizontalAlignment="Center"
                         Orientation="Horizontal"
                         Spacing="12">
-                        <Grid ColumnDefinitions="Auto, Auto, Auto" RowDefinitions="Auto, Auto, Auto, Auto">
+                        <Grid ColumnDefinitions="Auto, Auto, Auto" RowDefinitions="Auto, Auto, Auto, Auto, Auto, Auto">
                             <TextBlock
                                 Grid.Row="0"
                                 Grid.Column="0"
@@ -244,7 +244,7 @@
                                 HorizontalAlignment="Center"
                                 VerticalAlignment="Center"
                                 ToolTip.Tip="Current system status ID"
-                                Text="{Binding SettingsDataView.SystemParams.SystemDataCANID, StringFormat='System status TX (0x{0:X3})'}" />
+                                Text="{Binding SettingsDataView.SystemParamsStaticData.SystemDataCANID, StringFormat='System status TX (0x{0:X3})'}" />
                             <ComboBox
                                 Grid.Row="0"
                                 Grid.Column="2"
@@ -265,8 +265,8 @@
                                 Margin="5"
                                 HorizontalAlignment="Center"
                                 VerticalAlignment="Center"
-                                ToolTip.Tip="Current system config ID"
-                                Text="{Binding SettingsDataView.SystemParams.SystemConfigCANID, StringFormat='System config RX (0x{0:X3})'}" />
+                                ToolTip.Tip="Current digital input status ID"
+                                Text="{Binding SettingsDataView.SystemParamsStaticData.DigitalInputDataCANID, StringFormat='Digital input status TX (0x{0:X3})'}" />
                             <ComboBox
                                 Grid.Row="1"
                                 Grid.Column="2"
@@ -274,7 +274,7 @@
                                 Margin="0,5,0,0"
                                 HorizontalAlignment="Right"
                                 ItemsSource="{Binding AvailableCanIds}"
-                                SelectedItem="{Binding SelectedSystemConfigCanId, Mode=TwoWay}">
+                                SelectedItem="{Binding SelectedDigitalInputDataCanId, Mode=TwoWay}">
                                 <ComboBox.ItemTemplate>
                                     <DataTemplate>
                                         <TextBlock Text="{Binding Label}" />
@@ -287,10 +287,32 @@
                                 Margin="5"
                                 HorizontalAlignment="Center"
                                 VerticalAlignment="Center"
-                                ToolTip.Tip="Current channel status ID"
-                                Text="{Binding SettingsDataView.SystemParams.ChannelDataCANID, StringFormat='Channel status TX (0x{0:X3})'}" />
+                                ToolTip.Tip="Current analogue input status ID"
+                                Text="{Binding SettingsDataView.SystemParamsStaticData.AnalogueInputDataCANID, StringFormat='Analogue input status TX (0x{0:X3})'}" />
                             <ComboBox
                                 Grid.Row="2"
+                                Grid.Column="2"
+                                Width="92"
+                                Margin="-8,5,0,0"
+                                HorizontalAlignment="Right"
+                                ItemsSource="{Binding AvailableCanIds}"
+                                SelectedItem="{Binding SelectedAnalogueInputDataCanId, Mode=TwoWay}">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Label}" />
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
+                            <TextBlock
+                                Grid.Row="3"
+                                Grid.Column="0"
+                                Margin="5"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center"
+                                ToolTip.Tip="Current channel status ID"
+                                Text="{Binding SettingsDataView.SystemParamsStaticData.ChannelDataCANID, StringFormat='Channel status TX (0x{0:X3})'}" />
+                            <ComboBox
+                                Grid.Row="3"
                                 Grid.Column="2"
                                 Width="92"
                                 Margin="-8,5,0,0"
@@ -304,21 +326,43 @@
                                 </ComboBox.ItemTemplate>
                             </ComboBox>
                             <TextBlock
-                                Grid.Row="3"
+                                Grid.Row="4"
                                 Grid.Column="0"
                                 Margin="5"
                                 HorizontalAlignment="Center"
                                 VerticalAlignment="Center"
                                 ToolTip.Tip="Current channel config ID"
-                                Text="{Binding SettingsDataView.SystemParams.ConfigDataCANID, StringFormat='Channel config RX (0x{0:X3})'}" />
+                                Text="{Binding SettingsDataView.SystemParamsStaticData.ConfigDataCANID, StringFormat='Channel config RX (0x{0:X3})'}" />
                             <ComboBox
-                                Grid.Row="3"
+                                Grid.Row="4"
                                 Grid.Column="2"
                                 Width="92"
                                 Margin="-8,5,0,0"
                                 HorizontalAlignment="Right"
                                 ItemsSource="{Binding AvailableCanIds}"
                                 SelectedItem="{Binding SelectedConfigDataCanId, Mode=TwoWay}">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Label}" />
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
+                            <TextBlock
+                                Grid.Row="5"
+                                Grid.Column="0"
+                                Margin="5"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center"
+                                ToolTip.Tip="Current system config ID"
+                                Text="{Binding SettingsDataView.SystemParamsStaticData.SystemConfigCANID, StringFormat='System config RX (0x{0:X3})'}" />
+                            <ComboBox
+                                Grid.Row="5"
+                                Grid.Column="2"
+                                Width="92"
+                                Margin="-8,5,0,0"
+                                HorizontalAlignment="Right"
+                                ItemsSource="{Binding AvailableCanIds}"
+                                SelectedItem="{Binding SelectedSystemConfigCanId, Mode=TwoWay}">
                                 <ComboBox.ItemTemplate>
                                     <DataTemplate>
                                         <TextBlock Text="{Binding Label}" />
@@ -1254,7 +1298,7 @@
                 HorizontalContentAlignment="Center"
                 Background="#B30000"
                 Command="{Binding SendConfigCommand}"
-                IsEnabled="{Binding HasPendingConfigChanges}"
+                IsEnabled="{Binding CanSendConfig}"
                 Content="SAVE CHANGES" />
         </StackPanel>
     </Grid>

@@ -76,9 +76,9 @@
 
         public const int LAST_ANALOGUE_PARAM_INDEX = 12;
 
-        public const int LAST_SYSTEM_PARAM_INDEX = 11;
+        public const int LAST_SYSTEM_PARAM_INDEX = 13;
 
-        public const int SYSTEM_PARAM_TIME_ZONE_RULE = 11;
+        public const int SYSTEM_PARAM_TIME_ZONE_RULE = 13;
 
         public const int TIME_ZONE_RULE_LENGTH = 15;
 

@@ -33,6 +33,9 @@ using static Cortex.ViewModels.MainWindowViewModel;
  * Version history:
     Date              Version       Description
     ----              -------       ----------------------------------------------------------------------------------------------------------------------------------------------------
+    2026-04-29        v0.1.5        Channel type change bug fix.
+                                    Minor UI bug fixes
+                                    Added digital and analogue status CAN IDs to config screen.
     2026-02-25        v0.1.4        Soft start/stop and inrush current parameters added to OutputChannel and config sending updated to include them.
                                     Save and load config file functionality added to UI, using JSON format for readability and ease of debugging. Config file operations are asynchronous to prevent UI blocking.
                                     Working analogue threshold and scaled parameters. Moved to channel configuration.
@@ -104,6 +107,10 @@ namespace Cortex.ViewModels
         private string factoryResetStatusMessage = string.Empty;
 
         public bool HasControllerSaveTimestamp => !string.IsNullOrWhiteSpace(SystemDateTime);
+
+        public bool HasControllerSaveStatus => IsSendingConfig || HasControllerSaveTimestamp;
+
+        public string ControllerSaveStatusText => IsSendingConfig ? "Updating PDM" : SystemDateTime;
 
         public bool CanSetControllerRtc => IsConnected && CommsEstablished && !IsLogBusy && !IsSettingControllerRtc && _portService != null;
 
@@ -225,6 +232,9 @@ namespace Cortex.ViewModels
         private bool hasPendingConfigChanges;
 
         [ObservableProperty]
+        private bool isSendingConfig;
+
+        [ObservableProperty]
         private int selectedLogDetailTabIndex;
 
         [ObservableProperty]
@@ -290,6 +300,8 @@ namespace Cortex.ViewModels
             CommsEstablished &&
             !IsCheckingFirmwareUpdate &&
             _portService != null;
+
+        public bool CanSendConfig => HasPendingConfigChanges && !IsSendingConfig;
 
         public string CurrentFirmwareVersionDisplay => string.IsNullOrWhiteSpace(ControllerFirmwareVersion)
             ? "Unknown"
@@ -378,6 +390,20 @@ namespace Cortex.ViewModels
         partial void OnSystemDateTimeChanged(string value)
         {
             OnPropertyChanged(nameof(HasControllerSaveTimestamp));
+            OnPropertyChanged(nameof(HasControllerSaveStatus));
+            OnPropertyChanged(nameof(ControllerSaveStatusText));
+        }
+
+        partial void OnHasPendingConfigChangesChanged(bool value)
+        {
+            OnPropertyChanged(nameof(CanSendConfig));
+        }
+
+        partial void OnIsSendingConfigChanged(bool value)
+        {
+            OnPropertyChanged(nameof(CanSendConfig));
+            OnPropertyChanged(nameof(HasControllerSaveStatus));
+            OnPropertyChanged(nameof(ControllerSaveStatusText));
         }
 
         partial void OnControllerRtcDateChanged(DateTimeOffset? value)
@@ -485,6 +511,15 @@ namespace Cortex.ViewModels
             if (SelectedChannel != null && value != null)
             {
                 SelectedChannel.InputControlPin = value.Pin;
+                var desiredChannelType = SelectedChannelTypeDisplay?.ChannelType ?? SelectedChannel.ChanType;
+                var compatibleChannelType = GetCompatibleChannelTypeForInput(value.Pin, desiredChannelType);
+
+                if (SelectedChannel.ChanType != compatibleChannelType)
+                {
+                    SelectedChannel.ChanType = compatibleChannelType;
+                }
+
+                IsPWMChannel = SelectedChannel.IsPWMChannel;
                 NotifyAnalogueChannelUiContextChanged();
             }
         }
@@ -516,18 +551,23 @@ namespace Cortex.ViewModels
             };
         }
 
-        private void SyncChannelTypeForAssignedInput(OutputChannel channel)
+        private OutputChannel.ChannelType GetCompatibleChannelTypeForInput(byte inputControlPin, OutputChannel.ChannelType desiredType)
         {
-            int analogueInputIndex = Array.IndexOf(ANAChannelInputPins, channel.InputControlPin);
+            int analogueInputIndex = Array.IndexOf(ANAChannelInputPins, inputControlPin);
             if (analogueInputIndex < 0 || analogueInputIndex >= SettingsDataView.AnalogueInputsStaticData.Count)
             {
-                return;
+                return desiredType;
             }
 
             var analogueInput = SettingsDataView.AnalogueInputsStaticData[analogueInputIndex];
-            var syncedType = analogueInput.ChanType == AnalogueInput.AnalogueChannelType.Digital
-                ? DefaultToDigitalType(channel.ChanType)
-                : DefaultToAnalogueType(channel.ChanType);
+            return analogueInput.ChanType == AnalogueInput.AnalogueChannelType.Digital
+                ? DefaultToDigitalType(desiredType)
+                : DefaultToAnalogueType(desiredType);
+        }
+
+        private void SyncChannelTypeForAssignedInput(OutputChannel channel)
+        {
+            var syncedType = GetCompatibleChannelTypeForInput(channel.InputControlPin, channel.ChanType);
 
             if (syncedType != channel.ChanType)
             {
@@ -873,6 +913,30 @@ namespace Cortex.ViewModels
                 if (value != null)
                 {
                     SettingsDataView.SystemParamsStaticData.SystemDataCANID = value.Value;
+                }
+            }
+        }
+
+        public CanIdOption? SelectedDigitalInputDataCanId
+        {
+            get => GetCanIdOption(SettingsDataView.SystemParamsStaticData.DigitalInputDataCANID);
+            set
+            {
+                if (value != null)
+                {
+                    SettingsDataView.SystemParamsStaticData.DigitalInputDataCANID = value.Value;
+                }
+            }
+        }
+
+        public CanIdOption? SelectedAnalogueInputDataCanId
+        {
+            get => GetCanIdOption(SettingsDataView.SystemParamsStaticData.AnalogueInputDataCANID);
+            set
+            {
+                if (value != null)
+                {
+                    SettingsDataView.SystemParamsStaticData.AnalogueInputDataCANID = value.Value;
                 }
             }
         }
@@ -1261,10 +1325,19 @@ namespace Cortex.ViewModels
 
         private void ConfigSaved(object? sender, EventArgs e)
         {
+            IsSendingConfig = false;
             _controllerConfigBaseline = DeepCopyDataStructures(SettingsDataView);
             HasPendingConfigChanges = false;
             SystemDateTime = $"Last updated: {DateTime.Now:yyyy/MM/dd HH:mm:ss}";
             _ = FlashLastUpdatedAsync();
+        }
+
+        private void ConfigSaveCompleted(object? sender, ConfigurationSaveCompletedEventArgs e)
+        {
+            if (!e.Succeeded)
+            {
+                IsSendingConfig = false;
+            }
         }
 
         public async Task FlashLastUpdatedAsync()
@@ -1494,6 +1567,8 @@ namespace Cortex.ViewModels
             if (sender is SystemParameters)
             {
                 OnPropertyChanged(nameof(SelectedSystemDataCanId));
+                OnPropertyChanged(nameof(SelectedDigitalInputDataCanId));
+                OnPropertyChanged(nameof(SelectedAnalogueInputDataCanId));
                 OnPropertyChanged(nameof(SelectedSystemConfigCanId));
                 OnPropertyChanged(nameof(SelectedChannelDataCanId));
                 OnPropertyChanged(nameof(SelectedConfigDataCanId));
@@ -1733,6 +1808,7 @@ namespace Cortex.ViewModels
             _portService = new SerialPortService(portName);
             _portService.DataUpdated += _portService_DataUpdated;
             _portService.ConfigurationSaved += ConfigSaved;
+            _portService.ConfigurationSaveCompleted += ConfigSaveCompleted;
             refreshStaticData = true;
             IsConnected = _portService.Open();
 
@@ -1746,14 +1822,21 @@ namespace Cortex.ViewModels
             AddLog(_portService.LastError ?? $"Failed to open serial port {portName}.");
             _portService.DataUpdated -= _portService_DataUpdated;
             _portService.ConfigurationSaved -= ConfigSaved;
+            _portService.ConfigurationSaveCompleted -= ConfigSaveCompleted;
             _portService = null;
         }
 
         [RelayCommand]
         private void SendConfig()
         {
+            if (IsSendingConfig)
+            {
+                return;
+            }
+
             if (IsConnected && _portService != null)
             {
+                IsSendingConfig = true;
                 _controllerConfigBaseline = DeepCopyDataStructures(SettingsDataView);
                 _portService.StartSendConfig();
             }
@@ -2442,6 +2525,16 @@ namespace Cortex.ViewModels
                 targetSys.ChannelDataCANID = sourceSys.ChannelDataCANID;
             }
 
+            if (targetSys.DigitalInputDataCANID != sourceSys.DigitalInputDataCANID)
+            {
+                targetSys.DigitalInputDataCANID = sourceSys.DigitalInputDataCANID;
+            }
+
+            if (targetSys.AnalogueInputDataCANID != sourceSys.AnalogueInputDataCANID)
+            {
+                targetSys.AnalogueInputDataCANID = sourceSys.AnalogueInputDataCANID;
+            }
+
             if (targetSys.SystemDataCANID != sourceSys.SystemDataCANID)
             {
                 targetSys.SystemDataCANID = sourceSys.SystemDataCANID;
@@ -2637,10 +2730,13 @@ namespace Cortex.ViewModels
             if (_portService != null)
             {
                 _portService.DataUpdated -= _portService_DataUpdated;
+                _portService.ConfigurationSaved -= ConfigSaved;
+                _portService.ConfigurationSaveCompleted -= ConfigSaveCompleted;
                 _portService.Close();
                 _portService = null;
             }
 
+            IsSendingConfig = false;
             CommsEstablished = false;
             IsConnected = false;
             AddLog("Disconnected from PDM.");
@@ -2943,6 +3039,7 @@ namespace Cortex.ViewModels
 
             if (!value)
             {
+                IsSendingConfig = false;
                 IsFactoryResetInProgress = false;
                 FactoryResetStatusMessage = string.Empty;
                 ResetFirmwareUpdateState();

@@ -34,6 +34,12 @@ namespace Cortex.Models
         public UInt16 _ChannelDataCANID;        // Channel data CAN ID (transmit)
 
         [ObservableProperty]
+        public UInt16 _DigitalInputDataCANID;   // Digital input data CAN ID (transmit)
+
+        [ObservableProperty]
+        public UInt16 _AnalogueInputDataCANID;  // Analogue input data CAN ID (transmit)
+
+        [ObservableProperty]
         public UInt16 _SystemDataCANID;         // System data CAN ID (transmit)
 
         [ObservableProperty]

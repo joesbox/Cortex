@@ -3,12 +3,12 @@
 ; Non-commercial use only
 
 #define MyAppName "Cortex"
-#define MyAppVersion "0.1.4"
+#define MyAppVersion "0.1.5"
 #define MyAppPublisher "Joe Mann"
 #define MyAppURL "https://wiki.joeblogs.uk"
 #define MyAppExeName "Cortex.exe"
 #define MyProjectRoot ".."
-#define MyPublishDir MyProjectRoot + "\\bin\\Release\\net8.0\\win-x64\\publish"
+#define MyPublishDir MyProjectRoot + "\\artifacts\\publish\\win-x64"
 
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.

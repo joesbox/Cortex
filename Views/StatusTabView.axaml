@@ -93,7 +93,7 @@
                                                             VerticalAlignment="Stretch"
                                                             InitialRotation="-225"
                                                             MaxAngle="270"
-                                                            MaxValue="100"
+                                                            MaxValue="105"
                                                             MinValue="0">
                                                             <lvc:PieChart.Series>
                                                                 <lvc:XamlGaugeSeries
@@ -143,7 +143,7 @@
                                                             VerticalAlignment="Stretch"
                                                             InitialRotation="-225"
                                                             MaxAngle="270"
-                                                            MaxValue="100"
+                                                            MaxValue="150"
                                                             MinValue="0">
                                                             <lvc:PieChart.Series>
                                                                 <lvc:XamlGaugeSeries
@@ -250,7 +250,7 @@
                                                             VerticalAlignment="Stretch"
                                                             InitialRotation="-225"
                                                             MaxAngle="270"
-                                                            MaxValue="100"
+                                                            MaxValue="20"
                                                             MinValue="0">
                                                             <lvc:PieChart.Series>
                                                                 <lvc:XamlGaugeSeries

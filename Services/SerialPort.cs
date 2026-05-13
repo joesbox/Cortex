@@ -12,11 +12,21 @@ using System.Threading.Tasks;
 using static Cortex.Models.OutputChannel;
 
 
+public sealed class ConfigurationSaveCompletedEventArgs : EventArgs
+{
+    public ConfigurationSaveCompletedEventArgs(bool succeeded)
+    {
+        Succeeded = succeeded;
+    }
+
+    public bool Succeeded { get; }
+}
+
 public class SerialPortService
 {
     private const bool EnableLogTransferDebug = false;
     private const int ExtendedLiveSystemPayloadBytes = 23;
-    private const int ExtendedStaticSystemPayloadBytes = 57;
+    private const int ExtendedStaticSystemPayloadBytes = 61;
     private const int StaticTimeZoneRulePayloadBytes = Constants.TIME_ZONE_RULE_LENGTH;
     private const int StaticSnapshotRetryIntervalMs = 1500;
     private const int StandaloneCommandDrainDelayMs = 25;
@@ -24,6 +34,8 @@ public class SerialPortService
     public event Action<DataStructures>? DataUpdated;
 
     public event EventHandler<EventArgs>? ConfigurationSaved;
+
+    public event EventHandler<ConfigurationSaveCompletedEventArgs>? ConfigurationSaveCompleted;
 
     private SerialPort _serialPort;
 
@@ -47,7 +59,9 @@ public class SerialPortService
     private int _saveRetryCount;
 
     /// <summary>
-    /// Setting index: 0 = channel, 1 = analogue input, 2 = system, 3 = digital
+    /// Setting index: 0 = channel, 1 = analogue input, 2 = system, 3 = digital.
+    /// Analogue inputs are sent before channels so channel type changes that depend
+    /// on analogue-input digital mode are accepted by the controller in one save.
     /// </summary>
     private int settingIndex;
 
@@ -84,6 +98,8 @@ public class SerialPortService
     private int _lastPendingFrameLogBytes = -1;
     private bool _awaitingPostLogRefreshStatusFrame;
     private int _postLogRefreshRequestRetryCount;
+    private bool _repeatAnalogueSettingsAfterChannelsPending;
+    private bool _finalAnalogueResendActive;
 
 
     public bool UpdateStaticData = false;
@@ -841,6 +857,8 @@ public class SerialPortService
         dataStructures.SystemParamsStaticData.SystemCurrentLimit = dataStructures.SystemParams.SystemCurrentLimit;
         dataStructures.SystemParamsStaticData.ErrorFlags = dataStructures.SystemParams.ErrorFlags;
         dataStructures.SystemParamsStaticData.ChannelDataCANID = dataStructures.SystemParams.ChannelDataCANID;
+        dataStructures.SystemParamsStaticData.DigitalInputDataCANID = dataStructures.SystemParams.DigitalInputDataCANID;
+        dataStructures.SystemParamsStaticData.AnalogueInputDataCANID = dataStructures.SystemParams.AnalogueInputDataCANID;
         dataStructures.SystemParamsStaticData.SystemDataCANID = dataStructures.SystemParams.SystemDataCANID;
         dataStructures.SystemParamsStaticData.SystemConfigCANID = dataStructures.SystemParams.SystemConfigCANID;
         dataStructures.SystemParamsStaticData.ConfigDataCANID = dataStructures.SystemParams.ConfigDataCANID;
@@ -1008,6 +1026,8 @@ public class SerialPortService
         dataStructures.SystemParams.SystemCurrentLimit = reader.ReadByte();
         dataStructures.SystemParams.ErrorFlags = reader.ReadUInt16();
         dataStructures.SystemParams.ChannelDataCANID = reader.ReadUInt16();
+        dataStructures.SystemParams.DigitalInputDataCANID = reader.ReadUInt16();
+        dataStructures.SystemParams.AnalogueInputDataCANID = reader.ReadUInt16();
         dataStructures.SystemParams.SystemDataCANID = reader.ReadUInt16();
         dataStructures.SystemParams.ConfigDataCANID = reader.ReadUInt16();
         dataStructures.SystemParams.SystemConfigCANID = reader.ReadUInt16();
@@ -1217,6 +1237,62 @@ public class SerialPortService
         return retVal;
     }
 
+    private void AdvanceToNextSettingGroup()
+    {
+        settingIndex = settingIndex switch
+        {
+            1 => 0,
+            0 => 2,
+            2 => 3,
+            _ => settingIndex,
+        };
+    }
+
+    private static ChannelType DefaultToAnalogueChannelType(ChannelType currentType)
+    {
+        return currentType switch
+        {
+            ChannelType.Digital => ChannelType.Analogue,
+            ChannelType.PWM => ChannelType.AnalogueScaled,
+            ChannelType.Intermittent => ChannelType.Analogue,
+            _ => currentType,
+        };
+    }
+
+    private static ChannelType DefaultToDigitalChannelType(ChannelType currentType)
+    {
+        return currentType switch
+        {
+            ChannelType.Analogue => ChannelType.Digital,
+            ChannelType.AnalogueScaled => ChannelType.PWM,
+            _ => currentType,
+        };
+    }
+
+    private bool ShouldLetAnalogueInputAutoSyncChannelType(int channelIndex)
+    {
+        byte desiredInputPin = settingsData.ChannelsStaticData[channelIndex].InputControlPin;
+        int analogueInputIndex = Array.IndexOf(InputPinCatalog.ANAChannelInputPins, desiredInputPin);
+        if (analogueInputIndex < 0 || analogueInputIndex >= Constants.NUM_ANALOGUE_INPUTS)
+        {
+            return false;
+        }
+
+        var liveAnalogueInput = dataStructures.AnalogueInputsLiveData[analogueInputIndex];
+        var desiredAnalogueInput = settingsData.AnalogueInputsStaticData[analogueInputIndex];
+        if (liveAnalogueInput.ChanType == desiredAnalogueInput.ChanType)
+        {
+            return false;
+        }
+
+        ChannelType liveChannelType = dataStructures.ChannelsLiveData[channelIndex].ChanType;
+        ChannelType expectedAutoSyncedType = desiredAnalogueInput.ChanType == AnalogueInput.AnalogueChannelType.Digital
+            ? DefaultToDigitalChannelType(liveChannelType)
+            : DefaultToAnalogueChannelType(liveChannelType);
+
+        return settingsData.ChannelsStaticData[channelIndex].ChanType == expectedAutoSyncedType;
+    }
+
     private bool SendConfig()
     {
         bool retVal = false;
@@ -1234,7 +1310,8 @@ public class SerialPortService
                 switch (parameterIndex)
                 {
                     case 0: // Channel type
-                        if (dataStructures.ChannelsLiveData[channelIndex].ChanType != settingsData.ChannelsStaticData[channelIndex].ChanType)
+                        if (!ShouldLetAnalogueInputAutoSyncChannelType(channelIndex) &&
+                            dataStructures.ChannelsLiveData[channelIndex].ChanType != settingsData.ChannelsStaticData[channelIndex].ChanType)
                         {
                             configChanged = true;
                             AddData((byte)settingIndex, true);
@@ -1647,6 +1724,9 @@ public class SerialPortService
                             AddData((byte)parameterIndex, true);
                             AddData((byte)analogueIndex, true);
                             AddData(settingsData.AnalogueInputsStaticData[analogueIndex].PullUpEnable ? (byte)1 : (byte)0, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
                         }
                         break;
                     case 1: // Pull-down enable
@@ -1657,6 +1737,9 @@ public class SerialPortService
                             AddData((byte)parameterIndex, true);
                             AddData((byte)analogueIndex, true);
                             AddData(settingsData.AnalogueInputsStaticData[analogueIndex].PullDownEnable ? (byte)1 : (byte)0, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
                         }
                         break;
                     case 2: // Channel type
@@ -1667,6 +1750,9 @@ public class SerialPortService
                             AddData((byte)parameterIndex, true);
                             AddData((byte)analogueIndex, true);
                             AddData((byte)settingsData.AnalogueInputsStaticData[analogueIndex].ChanType, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
                         }
                         break;
                     case 3: // Units
@@ -1677,6 +1763,9 @@ public class SerialPortService
                             AddData((byte)parameterIndex, true);
                             AddData((byte)analogueIndex, true);
                             AddData((byte)settingsData.AnalogueInputsStaticData[analogueIndex].Units, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
                         }
                         break;
                     case 4: // Calibration points
@@ -1687,6 +1776,9 @@ public class SerialPortService
                             AddData((byte)parameterIndex, true);
                             AddData((byte)analogueIndex, true);
                             AddData(settingsData.AnalogueInputsStaticData[analogueIndex].CalibrationPoints, true);
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding
                         }
                         break;
                     case 5: // Calibration point 1 voltage
@@ -1833,7 +1925,37 @@ public class SerialPortService
                             AddData(0, true); // Padding                            
                         }
                         break;
-                    case 2: // System data CAN ID
+                    case 2: // Digital input data CAN ID
+                        if (dataStructures.SystemParamsStaticData.DigitalInputDataCANID != settingsData.SystemParamsStaticData.DigitalInputDataCANID)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData(0, true); // Padding
+                            byte[] uintBytes = BitConverter.GetBytes(settingsData.SystemParamsStaticData.DigitalInputDataCANID);
+                            foreach (byte b in uintBytes)
+                            {
+                                AddData(b, true);
+                            }
+                            AddData(0, true); // Padding                            
+                        }
+                        break;
+                    case 3: // Analogue input data CAN ID
+                        if (dataStructures.SystemParamsStaticData.AnalogueInputDataCANID != settingsData.SystemParamsStaticData.AnalogueInputDataCANID)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData(0, true); // Padding
+                            byte[] uintBytes = BitConverter.GetBytes(settingsData.SystemParamsStaticData.AnalogueInputDataCANID);
+                            foreach (byte b in uintBytes)
+                            {
+                                AddData(b, true);
+                            }
+                            AddData(0, true); // Padding                            
+                        }
+                        break;
+                    case 4: // System data CAN ID
                         if (dataStructures.SystemParamsStaticData.SystemDataCANID != settingsData.SystemParamsStaticData.SystemDataCANID)
                         {
                             configChanged = true;
@@ -1848,7 +1970,7 @@ public class SerialPortService
                             AddData(0, true); // Padding                            
                         }
                         break;
-                    case 3: // Config data CAN ID
+                    case 5: // Config data CAN ID
                         if (dataStructures.SystemParamsStaticData.ConfigDataCANID != settingsData.SystemParamsStaticData.ConfigDataCANID)
                         {
                             configChanged = true;
@@ -1863,7 +1985,7 @@ public class SerialPortService
                             AddData(0, true); // Padding                            
                         }
                         break;
-                    case 4: // IMU wake window
+                    case 6: // IMU wake window
                         if (dataStructures.SystemParamsStaticData.IMUWakeWindow != settingsData.SystemParamsStaticData.IMUWakeWindow)
                         {
                             configChanged = true;
@@ -1878,7 +2000,7 @@ public class SerialPortService
                             AddData(0, true); // Padding                            
                         }
                         break;
-                    case 5: // Speed unit preference
+                    case 7: // Speed unit preference
                         if (dataStructures.SystemParamsStaticData.SpeedUnitPref != settingsData.SystemParamsStaticData.SpeedUnitPref)
                         {
                             configChanged = true;
@@ -1890,7 +2012,7 @@ public class SerialPortService
                             AddData(0, true); // Padding
                         }
                         break;
-                    case 6: // Distance unit preference
+                    case 8: // Distance unit preference
                         if (dataStructures.SystemParamsStaticData.DistanceUnitPref != settingsData.SystemParamsStaticData.DistanceUnitPref)
                         {
                             configChanged = true;
@@ -1900,10 +2022,9 @@ public class SerialPortService
                             AddData(settingsData.SystemParamsStaticData.DistanceUnitPref ? (byte)1 : (byte)0, true);
                             AddData(0, true); // Padding
                             AddData(0, true); // Padding
-
                         }
                         break;
-                    case 7: // Allow GSM data
+                    case 9: // Allow GSM data
                         if (dataStructures.SystemParamsStaticData.AllowData != settingsData.SystemParamsStaticData.AllowData)
                         {
                             configChanged = true;
@@ -1912,10 +2033,11 @@ public class SerialPortService
                             AddData(0, true); // Padding
                             AddData(settingsData.SystemParamsStaticData.AllowData ? (byte)1 : (byte)0, true);
                             AddData(0, true); // Padding
-                            AddData(0, true); // Padding
+                            AddData(0, true); // Padding                            
                         }
                         break;
-                    case 8: // Allow GPS data
+
+                    case 10: // Allow GPS data
                         if (dataStructures.SystemParamsStaticData.AllowGPS != settingsData.SystemParamsStaticData.AllowGPS)
                         {
                             configChanged = true;
@@ -1927,7 +2049,7 @@ public class SerialPortService
                             AddData(0, true); // Padding
                         }
                         break;
-                    case 9: // Allow motion detect
+                    case 11: // Allow motion detect
                         if (dataStructures.SystemParamsStaticData.AllowMotionDetect != settingsData.SystemParamsStaticData.AllowMotionDetect)
                         {
                             configChanged = true;
@@ -1940,7 +2062,7 @@ public class SerialPortService
                         }
                         break;
 
-                    case 10: // System config CAN ID
+                    case 12: // System config CAN ID
                         if (dataStructures.SystemParamsStaticData.SystemConfigCANID != settingsData.SystemParamsStaticData.SystemConfigCANID)
                         {
                             configChanged = true;
@@ -1955,7 +2077,7 @@ public class SerialPortService
                             AddData(0, true); // Padding                            
                         }
                         break;
-                    case 11: // Time zone and DST rule blob
+                    case 13: // Time zone and DST rule blob
                         if (!ByteArraysEqual(dataStructures.SystemParamsStaticData.TimeZoneRule, settingsData.SystemParamsStaticData.TimeZoneRule))
                         {
                             byte[] timeZoneRule = settingsData.SystemParamsStaticData.TimeZoneRule ?? Array.Empty<byte>();
@@ -2207,7 +2329,7 @@ public class SerialPortService
                                                 if (channelIndex >= Constants.NUM_OUTPUT_CHANNELS)
                                                 {
                                                     channelIndex = 0;
-                                                    settingIndex++;
+                                                    AdvanceToNextSettingGroup();
                                                 }
                                             }
                                             break;
@@ -2220,7 +2342,16 @@ public class SerialPortService
                                                 if (analogueIndex >= Constants.NUM_ANALOGUE_INPUTS)
                                                 {
                                                     analogueIndex = 0;
-                                                    settingIndex++;
+                                                    if (_finalAnalogueResendActive)
+                                                    {
+                                                        _finalAnalogueResendActive = false;
+                                                        sendingConfig = false;
+                                                        saveToEEPROM = true;
+                                                    }
+                                                    else
+                                                    {
+                                                        AdvanceToNextSettingGroup();
+                                                    }
                                                 }
                                             }
                                             break;
@@ -2229,7 +2360,7 @@ public class SerialPortService
                                             if (parameterIndex > Constants.LAST_SYSTEM_PARAM_INDEX)
                                             {
                                                 parameterIndex = 0;
-                                                settingIndex++;
+                                                AdvanceToNextSettingGroup();
                                             }
                                             break;
                                         case 3: // Digital inputs
@@ -2240,8 +2371,19 @@ public class SerialPortService
                                                 digitalIndex++;
                                                 if (digitalIndex >= Constants.NUM_DIGITAL_INPUTS)
                                                 {
-                                                    sendingConfig = false;
-                                                    saveToEEPROM = true;
+                                                    if (_repeatAnalogueSettingsAfterChannelsPending)
+                                                    {
+                                                        _repeatAnalogueSettingsAfterChannelsPending = false;
+                                                        _finalAnalogueResendActive = true;
+                                                        settingIndex = 1;
+                                                        analogueIndex = 0;
+                                                        parameterIndex = 0;
+                                                    }
+                                                    else
+                                                    {
+                                                        sendingConfig = false;
+                                                        saveToEEPROM = true;
+                                                    }
                                                 }
                                             }
                                             break;
@@ -2284,6 +2426,7 @@ public class SerialPortService
                                 Debug.WriteLine("Configuration saved to EEPROM.");
                                 LoggingService.AddLog("PDM updated.");
                                 ConfigurationSaved?.Invoke(this, EventArgs.Empty);
+                                ConfigurationSaveCompleted?.Invoke(this, new ConfigurationSaveCompletedEventArgs(true));
                                 break;
 
                             case Constants.COMMAND_ID_LOG_OPEN:
@@ -2337,6 +2480,7 @@ public class SerialPortService
                                     saveToEEPROM = false;
                                     parameterIndex = channelIndex = analogueIndex = settingIndex = digitalIndex = 0;
                                     _configRetryCount = 0;
+                                    ConfigurationSaveCompleted?.Invoke(this, new ConfigurationSaveCompletedEventArgs(false));
                                 }
                                 break;
                             case Constants.COMMAND_ID_SAVECHANGES:
@@ -2356,7 +2500,9 @@ public class SerialPortService
                                 else
                                 {
                                     LoggingService.AddLog("PDM reported checksum failure when saving changes. Try again.");
+                                    parameterIndex = channelIndex = analogueIndex = settingIndex = digitalIndex = 0;
                                     _saveRetryCount = 0;
+                                    ConfigurationSaveCompleted?.Invoke(this, new ConfigurationSaveCompletedEventArgs(false));
                                 }
 
                                 break;
@@ -2469,12 +2615,15 @@ public class SerialPortService
     public void StartSendConfig()
     {
         sendingConfig = true;
-        settingIndex = 0;
+        settingIndex = 1;
         channelIndex = 0;
         analogueIndex = 0;
+        digitalIndex = 0;
         parameterIndex = 0;
         _configRetryCount = 0;
         _saveRetryCount = 0;
+        _repeatAnalogueSettingsAfterChannelsPending = true;
+        _finalAnalogueResendActive = false;
         SendConfig();
         LoggingService.AddLog("Sending config to PDM...");
     }
