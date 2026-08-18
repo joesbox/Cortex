@@ -7,7 +7,7 @@ namespace Cortex.Converters
 {
     public class HexStringToInt16Converter : IValueConverter
     {
-        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
         {
             if (value is ushort u)
             {
@@ -22,7 +22,7 @@ namespace Cortex.Converters
             return "000";
         }
 
-        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
         {
             if (value is not string s)
                 return AvaloniaProperty.UnsetValue;
@@ -35,4 +35,5 @@ namespace Cortex.Converters
             return (ushort)(hex & 0x7FF);
         }
     }
+
 }

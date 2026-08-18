@@ -3,10 +3,10 @@ using Avalonia.Controls.Templates;
 using Cortex.ViewModels;
 using System;
 
-namespace Cortex
+namespace Cortex;
+
+public class ViewLocator : IDataTemplate
 {
-    public class ViewLocator : IDataTemplate
-    {
 
         public Control? Build(object? param)
         {
@@ -29,4 +29,3 @@ namespace Cortex
             return data is ViewModelBase;
         }
     }
-}

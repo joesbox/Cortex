@@ -1,9 +1,10 @@
 ﻿using System;
+using System.Text;
 
-namespace Cortex.Services
+namespace Cortex.Services;
+
+public class ByteReader
 {
-    public class ByteReader
-    {
         private readonly byte[] _buffer;
         private int _index;
 
@@ -74,6 +75,17 @@ namespace Cortex.Services
             _index += count;
             return result;
         }
+
+        public string ReadFixedAsciiString(int count)
+        {
+            byte[] result = ReadBytes(count);
+            int length = Array.IndexOf(result, (byte)0);
+            if (length < 0)
+            {
+                length = result.Length;
+            }
+
+            return Encoding.ASCII.GetString(result, 0, length).TrimEnd();
     }
 
 }

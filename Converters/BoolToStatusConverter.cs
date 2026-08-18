@@ -111,12 +111,12 @@ namespace Cortex.Converters
 
     public class BoolToTextConverter : IValueConverter
     {
-        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
         {
-            return (bool)value ? "Deactivate" : "Hold 2s to Activate";
+            return value is bool boolValue && boolValue ? "Deactivate" : "Hold 2s to Activate";
         }
 
-        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
         {
             throw new NotImplementedException();
         }
@@ -124,7 +124,7 @@ namespace Cortex.Converters
 
     public class ByteToTextConverter : IValueConverter
     {
-        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
         {
             if (value is byte b)
             {
@@ -133,7 +133,7 @@ namespace Cortex.Converters
             return "OFF";
         }
 
-        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
         {
             if (value is string s)
             {
@@ -145,7 +145,7 @@ namespace Cortex.Converters
 
     public class ByteToColorConverter : IValueConverter
     {
-        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
         {
             if (value is byte b)
             {
@@ -154,7 +154,7 @@ namespace Cortex.Converters
             return Brushes.LightGray;
         }
 
-        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
         {
             if (value is IBrush brush)
             {

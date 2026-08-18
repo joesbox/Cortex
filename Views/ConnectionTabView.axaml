@@ -7,6 +7,28 @@
     xmlns:vm="using:Cortex.ViewModels"
     x:DataType="vm:MainWindowViewModel"
     mc:Ignorable="d">
+    <UserControl.Styles>
+        <Style Selector="TextBox#SystemLogTextBox /template/ Border#PART_BorderElement">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+        </Style>
+        <Style Selector="TextBox#SystemLogTextBox:pointerover">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+        </Style>
+        <Style Selector="TextBox#SystemLogTextBox:pointerover /template/ Border#PART_BorderElement">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+        </Style>
+        <Style Selector="TextBox#SystemLogTextBox:focus">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+        </Style>
+        <Style Selector="TextBox#SystemLogTextBox:focus /template/ Border#PART_BorderElement">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+        </Style>
+    </UserControl.Styles>
     <Grid RowDefinitions="Auto, *">
         <Border
             Grid.Row="0"
@@ -107,15 +129,21 @@
                         Grid.Row="1"
                         Margin="0,20,0,0"
                         Height="{Binding $parent.Bounds.Height}"
-                        HorizontalScrollBarVisibility="Disabled"
+                        HorizontalScrollBarVisibility="Auto"
                         VerticalScrollBarVisibility="Auto">
-                        <ItemsControl ItemsSource="{Binding LogEntries}">
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <TextBlock Margin="4" FontSize="16" FontWeight="Light" Classes="log" Text="{Binding}" />
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
+                        <TextBox
+                            Name="SystemLogTextBox"
+                            Margin="4"
+                            AcceptsReturn="True"
+                            Background="Transparent"
+                            BorderBrush="Transparent"
+                            BorderThickness="0"
+                            FontFamily="Consolas"
+                            FontSize="16"
+                            FontWeight="Light"
+                            IsReadOnly="True"
+                            Padding="0"
+                            TextWrapping="NoWrap" />
                     </ScrollViewer>
                 </Grid>
             </Border>

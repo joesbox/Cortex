@@ -19,6 +19,9 @@ namespace Cortex.Models
         public bool _CANResEnabled;             // CAN bus termination resistor enableda
 
         [ObservableProperty]
+        public UInt32 _CANBusBitrate = Constants.DEFAULT_CAN_BITRATE; // CAN bus bitrate in bits per second
+
+        [ObservableProperty]
         public float _VBatt;                    // Battery supply voltage
 
         [ObservableProperty]

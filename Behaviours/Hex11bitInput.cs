@@ -3,10 +3,10 @@ using Avalonia.Xaml.Interactivity;
 using System;
 using System.Linq;
 
-namespace Cortex.Behaviours
+namespace Cortex.Behaviours;
+
+public class Hex11BitInputBehavior : Behavior<TextBox>
 {
-    public class Hex11BitInputBehavior : Behavior<TextBox>
-    {
         protected override void OnAttached()
         {
             base.OnAttached();
@@ -38,4 +38,3 @@ namespace Cortex.Behaviours
             }
         }
     }
-}

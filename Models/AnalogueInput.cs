@@ -91,6 +91,8 @@ namespace Cortex.Models
 
         public bool IsCalibrationMode => ChanType == AnalogueChannelType.Active || ChanType == AnalogueChannelType.Passive;
 
+        public bool HasDetailSettings => IsCalibrationMode || IsNtcMode;
+
         public bool IsThreePointCalibration => CalibrationPoints >= 3;
 
         public bool AllowPullResistors => ChanType == AnalogueChannelType.Passive || ChanType == AnalogueChannelType.NTC || ChanType == AnalogueChannelType.Digital;
@@ -125,6 +127,7 @@ namespace Cortex.Models
             OnPropertyChanged(nameof(IsUnitsSelectable));
             OnPropertyChanged(nameof(IsNtcMode));
             OnPropertyChanged(nameof(IsCalibrationMode));
+            OnPropertyChanged(nameof(HasDetailSettings));
             OnPropertyChanged(nameof(AllowPullResistors));
         }
 

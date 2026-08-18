@@ -31,7 +31,7 @@ namespace Cortex.Services
                     return false;
                 }
 
-                if (snapshot.Channels == null && snapshot.DigitalInputs == null && snapshot.AnalogueInputs == null && snapshot.SystemParameters == null)
+                if (snapshot.Channels == null && snapshot.DigitalInputs == null && snapshot.AnalogueInputs == null && snapshot.SystemParameters == null && snapshot.CellularParameters == null)
                 {
                     error = "Configuration file does not contain any recognized configuration sections.";
                     return false;
@@ -97,8 +97,6 @@ namespace Cortex.Services
                     targetChannel.ScaleMax = sourceChannel.ScaleMax ?? targetChannel.ScaleMax;
                     targetChannel.PWMMin = sourceChannel.PWMMin ?? targetChannel.PWMMin;
                     targetChannel.PWMMax = sourceChannel.PWMMax ?? targetChannel.PWMMax;
-                    targetChannel.RunOn = sourceChannel.RunOn ?? targetChannel.RunOn;
-                    targetChannel.RunOnTime = sourceChannel.RunOnTime ?? targetChannel.RunOnTime;
                     targetChannel.ErrorFlags = sourceChannel.ErrorFlags ?? targetChannel.ErrorFlags;
                     targetChannel.SoftStartEnabled = sourceChannel.SoftStartEnabled ?? targetChannel.SoftStartEnabled;
                     targetChannel.SoftStartTime = sourceChannel.SoftStartTime ?? targetChannel.SoftStartTime;
@@ -106,6 +104,22 @@ namespace Cortex.Services
                     targetChannel.SoftStopTime = sourceChannel.SoftStopTime ?? targetChannel.SoftStopTime;
                     targetChannel.IntermittentOnTime = sourceChannel.IntermittentOnTime ?? targetChannel.IntermittentOnTime;
                     targetChannel.IntermittentOffTime = sourceChannel.IntermittentOffTime ?? targetChannel.IntermittentOffTime;
+                    targetChannel.DelayedOn = sourceChannel.DelayedOn ?? targetChannel.DelayedOn;
+                    targetChannel.DelayedOnTime = sourceChannel.DelayedOnTime ?? targetChannel.DelayedOnTime;
+                    bool hasExplicitDelayedOff = sourceChannel.DelayedOff.HasValue ||
+                                                 sourceChannel.DelayedOffTime.HasValue ||
+                                                 sourceChannel.DelayedOffTrigger.HasValue;
+
+                    targetChannel.DelayedOff = sourceChannel.DelayedOff ?? targetChannel.DelayedOff;
+                    targetChannel.DelayedOffTime = sourceChannel.DelayedOffTime ?? targetChannel.DelayedOffTime;
+                    targetChannel.DelayedOffTrigger = sourceChannel.DelayedOffTrigger ?? targetChannel.DelayedOffTrigger;
+
+                    if (!hasExplicitDelayedOff)
+                    {
+                        ApplyLegacyRunOnFallback(targetChannel, sourceChannel);
+                    }
+
+                    targetChannel.RefreshDelayUiUnitsFromStoredValues();
                 }
             }
 
@@ -155,6 +169,7 @@ namespace Cortex.Services
                 target.SystemParamsStaticData.SIMModuleTemp = snapshot.SystemParameters.SIMModuleTemp ?? target.SystemParamsStaticData.SIMModuleTemp;
                 target.SystemParamsStaticData.IMUTemp = snapshot.SystemParameters.IMUTemp ?? target.SystemParamsStaticData.IMUTemp;
                 target.SystemParamsStaticData.CANResEnabled = snapshot.SystemParameters.CANResEnabled ?? target.SystemParamsStaticData.CANResEnabled;
+                target.SystemParamsStaticData.CANBusBitrate = snapshot.SystemParameters.CANBusBitrate ?? target.SystemParamsStaticData.CANBusBitrate;
                 target.SystemParamsStaticData.VBatt = snapshot.SystemParameters.VBatt ?? target.SystemParamsStaticData.VBatt;
                 target.SystemParamsStaticData.SystemCurrent = snapshot.SystemParameters.SystemCurrent ?? target.SystemParamsStaticData.SystemCurrent;
                 target.SystemParamsStaticData.SystemCurrentLimit = snapshot.SystemParameters.SystemCurrentLimit ?? target.SystemParamsStaticData.SystemCurrentLimit;
@@ -174,6 +189,26 @@ namespace Cortex.Services
                 target.SystemParamsStaticData.MobileSignalPercent = snapshot.SystemParameters.MobileSignalPercent ?? target.SystemParamsStaticData.MobileSignalPercent;
                 target.SystemParamsStaticData.TimeZoneId = snapshot.SystemParameters.TimeZoneId ?? target.SystemParamsStaticData.TimeZoneId;
                 target.SystemParamsStaticData.TimeZoneRule = snapshot.SystemParameters.TimeZoneRule ?? target.SystemParamsStaticData.TimeZoneRule;
+            }
+
+            if (snapshot.CellularParameters != null)
+            {
+                target.CellularParamsStaticData.ConfigVersion = snapshot.CellularParameters.ConfigVersion ?? target.CellularParamsStaticData.ConfigVersion;
+                target.CellularParamsStaticData.Protocol = snapshot.CellularParameters.Protocol ?? target.CellularParamsStaticData.Protocol;
+                target.CellularParamsStaticData.UseTLS = snapshot.CellularParameters.UseTLS ?? target.CellularParamsStaticData.UseTLS;
+                target.CellularParamsStaticData.APN = snapshot.CellularParameters.APN ?? target.CellularParamsStaticData.APN;
+                target.CellularParamsStaticData.APNUser = snapshot.CellularParameters.APNUser ?? target.CellularParamsStaticData.APNUser;
+                target.CellularParamsStaticData.APNPassword = snapshot.CellularParameters.APNPassword ?? target.CellularParamsStaticData.APNPassword;
+                target.CellularParamsStaticData.OpenRemoteHost = snapshot.CellularParameters.OpenRemoteHost ?? target.CellularParamsStaticData.OpenRemoteHost;
+                target.CellularParamsStaticData.OpenRemotePort = snapshot.CellularParameters.OpenRemotePort ?? target.CellularParamsStaticData.OpenRemotePort;
+                target.CellularParamsStaticData.OpenRemoteRealm = snapshot.CellularParameters.OpenRemoteRealm ?? target.CellularParamsStaticData.OpenRemoteRealm;
+                target.CellularParamsStaticData.OpenRemoteAssetId = snapshot.CellularParameters.OpenRemoteAssetId ?? target.CellularParamsStaticData.OpenRemoteAssetId;
+                target.CellularParamsStaticData.OpenRemoteAssetName = snapshot.CellularParameters.OpenRemoteAssetName ?? target.CellularParamsStaticData.OpenRemoteAssetName;
+                target.CellularParamsStaticData.MQTTUsername = snapshot.CellularParameters.MQTTUsername ?? target.CellularParamsStaticData.MQTTUsername;
+                target.CellularParamsStaticData.MQTTPassword = snapshot.CellularParameters.MQTTPassword ?? target.CellularParamsStaticData.MQTTPassword;
+                target.CellularParamsStaticData.KeepAliveSeconds = snapshot.CellularParameters.KeepAliveSeconds ?? target.CellularParamsStaticData.KeepAliveSeconds;
+                target.CellularParamsStaticData.PublishIntervalMs = snapshot.CellularParameters.PublishIntervalMs ?? target.CellularParamsStaticData.PublishIntervalMs;
+                target.CellularParamsStaticData.TelemetryUploadMask = snapshot.CellularParameters.TelemetryUploadMask ?? target.CellularParamsStaticData.TelemetryUploadMask;
             }
         }
 
@@ -209,8 +244,6 @@ namespace Cortex.Services
                     ScaleMax = channel.ScaleMax,
                     PWMMin = channel.PWMMin,
                     PWMMax = channel.PWMMax,
-                    RunOn = channel.RunOn,
-                    RunOnTime = channel.RunOnTime,
                     ErrorFlags = channel.ErrorFlags,
                     SoftStartEnabled = channel.SoftStartEnabled,
                     SoftStartTime = channel.SoftStartTime,
@@ -218,6 +251,11 @@ namespace Cortex.Services
                     SoftStopTime = channel.SoftStopTime,
                     IntermittentOnTime = channel.IntermittentOnTime,
                     IntermittentOffTime = channel.IntermittentOffTime,
+                    DelayedOn = channel.DelayedOn,
+                    DelayedOnTime = channel.DelayedOnTime,
+                    DelayedOff = channel.DelayedOff,
+                    DelayedOffTime = channel.DelayedOffTime,
+                    DelayedOffTrigger = channel.DelayedOffTrigger,
                 }).ToList(),
                 DigitalInputs = settingsData.DigitalInputsStaticData.Select(input => new DigitalInputSnapshot
                 {
@@ -249,6 +287,7 @@ namespace Cortex.Services
                     SIMModuleTemp = settingsData.SystemParamsStaticData.SIMModuleTemp,
                     IMUTemp = settingsData.SystemParamsStaticData.IMUTemp,
                     CANResEnabled = settingsData.SystemParamsStaticData.CANResEnabled,
+                    CANBusBitrate = settingsData.SystemParamsStaticData.CANBusBitrate,
                     VBatt = settingsData.SystemParamsStaticData.VBatt,
                     SystemCurrent = settingsData.SystemParamsStaticData.SystemCurrent,
                     SystemCurrentLimit = settingsData.SystemParamsStaticData.SystemCurrentLimit,
@@ -269,12 +308,52 @@ namespace Cortex.Services
                     TimeZoneId = settingsData.SystemParamsStaticData.TimeZoneId,
                     TimeZoneRule = settingsData.SystemParamsStaticData.TimeZoneRule,
                 },
+                CellularParameters = new CellularParametersSnapshot
+                {
+                    ConfigVersion = settingsData.CellularParamsStaticData.ConfigVersion,
+                    Protocol = settingsData.CellularParamsStaticData.Protocol,
+                    UseTLS = settingsData.CellularParamsStaticData.UseTLS,
+                    APN = settingsData.CellularParamsStaticData.APN,
+                    APNUser = settingsData.CellularParamsStaticData.APNUser,
+                    APNPassword = settingsData.CellularParamsStaticData.APNPassword,
+                    OpenRemoteHost = settingsData.CellularParamsStaticData.OpenRemoteHost,
+                    OpenRemotePort = settingsData.CellularParamsStaticData.OpenRemotePort,
+                    OpenRemoteRealm = settingsData.CellularParamsStaticData.OpenRemoteRealm,
+                    OpenRemoteAssetId = settingsData.CellularParamsStaticData.OpenRemoteAssetId,
+                    OpenRemoteAssetName = settingsData.CellularParamsStaticData.OpenRemoteAssetName,
+                    MQTTUsername = settingsData.CellularParamsStaticData.MQTTUsername,
+                    MQTTPassword = settingsData.CellularParamsStaticData.MQTTPassword,
+                    KeepAliveSeconds = settingsData.CellularParamsStaticData.KeepAliveSeconds,
+                    PublishIntervalMs = settingsData.CellularParamsStaticData.PublishIntervalMs,
+                    TelemetryUploadMask = settingsData.CellularParamsStaticData.TelemetryUploadMask,
+                },
             };
         }
 
         private static string ToStringName(char[]? name)
         {
             return name == null ? string.Empty : new string(name).TrimEnd('\0');
+        }
+
+        private static void ApplyLegacyRunOnFallback(OutputChannel targetChannel, OutputChannelSnapshot sourceChannel)
+        {
+            if (sourceChannel.RunOn is not { } legacyRunOn)
+            {
+                return;
+            }
+
+            if (legacyRunOn == 0)
+            {
+                return;
+            }
+
+            targetChannel.DelayedOff = 1;
+            targetChannel.DelayedOffTrigger = (byte)OutputChannel.DelayedOffTriggerMode.IgnitionOff;
+
+            if (sourceChannel.RunOnTime.HasValue)
+            {
+                targetChannel.DelayedOffTime = sourceChannel.RunOnTime.Value;
+            }
         }
 
         private static char[] ToFixedName(string? value)
@@ -301,6 +380,8 @@ namespace Cortex.Services
         public List<AnalogueInputSnapshot>? AnalogueInputs { get; set; }
 
         public SystemParametersSnapshot? SystemParameters { get; set; }
+
+        public CellularParametersSnapshot? CellularParameters { get; set; }
     }
 
     public sealed class OutputChannelSnapshot
@@ -355,10 +436,6 @@ namespace Cortex.Services
 
         public byte? PWMMax { get; set; }
 
-        public byte? RunOn { get; set; }
-
-        public int? RunOnTime { get; set; }
-
         public byte? ErrorFlags { get; set; }
 
         public byte? SoftStartEnabled { get; set; }
@@ -368,6 +445,20 @@ namespace Cortex.Services
         public byte? SoftStopEnabled { get; set; }
 
         public float? SoftStopTime { get; set; }
+
+        public byte? RunOn { get; set; }
+
+        public int? RunOnTime { get; set; }
+
+        public byte? DelayedOn { get; set; }
+
+        public int? DelayedOnTime { get; set; }
+
+        public byte? DelayedOff { get; set; }
+
+        public int? DelayedOffTime { get; set; }
+
+        public byte? DelayedOffTrigger { get; set; }
 
         public float? IntermittentOnTime { get; set; }
 
@@ -426,6 +517,8 @@ namespace Cortex.Services
 
         public bool? CANResEnabled { get; set; }
 
+        public uint? CANBusBitrate { get; set; }
+
         public float? VBatt { get; set; }
 
         public float? SystemCurrent { get; set; }
@@ -463,5 +556,42 @@ namespace Cortex.Services
         public string? TimeZoneId { get; set; }
 
         public byte[]? TimeZoneRule { get; set; }
+    }
+
+    public sealed class CellularParametersSnapshot
+    {
+        public byte? ConfigVersion { get; set; }
+
+        public byte? Protocol { get; set; }
+
+        public bool? UseTLS { get; set; }
+
+        public string? APN { get; set; }
+
+        public string? APNUser { get; set; }
+
+        public string? APNPassword { get; set; }
+
+        public string? OpenRemoteHost { get; set; }
+
+        public ushort? OpenRemotePort { get; set; }
+
+        public string? ClientID { get; set; }
+
+        public string? OpenRemoteRealm { get; set; }
+
+        public string? OpenRemoteAssetId { get; set; }
+
+        public string? OpenRemoteAssetName { get; set; }
+
+        public string? MQTTUsername { get; set; }
+
+        public string? MQTTPassword { get; set; }
+
+        public ushort? KeepAliveSeconds { get; set; }
+
+        public uint? PublishIntervalMs { get; set; }
+
+        public uint? TelemetryUploadMask { get; set; }
     }
 }

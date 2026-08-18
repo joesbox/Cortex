@@ -24,12 +24,14 @@ public sealed class ConfigurationSaveCompletedEventArgs : EventArgs
 
 public class SerialPortService
 {
-    private const bool EnableLogTransferDebug = false;
+    private static readonly bool EnableLogTransferDebug = false;
     private const int ExtendedLiveSystemPayloadBytes = 23;
     private const int ExtendedStaticSystemPayloadBytes = 61;
     private const int StaticTimeZoneRulePayloadBytes = Constants.TIME_ZONE_RULE_LENGTH;
+    private const int StaticCellularPayloadBytes = Constants.CELLULAR_STATIC_PAYLOAD_BYTES;
     private const int StaticSnapshotRetryIntervalMs = 1500;
     private const int StandaloneCommandDrainDelayMs = 25;
+    private const int OpenRemoteProvisioningMaxRequestBytes = 8191;
 
     public event Action<DataStructures>? DataUpdated;
 
@@ -45,7 +47,6 @@ public class SerialPortService
 
     private List<byte> receivedDataBuffer;
     private bool foundTrailer1;
-    private bool foundTrailer2;
     private UInt32 pdmCheckSum;
     private char lastCommandSent;
     private bool sendingConfig;
@@ -54,12 +55,14 @@ public class SerialPortService
     private int totalBytesSent;
     private int checkSumSend;
 
-    private bool overridding;
     private int _configRetryCount;
     private int _saveRetryCount;
+    private readonly Stopwatch _configSendStopwatch = new Stopwatch();
+    private int _configPacketsSent;
+    private int _configSlotsSkippedLocally;
 
     /// <summary>
-    /// Setting index: 0 = channel, 1 = analogue input, 2 = system, 3 = digital.
+    /// Setting index: 0 = channel, 1 = analogue input, 2 = system, 3 = digital, 4 = cellular.
     /// Analogue inputs are sent before channels so channel type changes that depend
     /// on analogue-input digital mode are accepted by the controller in one save.
     /// </summary>
@@ -81,6 +84,8 @@ public class SerialPortService
     private TaskCompletionSource<string>? _firmwareVersionTcs;
     private TaskCompletionSource<string>? _buildDateTcs;
     private TaskCompletionSource<string>? _firmwareDiagnosticTcs;
+    private TaskCompletionSource<string>? _cellularTestTcs;
+    private TaskCompletionSource<string>? _openRemoteProvisioningTcs;
     private TaskCompletionSource<bool>? _standaloneCommandAckTcs;
     private char _standaloneCommandAckId;
     private readonly Queue<LogChunkResponse> _pendingLogChunks = new Queue<LogChunkResponse>();
@@ -100,6 +105,7 @@ public class SerialPortService
     private int _postLogRefreshRequestRetryCount;
     private bool _repeatAnalogueSettingsAfterChannelsPending;
     private bool _finalAnalogueResendActive;
+    private ControllerProtocolCapabilities _controllerCapabilities = ControllerProtocolCapabilities.V09;
 
 
     public bool UpdateStaticData = false;
@@ -127,7 +133,6 @@ public class SerialPortService
 
         string fullMessage = $"[LOGDBG] {message}";
         Debug.WriteLine(fullMessage);
-        LoggingService.AddLog(fullMessage);
     }
 
     private void SetBulkTransferReaderActive(bool active)
@@ -227,7 +232,9 @@ public class SerialPortService
                commandId == Constants.COMMAND_ID_LOG_STREAM ||
                commandId == Constants.COMMAND_ID_FW_VER ||
                commandId == Constants.COMMAND_ID_BUILD_DATE ||
-               commandId == Constants.COMMAND_ID_FW_DIAGNOSTIC;
+               commandId == Constants.COMMAND_ID_FW_DIAGNOSTIC ||
+               commandId == Constants.COMMAND_ID_CELLULAR_TEST ||
+               commandId == Constants.COMMAND_ID_OPENREMOTE_PROVISION;
     }
 
     private void TrackFramedResponseByte(byte readByte)
@@ -236,7 +243,6 @@ public class SerialPortService
         {
             if (readByte == Constants.SERIAL_TRAILER2)
             {
-                foundTrailer2 = true;
                 _packetReady = true;
             }
 
@@ -278,7 +284,6 @@ public class SerialPortService
         }
 
         foundTrailer1 = false;
-        foundTrailer2 = false;
         _packetReady = false;
         lastCommandSent = '\0';
         _lastLiveRequestSentTick = 0;
@@ -295,6 +300,7 @@ public class SerialPortService
     private void MarkControllerSessionLost(bool requestStaticSnapshot)
     {
         foundECU = false;
+        _controllerCapabilities = ControllerProtocolCapabilities.V09;
         _lastLiveRequestSentTick = 0;
         _lastLiveStatusFrameTick = 0;
         _lastStaticRequestSentTick = 0;
@@ -538,8 +544,6 @@ public class SerialPortService
         dataStructures = new DataStructures();
         settingsData = new DataStructures();
         dataBytes = Array.Empty<byte>();
-        overridding = false;
-
         // create and start the processing timer
         _processTimer = new System.Timers.Timer(2);
         _processTimer.AutoReset = true;
@@ -557,7 +561,7 @@ public class SerialPortService
                 }
             }
 
-            if (!shouldProcess || overridding)
+            if (!shouldProcess)
             {
                 return;
             }
@@ -811,8 +815,6 @@ public class SerialPortService
             target.ScaleMax = source.ScaleMax;
             target.PWMMin = source.PWMMin;
             target.PWMMax = source.PWMMax;
-            target.RunOn = source.RunOn;
-            target.RunOnTime = source.RunOnTime;
             target.ErrorFlags = source.ErrorFlags;
             target.SoftStartEnabled = source.SoftStartEnabled;
             target.SoftStartTime = source.SoftStartTime;
@@ -820,6 +822,12 @@ public class SerialPortService
             target.SoftStopTime = source.SoftStopTime;
             target.IntermittentOnTime = source.IntermittentOnTime;
             target.IntermittentOffTime = source.IntermittentOffTime;
+            target.DelayedOn = source.DelayedOn;
+            target.DelayedOnTime = source.DelayedOnTime;
+            target.DelayedOff = source.DelayedOff;
+            target.DelayedOffTime = source.DelayedOffTime;
+            target.DelayedOffTrigger = source.DelayedOffTrigger;
+            target.RefreshDelayUiUnitsFromStoredValues();
         }
 
         int analogueCount = Math.Min(dataStructures.AnalogueInputsLiveData.Count, dataStructures.AnalogueInputsStaticData.Count);
@@ -852,6 +860,7 @@ public class SerialPortService
         dataStructures.SystemParamsStaticData.SIMModuleTemp = dataStructures.SystemParams.SIMModuleTemp;
         dataStructures.SystemParamsStaticData.IMUTemp = dataStructures.SystemParams.IMUTemp;
         dataStructures.SystemParamsStaticData.CANResEnabled = dataStructures.SystemParams.CANResEnabled;
+        dataStructures.SystemParamsStaticData.CANBusBitrate = dataStructures.SystemParams.CANBusBitrate;
         dataStructures.SystemParamsStaticData.VBatt = dataStructures.SystemParams.VBatt;
         dataStructures.SystemParamsStaticData.SystemCurrent = dataStructures.SystemParams.SystemCurrent;
         dataStructures.SystemParamsStaticData.SystemCurrentLimit = dataStructures.SystemParams.SystemCurrentLimit;
@@ -870,6 +879,25 @@ public class SerialPortService
         dataStructures.SystemParamsStaticData.AllowMotionDetect = dataStructures.SystemParams.AllowMotionDetect;
         dataStructures.SystemParamsStaticData.MobileSignalPercent = dataStructures.SystemParams.MobileSignalPercent;
         dataStructures.SystemParamsStaticData.TimeZoneRule = dataStructures.SystemParams.TimeZoneRule?.ToArray() ?? Array.Empty<byte>();
+
+        dataStructures.CellularParamsStaticData.ConfigVersion = dataStructures.CellularParams.ConfigVersion;
+        dataStructures.CellularParamsStaticData.Protocol = dataStructures.CellularParams.Protocol;
+        dataStructures.CellularParamsStaticData.UseTLS = dataStructures.CellularParams.UseTLS;
+        dataStructures.CellularParamsStaticData.APN = dataStructures.CellularParams.APN;
+        dataStructures.CellularParamsStaticData.APNUser = dataStructures.CellularParams.APNUser;
+        dataStructures.CellularParamsStaticData.APNPassword = dataStructures.CellularParams.APNPassword;
+        dataStructures.CellularParamsStaticData.OpenRemoteHost = dataStructures.CellularParams.OpenRemoteHost;
+        dataStructures.CellularParamsStaticData.OpenRemotePort = dataStructures.CellularParams.OpenRemotePort;
+        dataStructures.CellularParamsStaticData.ClientID = dataStructures.CellularParams.ClientID;
+        dataStructures.CellularParamsStaticData.PreserveOpenRemoteFieldsFrom(dataStructures.CellularParams);
+        dataStructures.CellularParamsStaticData.MQTTUsername = dataStructures.CellularParams.MQTTUsername;
+        dataStructures.CellularParamsStaticData.MQTTPassword = dataStructures.CellularParams.MQTTPassword;
+        dataStructures.CellularParamsStaticData.PublishTopic = dataStructures.CellularParams.PublishTopic;
+        dataStructures.CellularParamsStaticData.SubscribeTopic = dataStructures.CellularParams.SubscribeTopic;
+        dataStructures.CellularParamsStaticData.KeepAliveSeconds = dataStructures.CellularParams.KeepAliveSeconds;
+        dataStructures.CellularParamsStaticData.PublishIntervalMs = dataStructures.CellularParams.PublishIntervalMs;
+        dataStructures.CellularParamsStaticData.TelemetryUploadMask = dataStructures.CellularParams.TelemetryUploadMask;
+        dataStructures.CellularParamsStaticData.OpenRemoteAssetName = dataStructures.CellularParams.OpenRemoteAssetName;
     }
 
     private static bool ByteArraysEqual(byte[]? left, byte[]? right)
@@ -893,6 +921,14 @@ public class SerialPortService
         }
 
         return true;
+    }
+
+    private static bool IsSupportedCanBusBitrate(uint bitrate)
+    {
+        return bitrate == Constants.CAN_BITRATE_125K
+            || bitrate == Constants.CAN_BITRATE_250K
+            || bitrate == Constants.CAN_BITRATE_500K
+            || bitrate == Constants.CAN_BITRATE_1M;
     }
 
     private bool ParseLiveStatusPacket()
@@ -949,6 +985,7 @@ public class SerialPortService
         int dataIndex = 4;
         int packetEndIndex = dataLength - 4;
         var reader = new ByteReader(dataBytes, dataIndex);
+        ControllerProtocolCapabilities packetCapabilities = ControllerProtocolCapabilities.FromStaticPacketLength(dataLength);
 
         for (int i = 0; i < dataBytes[3] && i < dataStructures.ChannelsLiveData.Count; i++)
         {
@@ -972,8 +1009,13 @@ public class SerialPortService
             dataStructures.ChannelsLiveData[i].RetryCount = reader.ReadByte();
             dataStructures.ChannelsLiveData[i].InrushDelay = reader.ReadInt32() / 1000.0F;
             dataStructures.ChannelsLiveData[i].Name = reader.ReadChars(3);
-            dataStructures.ChannelsLiveData[i].RunOn = reader.ReadByte();
-            dataStructures.ChannelsLiveData[i].RunOnTime = reader.ReadInt32() / 1000;
+            byte legacyRunOn = 0;
+            int legacyRunOnTime = 0;
+            if (!packetCapabilities.SupportsDelayedChannelSettings)
+            {
+                legacyRunOn = reader.ReadByte();
+                legacyRunOnTime = reader.ReadInt32();
+            }
             dataStructures.ChannelsLiveData[i].SoftStartEnabled = reader.ReadByte();
             dataStructures.ChannelsLiveData[i].SoftStartTime = reader.ReadInt32() / 1000.0F;
             dataStructures.ChannelsLiveData[i].InrushCurrentLimit = reader.ReadSingle();
@@ -983,6 +1025,23 @@ public class SerialPortService
             dataStructures.ChannelsLiveData[i].Category = (OutputChannel.ChannelCategory)reader.ReadByte();
             dataStructures.ChannelsLiveData[i].IntermittentOnTime = reader.ReadInt32() / 1000.0F;
             dataStructures.ChannelsLiveData[i].IntermittentOffTime = reader.ReadInt32() / 1000.0F;
+            if (packetCapabilities.SupportsDelayedChannelSettings)
+            {
+                dataStructures.ChannelsLiveData[i].DelayedOn = reader.ReadByte();
+                dataStructures.ChannelsLiveData[i].DelayedOnTime = reader.ReadInt32();
+                dataStructures.ChannelsLiveData[i].DelayedOff = reader.ReadByte();
+                dataStructures.ChannelsLiveData[i].DelayedOffTime = reader.ReadInt32();
+                dataStructures.ChannelsLiveData[i].DelayedOffTrigger = reader.ReadByte();
+            }
+            else
+            {
+                dataStructures.ChannelsLiveData[i].DelayedOn = 0;
+                dataStructures.ChannelsLiveData[i].DelayedOnTime = 0;
+                dataStructures.ChannelsLiveData[i].DelayedOff = legacyRunOn != 0 ? (byte)1 : (byte)0;
+                dataStructures.ChannelsLiveData[i].DelayedOffTime = legacyRunOnTime;
+                dataStructures.ChannelsLiveData[i].DelayedOffTrigger = (byte)OutputChannel.DelayedOffTriggerMode.IgnitionOff;
+            }
+            dataStructures.ChannelsLiveData[i].RefreshDelayUiUnitsFromStoredValues();
         }
 
         int numAnalogueChannels = reader.ReadByte();
@@ -1047,7 +1106,44 @@ public class SerialPortService
             dataStructures.SystemParams.TimeZoneRule = Array.Empty<byte>();
         }
 
+        if ((packetEndIndex - reader.Position) >= sizeof(uint))
+        {
+            uint canBusBitrate = reader.ReadUInt32();
+            dataStructures.SystemParams.CANBusBitrate = IsSupportedCanBusBitrate(canBusBitrate)
+                ? canBusBitrate
+                : Constants.DEFAULT_CAN_BITRATE;
+        }
+
+        if ((packetEndIndex - reader.Position) >= Constants.CELLULAR_LEGACY_STATIC_PAYLOAD_BYTES)
+        {
+            dataStructures.CellularParams.ConfigVersion = reader.ReadByte();
+            dataStructures.CellularParams.Protocol = reader.ReadByte();
+            dataStructures.CellularParams.UseTLS = reader.ReadByte() != 0;
+            dataStructures.CellularParams.APN = reader.ReadFixedAsciiString(Constants.CELLULAR_APN_LENGTH);
+            dataStructures.CellularParams.APNUser = reader.ReadFixedAsciiString(Constants.CELLULAR_APN_USER_LENGTH);
+            dataStructures.CellularParams.APNPassword = reader.ReadFixedAsciiString(Constants.CELLULAR_APN_PASSWORD_LENGTH);
+            dataStructures.CellularParams.OpenRemoteHost = reader.ReadFixedAsciiString(Constants.CELLULAR_HOST_LENGTH);
+            dataStructures.CellularParams.OpenRemotePort = reader.ReadUInt16();
+            dataStructures.CellularParams.ClientID = reader.ReadFixedAsciiString(Constants.CELLULAR_CLIENT_ID_LENGTH);
+            dataStructures.CellularParams.MQTTUsername = reader.ReadFixedAsciiString(Constants.CELLULAR_MQTT_USERNAME_LENGTH);
+            dataStructures.CellularParams.MQTTPassword = reader.ReadFixedAsciiString(Constants.CELLULAR_MQTT_PASSWORD_LENGTH);
+            dataStructures.CellularParams.PublishTopic = reader.ReadFixedAsciiString(Constants.CELLULAR_TOPIC_LENGTH);
+            dataStructures.CellularParams.SubscribeTopic = reader.ReadFixedAsciiString(Constants.CELLULAR_TOPIC_LENGTH);
+            dataStructures.CellularParams.KeepAliveSeconds = reader.ReadUInt16();
+            dataStructures.CellularParams.PublishIntervalMs = reader.ReadUInt32();
+            dataStructures.CellularParams.TelemetryUploadMask = reader.ReadUInt32();
+            if (dataStructures.CellularParams.TelemetryUploadMask == 0)
+            {
+                dataStructures.CellularParams.TelemetryUploadMask = Constants.TELEMETRY_UPLOAD_DEFAULT_MASK;
+            }
+            if ((packetEndIndex - reader.Position) >= Constants.CELLULAR_OPENREMOTE_ASSET_NAME_LENGTH)
+            {
+                dataStructures.CellularParams.OpenRemoteAssetName = reader.ReadFixedAsciiString(Constants.CELLULAR_OPENREMOTE_ASSET_NAME_LENGTH);
+            }
+        }
+
         CopyLiveDataToStaticSnapshot();
+        _controllerCapabilities = packetCapabilities;
         _lastStaticRequestSentTick = 0;
         UpdateStaticData = false;
         return true;
@@ -1218,6 +1314,26 @@ public class SerialPortService
                             _firmwareDiagnosticTcs?.TrySetResult(diagnostic);
                             break;
                         }
+
+                    case (byte)Constants.COMMAND_ID_CELLULAR_TEST:
+                        {
+                            int payloadLength = Math.Max(0, dataLength - 9);
+                            string diagnostic = payloadLength > 0
+                                ? Encoding.ASCII.GetString(dataBytes, 3, payloadLength)
+                                : string.Empty;
+                            _cellularTestTcs?.TrySetResult(diagnostic);
+                            break;
+                        }
+
+                    case (byte)Constants.COMMAND_ID_OPENREMOTE_PROVISION:
+                        {
+                            int payloadLength = Math.Max(0, dataLength - 9);
+                            string diagnostic = payloadLength > 0
+                                ? Encoding.ASCII.GetString(dataBytes, 3, payloadLength)
+                                : string.Empty;
+                            _openRemoteProvisioningTcs?.TrySetResult(diagnostic);
+                            break;
+                        }
                 }
             }
 
@@ -1244,8 +1360,106 @@ public class SerialPortService
             1 => 0,
             0 => 2,
             2 => 3,
+            3 => 4,
             _ => settingIndex,
         };
+    }
+
+    private bool AdvanceConfigCursor()
+    {
+        switch (settingIndex)
+        {
+            case 0: // Channel data
+                parameterIndex++;
+                if (parameterIndex > _controllerCapabilities.LastChannelParameterIndex)
+                {
+                    parameterIndex = 0;
+                    channelIndex++;
+                    if (channelIndex >= Constants.NUM_OUTPUT_CHANNELS)
+                    {
+                        channelIndex = 0;
+                        AdvanceToNextSettingGroup();
+                    }
+                }
+                break;
+            case 1: // Analogue input data
+                parameterIndex++;
+                if (parameterIndex > Constants.LAST_ANALOGUE_PARAM_INDEX)
+                {
+                    parameterIndex = 0;
+                    analogueIndex++;
+                    if (analogueIndex >= Constants.NUM_ANALOGUE_INPUTS)
+                    {
+                        analogueIndex = 0;
+                        if (_finalAnalogueResendActive)
+                        {
+                            _finalAnalogueResendActive = false;
+                            sendingConfig = false;
+                            saveToEEPROM = true;
+                        }
+                        else
+                        {
+                            AdvanceToNextSettingGroup();
+                        }
+                    }
+                }
+                break;
+            case 2: // System data
+                parameterIndex++;
+                if (parameterIndex > _controllerCapabilities.LastSystemParameterIndex)
+                {
+                    parameterIndex = 0;
+                    AdvanceToNextSettingGroup();
+                }
+                break;
+            case 3: // Digital inputs
+                parameterIndex++;
+                if (parameterIndex > Constants.LAST_DIGITAL_PARAM_INDEX)
+                {
+                    parameterIndex = 0;
+                    digitalIndex++;
+                    if (digitalIndex >= Constants.NUM_DIGITAL_INPUTS)
+                    {
+                        if (_repeatAnalogueSettingsAfterChannelsPending)
+                        {
+                            _repeatAnalogueSettingsAfterChannelsPending = false;
+                            _finalAnalogueResendActive = true;
+                            settingIndex = 1;
+                            analogueIndex = 0;
+                            parameterIndex = 0;
+                        }
+                        else
+                        {
+                            if (_controllerCapabilities.SupportsCellularSettings)
+                            {
+                                AdvanceToNextSettingGroup();
+                            }
+                            else
+                            {
+                                sendingConfig = false;
+                                saveToEEPROM = true;
+                            }
+                        }
+                    }
+                }
+                break;
+            case 4: // Cellular data
+                parameterIndex++;
+                if (parameterIndex > Constants.LAST_CELLULAR_PARAM_INDEX)
+                {
+                    sendingConfig = false;
+                    saveToEEPROM = true;
+                }
+                break;
+        }
+
+        if (!sendingConfig)
+        {
+            parameterIndex = channelIndex = analogueIndex = settingIndex = digitalIndex = 0;
+            return false;
+        }
+
+        return true;
     }
 
     private static ChannelType DefaultToAnalogueChannelType(ChannelType currentType)
@@ -1296,16 +1510,19 @@ public class SerialPortService
     private bool SendConfig()
     {
         bool retVal = false;
-        totalBytesSent = 0;
-        checkSumSend = 0;
-        _sendBuffer.Clear();
-        bool configChanged = false;
 
-        AddData(Constants.SERIAL_HEADER1, true);
-        AddData(Constants.SERIAL_HEADER2, true);
-
-        switch (settingIndex)
+        while (true)
         {
+            totalBytesSent = 0;
+            checkSumSend = 0;
+            _sendBuffer.Clear();
+            bool configChanged = false;
+
+            AddData(Constants.SERIAL_HEADER1, true);
+            AddData(Constants.SERIAL_HEADER2, true);
+
+            switch (settingIndex)
+            {
             case 0: // Channel data
                 switch (parameterIndex)
                 {
@@ -1448,41 +1665,17 @@ public class SerialPortService
                             AddData((byte)settingIndex, true);
                             AddData((byte)parameterIndex, true);
                             AddData((byte)channelIndex, true);
-                            foreach (char c in settingsData.ChannelsStaticData[channelIndex].Name)
+                            foreach (char c in settingsData.ChannelsStaticData[channelIndex].Name ?? Array.Empty<char>())
                             {
                                 AddData((byte)c, true);
                             }
                             AddData(0, true); // Padding
                         }
                         break;
-                    case 11: // Run on
-                        if (dataStructures.ChannelsLiveData[channelIndex].RunOn != settingsData.ChannelsStaticData[channelIndex].RunOn)
-                        {
-                            configChanged = true;
-                            AddData((byte)settingIndex, true);
-                            AddData((byte)parameterIndex, true);
-                            AddData((byte)channelIndex, true);
-                            AddData(settingsData.ChannelsStaticData[channelIndex].RunOn, true);
-                            AddData(0, true); // Padding
-                            AddData(0, true); // Padding
-                            AddData(0, true); // Padding
-                        }
+                    case 11: // Legacy run-on flag slot (unused)
                         break;
 
-                    case 12: // Run on time
-                        if (dataStructures.ChannelsLiveData[channelIndex].RunOnTime != settingsData.ChannelsStaticData[channelIndex].RunOnTime)
-                        {
-                            configChanged = true;
-                            AddData((byte)settingIndex, true);
-                            AddData((byte)parameterIndex, true);
-                            AddData((byte)channelIndex, true);
-
-                            byte[] floatBytes = BitConverter.GetBytes((int)settingsData.ChannelsStaticData[channelIndex].RunOnTime * 1000);
-                            foreach (byte b in floatBytes)
-                            {
-                                AddData(b, true);
-                            }
-                        }
+                    case 12: // Legacy run-on time slot (unused)
                         break;
 
                     case 13: // Soft start flag
@@ -1707,6 +1900,73 @@ public class SerialPortService
                             {
                                 AddData(b, true);
                             }
+                        }
+                        break;
+                    case 28: // Delayed on flag
+                        if (dataStructures.ChannelsLiveData[channelIndex].DelayedOn != settingsData.ChannelsStaticData[channelIndex].DelayedOn)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].DelayedOn, true);
+                            AddData(0, true);
+                            AddData(0, true);
+                            AddData(0, true);
+                        }
+                        break;
+                    case 29: // Delayed on time
+                        if (dataStructures.ChannelsLiveData[channelIndex].DelayedOnTime != settingsData.ChannelsStaticData[channelIndex].DelayedOnTime)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            byte[] delayOnBytes = BitConverter.GetBytes(settingsData.ChannelsStaticData[channelIndex].DelayedOnTime);
+                            foreach (byte b in delayOnBytes)
+                            {
+                                AddData(b, true);
+                            }
+                        }
+                        break;
+                    case 30: // Delayed off flag
+                        if (dataStructures.ChannelsLiveData[channelIndex].DelayedOff != settingsData.ChannelsStaticData[channelIndex].DelayedOff)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].DelayedOff, true);
+                            AddData(0, true);
+                            AddData(0, true);
+                            AddData(0, true);
+                        }
+                        break;
+                    case 31: // Delayed off time
+                        if (dataStructures.ChannelsLiveData[channelIndex].DelayedOffTime != settingsData.ChannelsStaticData[channelIndex].DelayedOffTime)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            byte[] delayOffBytes = BitConverter.GetBytes(settingsData.ChannelsStaticData[channelIndex].DelayedOffTime);
+                            foreach (byte b in delayOffBytes)
+                            {
+                                AddData(b, true);
+                            }
+                        }
+                        break;
+                    case 32: // Delayed off trigger
+                        if (dataStructures.ChannelsLiveData[channelIndex].DelayedOffTrigger != settingsData.ChannelsStaticData[channelIndex].DelayedOffTrigger)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].DelayedOffTrigger, true);
+                            AddData(0, true);
+                            AddData(0, true);
+                            AddData(0, true);
                         }
                         break;
 
@@ -2094,6 +2354,20 @@ public class SerialPortService
                             }
                         }
                         break;
+                    case 14: // CAN bus bitrate
+                        if (dataStructures.SystemParamsStaticData.CANBusBitrate != settingsData.SystemParamsStaticData.CANBusBitrate)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData(0, true); // Padding
+                            byte[] uintBytes = BitConverter.GetBytes(settingsData.SystemParamsStaticData.CANBusBitrate);
+                            foreach (byte b in uintBytes)
+                            {
+                                AddData(b, true);
+                            }
+                        }
+                        break;
                 }
                 break;
 
@@ -2115,57 +2389,144 @@ public class SerialPortService
                         break;
                 }
                 break;
-        }
 
-        AddData(Constants.SERIAL_TRAILER1, true);
-        AddData(Constants.SERIAL_TRAILER2, true);
-        AddData((byte)(checkSumSend & 0xFF), false);
-        AddData((byte)((checkSumSend >> 8) & 0xFF), false);
-        AddData((byte)((checkSumSend >> 16) & 0xFF), false);
-        AddData((byte)((checkSumSend >> 24) & 0xFF), false);
-
-        if (configChanged)
-        {
-            switch (settingIndex)
-            {
-                case 0:
-                    Debug.WriteLine("Sending channel " + channelIndex + " parameter " + parameterIndex);
-                    break;
-                case 1:
-                    Debug.WriteLine("Sending analogue input " + analogueIndex + " parameter " + parameterIndex);
-                    break;
-                case 2:
-                    Debug.WriteLine("Sending system parameter " + parameterIndex);
-                    break;
-                case 3:
-                    Debug.WriteLine("Sending digital input " + digitalIndex + " parameter " + parameterIndex);
-                    break;
+            case 4: // Cellular data
+                CellularParameters liveCellular = dataStructures.CellularParamsStaticData;
+                CellularParameters settingsCellular = settingsData.CellularParamsStaticData;
+                bool forceCellularConfigSend = liveCellular.ConfigVersion != Constants.CELLULAR_CONFIG_VERSION;
+                switch (parameterIndex)
+                {
+                    case 0:
+                        configChanged = AddByteConfigIfChanged(liveCellular.ConfigVersion, Constants.CELLULAR_CONFIG_VERSION, 0);
+                        break;
+                    case 1:
+                        configChanged = AddByteConfigIfChanged(liveCellular.Protocol, settingsCellular.Protocol, 0, forceCellularConfigSend);
+                        break;
+                    case 2:
+                        configChanged = AddBoolConfigIfChanged(liveCellular.UseTLS, settingsCellular.UseTLS, 0, forceCellularConfigSend);
+                        break;
+                    case 3:
+                        configChanged = AddStringConfigIfChanged(
+                            liveCellular.APN,
+                            settingsCellular.APN,
+                            Constants.CELLULAR_APN_LENGTH,
+                            forceCellularConfigSend || !string.IsNullOrWhiteSpace(settingsCellular.APN));
+                        break;
+                    case 4:
+                        configChanged = AddStringConfigIfChanged(liveCellular.APNUser, settingsCellular.APNUser, Constants.CELLULAR_APN_USER_LENGTH, forceCellularConfigSend);
+                        break;
+                    case 5:
+                        configChanged = AddStringConfigIfChanged(liveCellular.APNPassword, settingsCellular.APNPassword, Constants.CELLULAR_APN_PASSWORD_LENGTH, forceCellularConfigSend);
+                        break;
+                    case 6:
+                        configChanged = AddStringConfigIfChanged(liveCellular.OpenRemoteHost, settingsCellular.OpenRemoteHost, Constants.CELLULAR_HOST_LENGTH, forceCellularConfigSend);
+                        break;
+                    case 7:
+                        configChanged = AddUInt16ConfigIfChanged(liveCellular.OpenRemotePort, settingsCellular.OpenRemotePort, 0, forceCellularConfigSend);
+                        break;
+                    case 8:
+                        configChanged = false;
+                        break;
+                    case 9:
+                        configChanged = AddStringConfigIfChanged(liveCellular.MQTTUsername, settingsCellular.MQTTUsername, Constants.CELLULAR_MQTT_USERNAME_LENGTH, forceCellularConfigSend);
+                        break;
+                    case 10:
+                        configChanged = AddStringConfigIfChanged(liveCellular.MQTTPassword, settingsCellular.MQTTPassword, Constants.CELLULAR_MQTT_PASSWORD_LENGTH, forceCellularConfigSend);
+                        break;
+                    case 11:
+                        configChanged = AddStringConfigIfChanged(liveCellular.PublishTopic, settingsCellular.PublishTopic, Constants.CELLULAR_TOPIC_LENGTH, forceCellularConfigSend);
+                        break;
+                    case 12:
+                        configChanged = AddStringConfigIfChanged(liveCellular.SubscribeTopic, settingsCellular.SubscribeTopic, Constants.CELLULAR_TOPIC_LENGTH, forceCellularConfigSend);
+                        break;
+                    case 13:
+                        if (forceCellularConfigSend || liveCellular.KeepAliveSeconds != settingsCellular.KeepAliveSeconds || liveCellular.PublishIntervalMs != settingsCellular.PublishIntervalMs)
+                        {
+                            configChanged = true;
+                            AddConfigHeader(0);
+                            foreach (byte b in BitConverter.GetBytes(settingsCellular.KeepAliveSeconds))
+                            {
+                                AddData(b, true);
+                            }
+                            foreach (byte b in BitConverter.GetBytes(settingsCellular.PublishIntervalMs))
+                            {
+                                AddData(b, true);
+                            }
+                        }
+                        break;
+                    case 14:
+                        configChanged = AddUInt32ConfigIfChanged(liveCellular.TelemetryUploadMask, settingsCellular.TelemetryUploadMask, 0, forceCellularConfigSend);
+                        break;
+                    case 15:
+                        configChanged = AddStringConfigIfChanged(liveCellular.OpenRemoteAssetName, settingsCellular.OpenRemoteAssetName, Constants.CELLULAR_OPENREMOTE_ASSET_NAME_LENGTH, forceCellularConfigSend);
+                        break;
+                }
+                break;
             }
 
-            Debug.WriteLine(channelIndex);
-            if (_serialPort.IsOpen && _serialPort != null)
-            {
-                byte[] packet = _sendBuffer.ToArray();
-                byte[] commandAndPacket = new byte[packet.Length + 1];
-                commandAndPacket[0] = (byte)Constants.COMMAND_ID_NEWCONFIG;
-                Array.Copy(packet, 0, commandAndPacket, 1, packet.Length);
-                Debug.WriteLine($"CFG TX s={settingIndex} p={parameterIndex} ch={channelIndex} a={analogueIndex} d={digitalIndex} len={commandAndPacket.Length} cksum=0x{(uint)checkSumSend:X8} bytes={BitConverter.ToString(commandAndPacket)}");
-                _serialPort.Write(commandAndPacket, 0, commandAndPacket.Length);
-                lastCommandSent = Constants.COMMAND_ID_NEWCONFIG;
+            AddData(Constants.SERIAL_TRAILER1, true);
+            AddData(Constants.SERIAL_TRAILER2, true);
+            AddData((byte)(checkSumSend & 0xFF), false);
+            AddData((byte)((checkSumSend >> 8) & 0xFF), false);
+            AddData((byte)((checkSumSend >> 16) & 0xFF), false);
+            AddData((byte)((checkSumSend >> 24) & 0xFF), false);
 
-                Debug.Write("Wrote ");
-                Debug.Write(commandAndPacket.Length);
-                Debug.WriteLine(" bytes.");
-                _sendBuffer.Clear();
+            if (configChanged)
+            {
+                switch (settingIndex)
+                {
+                    case 0:
+                        Debug.WriteLine("Sending channel " + channelIndex + " parameter " + parameterIndex);
+                        break;
+                    case 1:
+                        Debug.WriteLine("Sending analogue input " + analogueIndex + " parameter " + parameterIndex);
+                        break;
+                    case 2:
+                        Debug.WriteLine("Sending system parameter " + parameterIndex);
+                        break;
+                    case 3:
+                        Debug.WriteLine("Sending digital input " + digitalIndex + " parameter " + parameterIndex);
+                        break;
+                    case 4:
+                        Debug.WriteLine("Sending cellular parameter " + parameterIndex);
+                        break;
+                }
+
+                Debug.WriteLine(channelIndex);
+                if (_serialPort.IsOpen && _serialPort != null)
+                {
+                    byte[] packet = _sendBuffer.ToArray();
+                    byte[] commandAndPacket = new byte[packet.Length + 1];
+                    commandAndPacket[0] = (byte)Constants.COMMAND_ID_NEWCONFIG;
+                    Array.Copy(packet, 0, commandAndPacket, 1, packet.Length);
+                    Debug.WriteLine($"CFG TX s={settingIndex} p={parameterIndex} ch={channelIndex} a={analogueIndex} d={digitalIndex} len={commandAndPacket.Length} cksum=0x{(uint)checkSumSend:X8} bytes={BitConverter.ToString(commandAndPacket)}");
+                    _serialPort.Write(commandAndPacket, 0, commandAndPacket.Length);
+                    lastCommandSent = Constants.COMMAND_ID_NEWCONFIG;
+                    _configPacketsSent++;
+
+                    Debug.Write("Wrote ");
+                    Debug.Write(commandAndPacket.Length);
+                    Debug.WriteLine(" bytes.");
+                    _sendBuffer.Clear();
+                }
+
+                return retVal;
             }
-        }
-        else
-        {
+
             _sendBuffer.Clear();
-            SendCommand(Constants.COMMAND_ID_SKIP);
-        }
+            _configSlotsSkippedLocally++;
 
-        return retVal;
+            if (!AdvanceConfigCursor())
+            {
+                if (saveToEEPROM)
+                {
+                    saveToEEPROM = false;
+                    SendCommand(Constants.COMMAND_ID_SAVECHANGES);
+                }
+
+                return retVal;
+            }
+        }
     }
 
     private void AddData(byte data, bool addToCheck)
@@ -2176,6 +2537,91 @@ public class SerialPortService
         {
             checkSumSend += data;
         }
+    }
+
+    private void AddConfigHeader(byte dataIndex)
+    {
+        AddData((byte)settingIndex, true);
+        AddData((byte)parameterIndex, true);
+        AddData(dataIndex, true);
+    }
+
+    private bool AddBoolConfigIfChanged(bool liveValue, bool settingsValue, byte dataIndex, bool forceSend = false)
+    {
+        if (!forceSend && liveValue == settingsValue)
+        {
+            return false;
+        }
+
+        AddConfigHeader(dataIndex);
+        AddData(settingsValue ? (byte)1 : (byte)0, true);
+        AddData(0, true);
+        AddData(0, true);
+        return true;
+    }
+
+    private bool AddByteConfigIfChanged(byte liveValue, byte settingsValue, byte dataIndex, bool forceSend = false)
+    {
+        if (!forceSend && liveValue == settingsValue)
+        {
+            return false;
+        }
+
+        AddConfigHeader(dataIndex);
+        AddData(settingsValue, true);
+        AddData(0, true);
+        AddData(0, true);
+        return true;
+    }
+
+    private bool AddUInt16ConfigIfChanged(ushort liveValue, ushort settingsValue, byte dataIndex, bool forceSend = false)
+    {
+        if (!forceSend && liveValue == settingsValue)
+        {
+            return false;
+        }
+
+        AddConfigHeader(dataIndex);
+        foreach (byte b in BitConverter.GetBytes(settingsValue))
+        {
+            AddData(b, true);
+        }
+        return true;
+    }
+
+    private bool AddUInt32ConfigIfChanged(uint liveValue, uint settingsValue, byte dataIndex, bool forceSend = false)
+    {
+        if (!forceSend && liveValue == settingsValue)
+        {
+            return false;
+        }
+
+        AddConfigHeader(dataIndex);
+        foreach (byte b in BitConverter.GetBytes(settingsValue))
+        {
+            AddData(b, true);
+        }
+        return true;
+    }
+
+    private bool AddStringConfigIfChanged(string? liveValue, string? settingsValue, int fieldLength, bool forceSend = false)
+    {
+        string liveText = liveValue ?? string.Empty;
+        string settingsText = settingsValue ?? string.Empty;
+        if (!forceSend && string.Equals(liveText, settingsText, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        AddConfigHeader(0);
+        byte[] ascii = Encoding.ASCII.GetBytes(settingsText);
+        int copyLength = Math.Min(ascii.Length, fieldLength - 1);
+        for (int i = 0; i < fieldLength; i++)
+        {
+            AddData(i < copyLength ? ascii[i] : (byte)0, true);
+        }
+
+        return true;
     }
 
     private void OnDataReceived(object sender, SerialDataReceivedEventArgs e)
@@ -2316,86 +2762,11 @@ public class SerialPortService
                                 }
 
                                 _configRetryCount = 0;
-                                if (!overridding)
+                                if (sendingConfig)
                                 {
-                                    switch (settingIndex)
-                                    {
-                                        case 0: // Channel data
-                                            parameterIndex++;
-                                            if (parameterIndex > Constants.LAST_CHANNEL_PARAM_INDEX)
-                                            {
-                                                parameterIndex = 0;
-                                                channelIndex++;
-                                                if (channelIndex >= Constants.NUM_OUTPUT_CHANNELS)
-                                                {
-                                                    channelIndex = 0;
-                                                    AdvanceToNextSettingGroup();
-                                                }
-                                            }
-                                            break;
-                                        case 1: // Analogue input data
-                                            parameterIndex++;
-                                            if (parameterIndex > Constants.LAST_ANALOGUE_PARAM_INDEX)
-                                            {
-                                                parameterIndex = 0;
-                                                analogueIndex++;
-                                                if (analogueIndex >= Constants.NUM_ANALOGUE_INPUTS)
-                                                {
-                                                    analogueIndex = 0;
-                                                    if (_finalAnalogueResendActive)
-                                                    {
-                                                        _finalAnalogueResendActive = false;
-                                                        sendingConfig = false;
-                                                        saveToEEPROM = true;
-                                                    }
-                                                    else
-                                                    {
-                                                        AdvanceToNextSettingGroup();
-                                                    }
-                                                }
-                                            }
-                                            break;
-                                        case 2: // System data
-                                            parameterIndex++;
-                                            if (parameterIndex > Constants.LAST_SYSTEM_PARAM_INDEX)
-                                            {
-                                                parameterIndex = 0;
-                                                AdvanceToNextSettingGroup();
-                                            }
-                                            break;
-                                        case 3: // Digital inputs
-                                            parameterIndex++;
-                                            if (parameterIndex > Constants.LAST_DIGITAL_PARAM_INDEX)
-                                            {
-                                                parameterIndex = 0;
-                                                digitalIndex++;
-                                                if (digitalIndex >= Constants.NUM_DIGITAL_INPUTS)
-                                                {
-                                                    if (_repeatAnalogueSettingsAfterChannelsPending)
-                                                    {
-                                                        _repeatAnalogueSettingsAfterChannelsPending = false;
-                                                        _finalAnalogueResendActive = true;
-                                                        settingIndex = 1;
-                                                        analogueIndex = 0;
-                                                        parameterIndex = 0;
-                                                    }
-                                                    else
-                                                    {
-                                                        sendingConfig = false;
-                                                        saveToEEPROM = true;
-                                                    }
-                                                }
-                                            }
-                                            break;
-                                    }
-
-                                    if (sendingConfig)
+                                    if (AdvanceConfigCursor())
                                     {
                                         SendConfig();
-                                    }
-                                    else
-                                    {
-                                        parameterIndex = channelIndex = analogueIndex = settingIndex = digitalIndex = 0;
                                     }
 
                                     if (saveToEEPROM)
@@ -2406,7 +2777,6 @@ public class SerialPortService
                                 }
                                 else
                                 {
-                                    overridding = false;
                                     SendCommand(Constants.COMMAND_ID_REQUEST);
                                 }
                                 break;
@@ -2423,8 +2793,9 @@ public class SerialPortService
                                     receivedDataBuffer.Clear();
                                 }
                                 RequestStaticSnapshot();
-                                Debug.WriteLine("Configuration saved to EEPROM.");
-                                LoggingService.AddLog("PDM updated.");
+                                _configSendStopwatch.Stop();
+                                Debug.WriteLine($"Configuration saved to EEPROM. packets={_configPacketsSent}, localSkips={_configSlotsSkippedLocally}, elapsedMs={_configSendStopwatch.ElapsedMilliseconds}");
+                                LoggingService.AddLog("PDM settings saved.");
                                 ConfigurationSaved?.Invoke(this, EventArgs.Empty);
                                 ConfigurationSaveCompleted?.Invoke(this, new ConfigurationSaveCompletedEventArgs(true));
                                 break;
@@ -2470,16 +2841,19 @@ public class SerialPortService
                                 if (_configRetryCount < 1)
                                 {
                                     _configRetryCount++;
-                                    LoggingService.AddLog("PDM reported checksum failure for config data. Retrying...");
+                                    Debug.WriteLine("PDM reported checksum failure for config data. Retrying...");
+                                    LoggingService.AddLog("There was a problem saving settings. Trying again...");
                                     SendConfig();
                                 }
                                 else
                                 {
-                                    LoggingService.AddLog("PDM reported checksum failure for config data. Aborting send.");
+                                    Debug.WriteLine("PDM reported checksum failure for config data. Aborting send.");
+                                    LoggingService.AddLog("Settings could not be saved. Please try again.");
                                     sendingConfig = false;
                                     saveToEEPROM = false;
                                     parameterIndex = channelIndex = analogueIndex = settingIndex = digitalIndex = 0;
                                     _configRetryCount = 0;
+                                    _configSendStopwatch.Stop();
                                     ConfigurationSaveCompleted?.Invoke(this, new ConfigurationSaveCompletedEventArgs(false));
                                 }
                                 break;
@@ -2494,14 +2868,17 @@ public class SerialPortService
                                 if (_saveRetryCount < 1)
                                 {
                                     _saveRetryCount++;
-                                    LoggingService.AddLog("PDM reported checksum failure when saving changes. Retrying...");
+                                    Debug.WriteLine("PDM reported checksum failure when saving changes. Retrying...");
+                                    LoggingService.AddLog("There was a problem saving settings. Trying again...");
                                     SendCommand(Constants.COMMAND_ID_SAVECHANGES);
                                 }
                                 else
                                 {
-                                    LoggingService.AddLog("PDM reported checksum failure when saving changes. Try again.");
+                                    Debug.WriteLine("PDM reported checksum failure when saving changes. Try again.");
+                                    LoggingService.AddLog("Settings could not be saved. Please try again.");
                                     parameterIndex = channelIndex = analogueIndex = settingIndex = digitalIndex = 0;
                                     _saveRetryCount = 0;
+                                    _configSendStopwatch.Stop();
                                     ConfigurationSaveCompleted?.Invoke(this, new ConfigurationSaveCompletedEventArgs(false));
                                 }
 
@@ -2537,7 +2914,7 @@ public class SerialPortService
                     }
                 }
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 // Do nothing. Disconnect was probably hit
             }
@@ -2622,10 +2999,13 @@ public class SerialPortService
         parameterIndex = 0;
         _configRetryCount = 0;
         _saveRetryCount = 0;
+        _configPacketsSent = 0;
+        _configSlotsSkippedLocally = 0;
         _repeatAnalogueSettingsAfterChannelsPending = true;
         _finalAnalogueResendActive = false;
+        _configSendStopwatch.Restart();
         SendConfig();
-        LoggingService.AddLog("Sending config to PDM...");
+        LoggingService.AddLog("Saving settings to PDM...");
     }
 
     private void SendCommand(char commandId)
@@ -3017,6 +3397,191 @@ public class SerialPortService
                 SendCommand(Constants.COMMAND_ID_REQUEST);
             }
         }
+    }
+
+    public async Task<string?> RequestCellularTestAsync(CellularParameters? cellularSettings = null, int timeoutMs = 3000)
+    {
+        if (!_serialPort.IsOpen)
+        {
+            return null;
+        }
+
+        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
+        _suspendLiveRequestPolling = true;
+        ResetLogReceiveState(discardSerialInput: true);
+        var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _cellularTestTcs = tcs;
+
+        try
+        {
+            SendCellularTestCommand(cellularSettings);
+            Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
+            if (completedTask != tcs.Task)
+            {
+                return null;
+            }
+
+            return await tcs.Task;
+        }
+        finally
+        {
+            if (_cellularTestTcs == tcs)
+            {
+                _cellularTestTcs = null;
+            }
+
+            ResetLogReceiveState(discardSerialInput: false);
+            _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
+            if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
+            {
+                SendCommand(Constants.COMMAND_ID_REQUEST);
+            }
+        }
+    }
+
+    public async Task<string?> RequestOpenRemoteProvisioningAsync(CellularParameters cellularSettings, string provisioningRequestJson, int timeoutMs = 190000)
+    {
+        if (!_serialPort.IsOpen || cellularSettings == null || string.IsNullOrWhiteSpace(provisioningRequestJson))
+        {
+            return null;
+        }
+
+        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
+        _suspendLiveRequestPolling = true;
+        ResetLogReceiveState(discardSerialInput: true);
+        var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _openRemoteProvisioningTcs = tcs;
+
+        try
+        {
+            SendOpenRemoteProvisioningCommand(cellularSettings, provisioningRequestJson);
+            Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
+            if (completedTask != tcs.Task)
+            {
+                return null;
+            }
+
+            return await tcs.Task;
+        }
+        finally
+        {
+            if (_openRemoteProvisioningTcs == tcs)
+            {
+                _openRemoteProvisioningTcs = null;
+            }
+
+            ResetLogReceiveState(discardSerialInput: false);
+            _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
+            if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
+            {
+                SendCommand(Constants.COMMAND_ID_REQUEST);
+            }
+        }
+    }
+
+    private void SendOpenRemoteProvisioningCommand(CellularParameters cellularSettings, string provisioningRequestJson)
+    {
+        cellularSettings.EnsurePublishTopicFromOpenRemoteFields();
+        byte[] requestBytes = Encoding.ASCII.GetBytes(provisioningRequestJson.Trim());
+        if (requestBytes.Length == 0 || requestBytes.Length > OpenRemoteProvisioningMaxRequestBytes)
+        {
+            throw new InvalidOperationException($"OpenRemote provisioning request must be between 1 and {OpenRemoteProvisioningMaxRequestBytes} bytes.");
+        }
+
+        byte[] payload = new byte[
+            Constants.CELLULAR_APN_LENGTH +
+            Constants.CELLULAR_HOST_LENGTH +
+            sizeof(ushort) +
+            Constants.CELLULAR_CLIENT_ID_LENGTH +
+            Constants.CELLULAR_MQTT_USERNAME_LENGTH +
+            Constants.CELLULAR_MQTT_PASSWORD_LENGTH +
+            Constants.CELLULAR_TOPIC_LENGTH +
+            sizeof(byte) +
+            sizeof(ushort) +
+            requestBytes.Length];
+
+        int offset = 0;
+        WriteFixedAscii(payload, ref offset, cellularSettings.APN, Constants.CELLULAR_APN_LENGTH);
+        WriteFixedAscii(payload, ref offset, cellularSettings.OpenRemoteHost, Constants.CELLULAR_HOST_LENGTH);
+        foreach (byte value in BitConverter.GetBytes(cellularSettings.OpenRemotePort))
+        {
+            payload[offset++] = value;
+        }
+        WriteFixedAscii(payload, ref offset, cellularSettings.ClientID, Constants.CELLULAR_CLIENT_ID_LENGTH);
+        WriteFixedAscii(payload, ref offset, cellularSettings.MQTTUsername, Constants.CELLULAR_MQTT_USERNAME_LENGTH);
+        WriteFixedAscii(payload, ref offset, cellularSettings.MQTTPassword, Constants.CELLULAR_MQTT_PASSWORD_LENGTH);
+        WriteFixedAscii(payload, ref offset, cellularSettings.PublishTopic, Constants.CELLULAR_TOPIC_LENGTH);
+        payload[offset++] = cellularSettings.UseTLS ? (byte)1 : (byte)0;
+        foreach (byte value in BitConverter.GetBytes((ushort)requestBytes.Length))
+        {
+            payload[offset++] = value;
+        }
+        Array.Copy(requestBytes, 0, payload, offset, requestBytes.Length);
+
+        byte[] commandAndPayload = new byte[payload.Length + 1];
+        commandAndPayload[0] = (byte)Constants.COMMAND_ID_OPENREMOTE_PROVISION;
+        Array.Copy(payload, 0, commandAndPayload, 1, payload.Length);
+        _serialPort.Write(commandAndPayload, 0, commandAndPayload.Length);
+        lastCommandSent = Constants.COMMAND_ID_OPENREMOTE_PROVISION;
+    }
+
+    private void SendCellularTestCommand(CellularParameters? cellularSettings)
+    {
+        if (!_serialPort.IsOpen)
+        {
+            return;
+        }
+
+        if (cellularSettings is null)
+        {
+            _serialPort.Write([(byte)Constants.COMMAND_ID_CELLULAR_TEST], 0, 1);
+            lastCommandSent = Constants.COMMAND_ID_CELLULAR_TEST;
+            return;
+        }
+
+        cellularSettings.EnsurePublishTopicFromOpenRemoteFields();
+        byte[] payload = new byte[
+            Constants.CELLULAR_APN_LENGTH +
+            Constants.CELLULAR_HOST_LENGTH +
+            sizeof(ushort) +
+            Constants.CELLULAR_CLIENT_ID_LENGTH +
+            Constants.CELLULAR_MQTT_USERNAME_LENGTH +
+            Constants.CELLULAR_MQTT_PASSWORD_LENGTH +
+            Constants.CELLULAR_TOPIC_LENGTH +
+            sizeof(byte) +
+            sizeof(uint)];
+
+        int offset = 0;
+        WriteFixedAscii(payload, ref offset, cellularSettings.APN, Constants.CELLULAR_APN_LENGTH);
+        WriteFixedAscii(payload, ref offset, cellularSettings.OpenRemoteHost, Constants.CELLULAR_HOST_LENGTH);
+        foreach (byte value in BitConverter.GetBytes(cellularSettings.OpenRemotePort))
+        {
+            payload[offset++] = value;
+        }
+        WriteFixedAscii(payload, ref offset, cellularSettings.ClientID, Constants.CELLULAR_CLIENT_ID_LENGTH);
+        WriteFixedAscii(payload, ref offset, cellularSettings.MQTTUsername, Constants.CELLULAR_MQTT_USERNAME_LENGTH);
+        WriteFixedAscii(payload, ref offset, cellularSettings.MQTTPassword, Constants.CELLULAR_MQTT_PASSWORD_LENGTH);
+        WriteFixedAscii(payload, ref offset, cellularSettings.PublishTopic, Constants.CELLULAR_TOPIC_LENGTH);
+        payload[offset++] = cellularSettings.UseTLS ? (byte)1 : (byte)0;
+        foreach (byte value in BitConverter.GetBytes(cellularSettings.TelemetryUploadMask))
+        {
+            payload[offset++] = value;
+        }
+
+        byte[] commandAndPayload = new byte[payload.Length + 1];
+        commandAndPayload[0] = (byte)Constants.COMMAND_ID_CELLULAR_TEST;
+        Array.Copy(payload, 0, commandAndPayload, 1, payload.Length);
+        _serialPort.Write(commandAndPayload, 0, commandAndPayload.Length);
+        lastCommandSent = Constants.COMMAND_ID_CELLULAR_TEST;
+    }
+
+    private static void WriteFixedAscii(byte[] payload, ref int offset, string? value, int fieldLength)
+    {
+        string text = value?.Trim() ?? string.Empty;
+        byte[] ascii = Encoding.ASCII.GetBytes(text);
+        int copyLength = Math.Min(ascii.Length, fieldLength - 1);
+        Array.Copy(ascii, 0, payload, offset, copyLength);
+        offset += fieldLength;
     }
 
     public async Task<bool> WaitForControllerReconnectAsync(int timeoutMs = 20000, int pollIntervalMs = 250)
@@ -3591,9 +4156,15 @@ public class SerialPortService
     /// </summary>
     public void SendOverrideCommand(int channelIndex, bool overrideState)
     {
-        if (!_serialPort.IsOpen) return;
+        _ = SendOverrideCommandAsync(channelIndex, overrideState);
+    }
 
-        overridding = true;
+    private async Task SendOverrideCommandAsync(int channelIndex, bool overrideState)
+    {
+        if (!_serialPort.IsOpen)
+        {
+            return;
+        }
 
         _sendBuffer.Clear();
         checkSumSend = 0;
@@ -3612,15 +4183,25 @@ public class SerialPortService
         AddData((byte)((checkSumSend >> 16) & 0xFF), false);
         AddData((byte)((checkSumSend >> 24) & 0xFF), false);
 
-        // Send the command
         byte[] overridePacket = _sendBuffer.ToArray();
-        byte[] commandAndPacket = new byte[overridePacket.Length + 1];
-        commandAndPacket[0] = (byte)Constants.COMMAND_ID_NEWCONFIG;
-        Array.Copy(overridePacket, 0, commandAndPacket, 1, overridePacket.Length);
-        _serialPort.Write(commandAndPacket, 0, commandAndPacket.Length);
-        lastCommandSent = Constants.COMMAND_ID_NEWCONFIG;
         _sendBuffer.Clear();
 
+        try
+        {
+            bool accepted = await AwaitStandaloneAckAsync(
+                Constants.COMMAND_ID_NEWCONFIG,
+                () => SendCommandWithRawPayload(Constants.COMMAND_ID_NEWCONFIG, overridePacket),
+                timeoutMs: 3000);
+
+            if (!accepted)
+            {
+                LoggingService.AddLog("Override command failed.");
+            }
+        }
+        catch (Exception ex)
+        {
+            LoggingService.AddLog($"Override command failed: {ex.Message}");
+        }
     }
 }
 

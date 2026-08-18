@@ -9,10 +9,10 @@ using System.Diagnostics;
 using System.IO.Ports;
 using System.Threading.Tasks;
 
-namespace Cortex
+namespace Cortex;
+
+public partial class App : Application
 {
-    public partial class App : Application
-    {
         public override void Initialize()
         {
             AvaloniaXamlLoader.Load(this);
@@ -140,4 +140,3 @@ namespace Cortex
             });
         }
     }
-}

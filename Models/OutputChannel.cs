@@ -2,6 +2,7 @@
 using CommunityToolkit.Mvvm.Input;
 using System;
 using System.Diagnostics;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -86,12 +87,6 @@ namespace Cortex.Models
         public byte _PWMMax;                    // Maximum PWM value (0-100)
 
         [ObservableProperty]
-        public byte _RunOn;                     // Run channel after ignition off
-
-        [ObservableProperty]
-        public int _RunOnTime;                  // Run channel time after ignition off in milliseconds
-
-        [ObservableProperty]
         public byte _ErrorFlags;                // Bitmask for channel error flags
 
         [ObservableProperty]
@@ -116,6 +111,29 @@ namespace Cortex.Models
         private float _IntermittentOffTime;      // Intermittent off time in seconds
 
         [ObservableProperty]
+        private byte _DelayedOn;                 // Delayed on enabled flag
+
+        [ObservableProperty]
+        private int _DelayedOnTime;              // Delayed on time in milliseconds
+
+        [ObservableProperty]
+        private byte _DelayedOff;                // Delayed off enabled flag
+
+        [ObservableProperty]
+        private int _DelayedOffTime;             // Delayed off time in milliseconds
+
+        [ObservableProperty]
+        private byte _DelayedOffTrigger;         // Delayed off trigger source
+
+        [property: JsonIgnore]
+        [ObservableProperty]
+        private int _DelayedOnTimeUnitIndex;
+
+        [property: JsonIgnore]
+        [ObservableProperty]
+        private int _DelayedOffTimeUnitIndex;
+
+        [ObservableProperty]
         private string _AnalogueInputVoltageDisplay = "-";
 
 
@@ -136,11 +154,82 @@ namespace Cortex.Models
 
         public ChannelPriority Priority => GetPriority(Category);
 
+        [JsonIgnore]
+        public bool IsDelayedOnEnabled
+        {
+            get => DelayedOn != 0;
+            set => DelayedOn = value ? (byte)1 : (byte)0;
+        }
+
+        [JsonIgnore]
+        public bool IsDelayedOffEnabled
+        {
+            get => DelayedOff != 0;
+            set => DelayedOff = value ? (byte)1 : (byte)0;
+        }
+
+        [JsonIgnore]
+        public bool DelayedOffUsesIgnitionTrigger
+        {
+            get => DelayedOffTrigger == (byte)DelayedOffTriggerMode.IgnitionOff;
+            set => DelayedOffTrigger = value ? (byte)DelayedOffTriggerMode.IgnitionOff : (byte)DelayedOffTriggerMode.AssignedInput;
+        }
+
+        [JsonIgnore]
+        public bool DelayedOffUsesAssignedInputTrigger
+        {
+            get => DelayedOffTrigger == (byte)DelayedOffTriggerMode.AssignedInput;
+            set => DelayedOffTrigger = value ? (byte)DelayedOffTriggerMode.AssignedInput : (byte)DelayedOffTriggerMode.IgnitionOff;
+        }
+
+        [JsonIgnore]
+        public double DelayedOnSliderMinimum => GetDelaySliderMinimum(DelayedOnTimeUnitIndex);
+
+        [JsonIgnore]
+        public double DelayedOnSliderMaximum => GetDelaySliderMaximum(DelayedOnTimeUnitIndex);
+
+        [JsonIgnore]
+        public double DelayedOnSliderTickFrequency => GetDelaySliderTickFrequency(DelayedOnTimeUnitIndex);
+
+        [JsonIgnore]
+        public double DelayedOnSliderValue
+        {
+            get => GetDelaySliderValue(DelayedOnTime, DelayedOnTimeUnitIndex);
+            set => DelayedOnTime = ConvertDelayValueToMilliseconds(value, DelayedOnTimeUnitIndex);
+        }
+
+        [JsonIgnore]
+        public string DelayedOnSliderText => FormatDelaySliderValue(DelayedOnSliderValue, DelayedOnTimeUnitIndex);
+
+        [JsonIgnore]
+        public double DelayedOffSliderMinimum => GetDelaySliderMinimum(DelayedOffTimeUnitIndex);
+
+        [JsonIgnore]
+        public double DelayedOffSliderMaximum => GetDelaySliderMaximum(DelayedOffTimeUnitIndex);
+
+        [JsonIgnore]
+        public double DelayedOffSliderTickFrequency => GetDelaySliderTickFrequency(DelayedOffTimeUnitIndex);
+
+        [JsonIgnore]
+        public double DelayedOffSliderValue
+        {
+            get => GetDelaySliderValue(DelayedOffTime, DelayedOffTimeUnitIndex);
+            set => DelayedOffTime = ConvertDelayValueToMilliseconds(value, DelayedOffTimeUnitIndex);
+        }
+
+        [JsonIgnore]
+        public string DelayedOffSliderText => FormatDelaySliderValue(DelayedOffSliderValue, DelayedOffTimeUnitIndex);
+
         public OutputChannel()
         {
             HoldToggleCommand = new AsyncRelayCommand(OnHoldAsync);
             CancelHoldCommand = new RelayCommand(CancelHold);
         }
+
+        private const int DelayUnitMilliseconds = 0;
+        private const int DelayUnitSeconds = 1;
+        private const int DelayUnitMinutes = 2;
+        private bool _suppressDelayUnitNormalization;
 
         private CancellationTokenSource? _holdCts;
 
@@ -229,6 +318,76 @@ namespace Cortex.Models
             OnPropertyChanged(nameof(Priority));
         }
 
+        partial void OnDelayedOnChanged(byte value)
+        {
+            OnPropertyChanged(nameof(IsDelayedOnEnabled));
+            if (value != 0 && DelayedOnTime <= 0)
+            {
+                DelayedOnTime = ConvertDelayValueToMilliseconds(GetDelaySliderMinimum(DelayedOnTimeUnitIndex), DelayedOnTimeUnitIndex);
+            }
+            RaiseDelayedOnUiPropertiesChanged();
+        }
+
+        partial void OnDelayedOffChanged(byte value)
+        {
+            OnPropertyChanged(nameof(IsDelayedOffEnabled));
+            if (value != 0 && DelayedOffTime <= 0)
+            {
+                DelayedOffTime = ConvertDelayValueToMilliseconds(GetDelaySliderMinimum(DelayedOffTimeUnitIndex), DelayedOffTimeUnitIndex);
+            }
+            RaiseDelayedOffUiPropertiesChanged();
+        }
+
+        partial void OnDelayedOnTimeChanged(int value)
+        {
+            RaiseDelayedOnUiPropertiesChanged();
+        }
+
+        partial void OnDelayedOffTimeChanged(int value)
+        {
+            RaiseDelayedOffUiPropertiesChanged();
+        }
+
+        partial void OnDelayedOffTriggerChanged(byte value)
+        {
+            OnPropertyChanged(nameof(DelayedOffUsesIgnitionTrigger));
+            OnPropertyChanged(nameof(DelayedOffUsesAssignedInputTrigger));
+        }
+
+        partial void OnDelayedOnTimeUnitIndexChanged(int value)
+        {
+            DelayedOnTimeUnitIndex = NormalizeDelayUnitIndex(value);
+            if (_suppressDelayUnitNormalization)
+            {
+                RaiseDelayedOnUiPropertiesChanged();
+                return;
+            }
+
+            if (DelayedOnTime > 0 || DelayedOn != 0)
+            {
+                DelayedOnTime = ConvertDelayValueToMilliseconds(GetDelaySliderValue(DelayedOnTime, DelayedOnTimeUnitIndex), DelayedOnTimeUnitIndex);
+            }
+
+            RaiseDelayedOnUiPropertiesChanged();
+        }
+
+        partial void OnDelayedOffTimeUnitIndexChanged(int value)
+        {
+            DelayedOffTimeUnitIndex = NormalizeDelayUnitIndex(value);
+            if (_suppressDelayUnitNormalization)
+            {
+                RaiseDelayedOffUiPropertiesChanged();
+                return;
+            }
+
+            if (DelayedOffTime > 0 || DelayedOff != 0)
+            {
+                DelayedOffTime = ConvertDelayValueToMilliseconds(GetDelaySliderValue(DelayedOffTime, DelayedOffTimeUnitIndex), DelayedOffTimeUnitIndex);
+            }
+
+            RaiseDelayedOffUiPropertiesChanged();
+        }
+
         partial void OnOnThresholdChanged(float value)
         {
             if (UsesNegativeGoingThresholds())
@@ -260,6 +419,121 @@ namespace Cortex.Models
         }
 
         private bool UsesNegativeGoingThresholds() => OnThreshold < OffThreshold;
+
+        public void RefreshDelayUiUnitsFromStoredValues()
+        {
+            _suppressDelayUnitNormalization = true;
+            DelayedOnTimeUnitIndex = SelectDelayUnitIndex(DelayedOnTime);
+            DelayedOffTimeUnitIndex = SelectDelayUnitIndex(DelayedOffTime);
+            _suppressDelayUnitNormalization = false;
+            RaiseDelayedOnUiPropertiesChanged();
+            RaiseDelayedOffUiPropertiesChanged();
+        }
+
+        private void RaiseDelayedOnUiPropertiesChanged()
+        {
+            OnPropertyChanged(nameof(DelayedOnSliderMinimum));
+            OnPropertyChanged(nameof(DelayedOnSliderMaximum));
+            OnPropertyChanged(nameof(DelayedOnSliderTickFrequency));
+            OnPropertyChanged(nameof(DelayedOnSliderValue));
+            OnPropertyChanged(nameof(DelayedOnSliderText));
+        }
+
+        private void RaiseDelayedOffUiPropertiesChanged()
+        {
+            OnPropertyChanged(nameof(DelayedOffSliderMinimum));
+            OnPropertyChanged(nameof(DelayedOffSliderMaximum));
+            OnPropertyChanged(nameof(DelayedOffSliderTickFrequency));
+            OnPropertyChanged(nameof(DelayedOffSliderValue));
+            OnPropertyChanged(nameof(DelayedOffSliderText));
+        }
+
+        private static int NormalizeDelayUnitIndex(int value) => Math.Clamp(value, DelayUnitMilliseconds, DelayUnitMinutes);
+
+        private static int SelectDelayUnitIndex(int delayTimeMs)
+        {
+            if (delayTimeMs >= 60000)
+            {
+                return DelayUnitMinutes;
+            }
+
+            if (delayTimeMs > 1000)
+            {
+                return DelayUnitSeconds;
+            }
+
+            return DelayUnitMilliseconds;
+        }
+
+        private static double GetDelaySliderMinimum(int unitIndex)
+        {
+            return NormalizeDelayUnitIndex(unitIndex) switch
+            {
+                DelayUnitMilliseconds => 100.0,
+                DelayUnitSeconds => 1.0,
+                DelayUnitMinutes => 1.0,
+                _ => 100.0,
+            };
+        }
+
+        private static double GetDelaySliderMaximum(int unitIndex)
+        {
+            return NormalizeDelayUnitIndex(unitIndex) switch
+            {
+                DelayUnitMilliseconds => 1000.0,
+                DelayUnitSeconds => 59.0,
+                DelayUnitMinutes => 60.0,
+                _ => 1000.0,
+            };
+        }
+
+        private static double GetDelaySliderTickFrequency(int unitIndex)
+        {
+            return NormalizeDelayUnitIndex(unitIndex) switch
+            {
+                DelayUnitMilliseconds => 100.0,
+                DelayUnitSeconds => 1.0,
+                DelayUnitMinutes => 1.0,
+                _ => 100.0,
+            };
+        }
+
+        private static double GetDelaySliderValue(int delayTimeMs, int unitIndex)
+        {
+            unitIndex = NormalizeDelayUnitIndex(unitIndex);
+            if (delayTimeMs <= 0)
+            {
+                return GetDelaySliderMinimum(unitIndex);
+            }
+
+            return unitIndex switch
+            {
+                DelayUnitMilliseconds => Math.Clamp(Math.Round(delayTimeMs / 100.0) * 100.0, 100.0, 1000.0),
+                DelayUnitSeconds => Math.Clamp(Math.Round(delayTimeMs / 1000.0), 1.0, 59.0),
+                DelayUnitMinutes => Math.Clamp(Math.Round(delayTimeMs / 60000.0), 1.0, 60.0),
+                _ => 100.0,
+            };
+        }
+
+        private static int ConvertDelayValueToMilliseconds(double sliderValue, int unitIndex)
+        {
+            unitIndex = NormalizeDelayUnitIndex(unitIndex);
+
+            return unitIndex switch
+            {
+                DelayUnitMilliseconds => (int)(Math.Clamp(Math.Round(sliderValue / 100.0) * 100.0, 100.0, 1000.0)),
+                DelayUnitSeconds => (int)(Math.Clamp(Math.Round(sliderValue), 1.0, 59.0) * 1000.0),
+                DelayUnitMinutes => (int)(Math.Clamp(Math.Round(sliderValue), 1.0, 60.0) * 60000.0),
+                _ => 100,
+            };
+        }
+
+        private static string FormatDelaySliderValue(double sliderValue, int unitIndex)
+        {
+            return NormalizeDelayUnitIndex(unitIndex) == DelayUnitMilliseconds
+                ? sliderValue.ToString("F0")
+                : sliderValue.ToString("F0");
+        }
 
         public static ChannelPriority GetPriority(ChannelCategory category)
         {
@@ -294,6 +568,12 @@ namespace Cortex.Models
             CAN,                        // CAN bus controlled digital output
             CAN_PWM,                    // CAN bus controlled PWM output
             Intermittent                // Digital intermittent output
+        }
+
+        public enum DelayedOffTriggerMode
+        {
+            AssignedInput = 0,
+            IgnitionOff = 1,
         }
 
         public enum ChannelCategory

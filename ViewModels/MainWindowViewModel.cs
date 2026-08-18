@@ -6,6 +6,7 @@ using Cortex.Models;
 using Cortex.Services;
 using LiveChartsCore;
 using LiveChartsCore.Defaults;
+using LiveChartsCore.Kernel;
 using LiveChartsCore.Kernel.Sketches;
 using LiveChartsCore.Measure;
 using LiveChartsCore.SkiaSharpView;
@@ -20,9 +21,11 @@ using System.Globalization;
 using System.IO;
 using System.IO.Ports;
 using System.Linq;
+using System.Net.NetworkInformation;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Timers;
@@ -31,8 +34,15 @@ using static Cortex.ViewModels.MainWindowViewModel;
 /*
 
  * Version history:
-    Date              Version       Description
     ----              -------       ----------------------------------------------------------------------------------------------------------------------------------------------------
+    2026-06-20        v0.1.6        Comms protocol fix - much faster saves
+                                    Added delayed ON and OFF functions
+                                    CAN bus sbaud rate selection added to config screen.
+                                    Mouse over tooltips added in settings.
+                                    Added analogue channels to live view with selectable series persisted between sessions.
+                                    Added pause/resume in live view.
+                                    Cortex application update check and download from GitHub releases.
+                                    Added telemetry upload and GSM data settings to config screen.
     2026-04-29        v0.1.5        Channel type change bug fix.
                                     Minor UI bug fixes
                                     Added digital and analogue status CAN IDs to config screen.
@@ -53,10 +63,74 @@ using static Cortex.ViewModels.MainWindowViewModel;
 
 namespace Cortex.ViewModels
 {
+    public sealed class CellularTestStatusItem
+    {
+        private const string GreenTickIcon = "avares://Cortex/Assets/green_tick.png";
+        private const string RedCrossIcon = "avares://Cortex/Assets/red_cross.png";
+
+        public CellularTestStatusItem(string stage, string status, string message)
+        {
+            Stage = stage;
+            Status = status;
+            Message = message;
+        }
+
+        public string Stage { get; }
+
+        public string Status { get; }
+
+        public string Message { get; }
+
+        public bool HasMessage => !string.IsNullOrWhiteSpace(Message);
+
+        public string? IconPath => IsSuccessStatus(Status) ? GreenTickIcon : IsFailureStatus(Status) ? RedCrossIcon : null;
+
+        private static bool IsSuccessStatus(string status)
+        {
+            return status.Equals("OK", StringComparison.OrdinalIgnoreCase) ||
+                   status.Equals("Connected", StringComparison.OrdinalIgnoreCase) ||
+                   status.Equals("Ready", StringComparison.OrdinalIgnoreCase) ||
+                   status.Equals("Fix", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsFailureStatus(string status)
+        {
+            return status.Equals("Blocked", StringComparison.OrdinalIgnoreCase) ||
+                   status.Equals("Failed", StringComparison.OrdinalIgnoreCase) ||
+                   status.Equals("Skipped", StringComparison.OrdinalIgnoreCase) ||
+                   status.Equals("Timeout", StringComparison.OrdinalIgnoreCase) ||
+                   status.Equals("Timed out", StringComparison.OrdinalIgnoreCase) ||
+                   status.Equals("No response", StringComparison.OrdinalIgnoreCase) ||
+                   status.Equals("Needs setup", StringComparison.OrdinalIgnoreCase) ||
+                   status.Equals("Problem", StringComparison.OrdinalIgnoreCase) ||
+                   status.Equals("Update needed", StringComparison.OrdinalIgnoreCase) ||
+                   status.Equals("Legacy", StringComparison.OrdinalIgnoreCase) ||
+                   status.Equals("Warning", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
     public partial class MainWindowViewModel : ObservableObject
     {
         private const byte TimeZoneFixedDateFlag = 0x80;
         private const byte TimeZoneDayMask = 0x1F;
+        private const string DefaultCellularTestStatusMessage = "Run a connection test after saving GSM/data settings to the PDM.";
+        private const string LegacyCellularEnableDataMessage = "Cellular connection is disabled in GSM/data settings.";
+        private const int AutomaticCellularTestMaxAttempts = 6;
+        private const int ManualCellularRetryDelayMs = 5000;
+        private const int CellularHealthPollIntervalMs = 5000;
+        private const int CellularHealthRegistrationWarmupMs = 45000;
+
+        // Shown in the UI instead of naming OpenRemote, so the wording stays valid for any telemetry backend.
+        private const string TelemetryServiceStage = "Telemetry service";
+
+        private static readonly string[] CellularTestStageOrder =
+        [
+            "Settings",
+            "Mobile data",
+            "Internet",
+            TelemetryServiceStage,
+            "Health"
+        ];
 
         [ObservableProperty]
         private DataStructures liveDataView = new(); // For live/status data
@@ -83,6 +157,24 @@ namespace Cortex.ViewModels
         private bool isCheckingFirmwareUpdate;
 
         [ObservableProperty]
+        private string applicationUpdateButtonText = "Check for updates";
+
+        [ObservableProperty]
+        private IBrush applicationUpdateButtonBackground = FirmwareIdleBrush;
+
+        [ObservableProperty]
+        private bool isApplicationUpdateAvailable;
+
+        [ObservableProperty]
+        private bool isCheckingApplicationUpdate;
+
+        [ObservableProperty]
+        private string currentApplicationVersion = AppUpdateService.GetCurrentVersion();
+
+        [ObservableProperty]
+        private string applicationUpdateStatusMessage = "Checking GitHub releases...";
+
+        [ObservableProperty]
         private string controllerFirmwareVersion = string.Empty;
 
         [ObservableProperty]
@@ -106,6 +198,29 @@ namespace Cortex.ViewModels
         [ObservableProperty]
         private string factoryResetStatusMessage = string.Empty;
 
+        [ObservableProperty]
+        private bool isTestingCellularConnection;
+
+        [ObservableProperty]
+        private bool isAutomaticCellularTestInProgress;
+
+        [ObservableProperty]
+        private double cellularTestProgressValue;
+
+        [ObservableProperty]
+        private string cellularTestStatusMessage = DefaultCellularTestStatusMessage;
+
+        [ObservableProperty]
+        private string cellularConnectionHealthStatus = "Offline";
+
+        [ObservableProperty]
+        private bool isOpenRemoteProvisioningInProgress;
+
+        [ObservableProperty]
+        private string openRemoteProvisioningStatusMessage = "Sign in to the telemetry service to register this PDM.";
+
+        public ObservableCollection<CellularTestStatusItem> CellularTestStatusItems { get; } = [];
+
         public bool HasControllerSaveTimestamp => !string.IsNullOrWhiteSpace(SystemDateTime);
 
         public bool HasControllerSaveStatus => IsSendingConfig || HasControllerSaveTimestamp;
@@ -116,9 +231,27 @@ namespace Cortex.ViewModels
 
         public bool CanFactoryReset => IsConnected && CommsEstablished && !IsLogBusy && !IsFactoryResetInProgress && _portService != null;
 
+        public bool CanTestCellularConnection => IsConnected && CommsEstablished && !IsLogBusy && !IsSendingConfig && !IsTestingCellularConnection && !IsAutomaticCellularTestInProgress && _portService != null;
+
+        public bool CanUseOpenRemoteSettings => SettingsDataView.SystemParamsStaticData.AllowData && IsInternetAvailable;
+
+        public string OpenRemoteAvailabilityMessage => SettingsDataView.SystemParamsStaticData.AllowData
+            ? IsInternetAvailable
+                ? string.Empty
+                : "Internet access is required for telemetry service setup and name updates."
+            : "Enable Mobile data before using the telemetry service.";
+
+        public bool CanProvisionOpenRemote => IsOpenRemoteSignedIn && HasValidPdmName && CanUseOpenRemoteSettings && IsConnected && CommsEstablished && !IsLogBusy && !IsSendingConfig && !IsOpenRemoteProvisioningInProgress && _portService != null;
+
         public string SetControllerRtcButtonText => IsSettingControllerRtc ? "Setting..." : "Set controller clock";
 
         public string FactoryResetButtonText => IsFactoryResetInProgress ? "Resetting..." : "Factory Reset PDM";
+
+        public string CellularTestButtonText => (IsTestingCellularConnection || IsAutomaticCellularTestInProgress) ? "Testing..." : "Test data connection";
+
+        public bool IsCellularTestInProgress => IsTestingCellularConnection || IsAutomaticCellularTestInProgress;
+
+        public string OpenRemoteProvisioningButtonText => IsOpenRemoteProvisioningInProgress ? "Registering..." : "Register PDM";
 
         [ObservableProperty]
         private bool sdOK;
@@ -226,6 +359,27 @@ namespace Cortex.ViewModels
         private ObservableCollection<ISeries> seriesCollection = [];
 
         [ObservableProperty]
+        private ObservableCollection<ChartSeriesToggleItem> liveSeriesToggles = [];
+
+        [ObservableProperty]
+        private ObservableCollection<ChartSeriesToggleItem> channelLiveSeriesToggles = [];
+
+        [ObservableProperty]
+        private ObservableCollection<ChartSeriesToggleItem> analogueLiveSeriesToggles = [];
+
+        [ObservableProperty]
+        private string liveChartHoverSummary = string.Empty;
+
+        [ObservableProperty]
+        private bool isLiveChartSelectionPinned;
+
+        [ObservableProperty]
+        private bool isLiveCrosshairEnabled = true;
+
+        [ObservableProperty]
+        private bool isLiveChartPaused;
+
+        [ObservableProperty]
         private int selectedTimeWindowSeconds = 60;
 
         [ObservableProperty]
@@ -233,6 +387,9 @@ namespace Cortex.ViewModels
 
         [ObservableProperty]
         private bool isSendingConfig;
+
+        [ObservableProperty]
+        private bool isInternetAvailable = NetworkInterface.GetIsNetworkAvailable();
 
         [ObservableProperty]
         private int selectedLogDetailTabIndex;
@@ -249,15 +406,22 @@ namespace Cortex.ViewModels
         [ObservableProperty]
         private int logMapRouteVersion;
 
-        private readonly System.Timers.Timer updateTimer;
         private readonly DateTime startTime = DateTime.UtcNow;
 
         private readonly System.Timers.Timer _uiUpdateTimer;
-        private DataStructures _pendingLiveData;
+        private DataStructures? _pendingLiveData;
         private readonly object _pendingDataLock = new();
         private bool _hasPendingData = false;
+        private bool _hasReceivedLiveData;
+        private bool[] _liveSeriesHasSyntheticTail = Array.Empty<bool>();
+        private List<ObservablePoint>[] _liveSeriesHistory = Array.Empty<List<ObservablePoint>>();
         private bool _pauseLiveUiUpdates;
+        private double _lastUpdatedHighlightOpacity;
         private readonly DispatcherTimer _logViewportMonitorTimer;
+        private readonly DispatcherTimer _liveHoverClearTimer;
+        private bool _suppressLiveChartAxisRefresh;
+        private string _lastLiveChartAxisSignature = string.Empty;
+        private List<ChartPoint> _lastHoveredLiveChartPoints = [];
 
         private InputDisplayItem? _selectedInputItem;
 
@@ -270,48 +434,39 @@ namespace Cortex.ViewModels
         private readonly System.Timers.Timer _commsTimer = new(1000); // Every 1000 millis
 
         private readonly IAppCloser _appCloser;
-        private readonly FirmwareUpdateService _firmwareUpdateService = new();
-        private CancellationTokenSource? _firmwareCheckCts;
-        private FirmwareReleaseInfo? _latestFirmwareRelease;
-        private FirmwareReleaseInfo? _availableFirmwareRelease;
 
         private readonly Dictionary<string, SKColor> _logSeriesColorRegistry = new(StringComparer.OrdinalIgnoreCase);
 
-        private static readonly IBrush FirmwareIdleBrush = new SolidColorBrush(Color.Parse("#40404A"));
-        private static readonly IBrush FirmwareAvailableBrush = new SolidColorBrush(Color.Parse("#2C8F57"));
+        private static readonly SKColor[] LiveSeriesPalette =
+        [
+            new SKColor(0x4D, 0xC3, 0xFF),
+            new SKColor(0xFF, 0x9F, 0x43),
+            new SKColor(0x4C, 0xD1, 0x7A),
+            new SKColor(0xFF, 0x6B, 0x81),
+            new SKColor(0xC5, 0x86, 0xFF),
+            new SKColor(0xFF, 0xD1, 0x66),
+            new SKColor(0x5A, 0xE0, 0xD8),
+            new SKColor(0xFF, 0x7A, 0x59),
+            new SKColor(0x8A, 0xF0, 0x5A),
+            new SKColor(0x7E, 0xA8, 0xFF),
+            new SKColor(0xFF, 0x86, 0xC8),
+            new SKColor(0xA7, 0xB5, 0xC5),
+        ];
 
         private static readonly byte[] DIChannelInputPins = InputPinCatalog.DIChannelInputPins;
-
         private static readonly byte[] ANAChannelInputPins = InputPinCatalog.ANAChannelInputPins;
 
         private static readonly byte[] AllInputPins = InputPinCatalog.AllInputPins;
 
         public RelayCommand ExitCommand { get; }
 
-        public bool CanOpenFirmwareUpdateDialog =>
-            IsConnected &&
-            CommsEstablished &&
-            !IsCheckingFirmwareUpdate &&
-            IsFirmwareUpdateAvailable &&
-            _portService != null;
-
-        public bool CanOpenLocalFirmwareUpdateDialog =>
-            IsConnected &&
-            CommsEstablished &&
-            !IsCheckingFirmwareUpdate &&
-            _portService != null;
+        public bool HasLiveChartSelection => _lastHoveredLiveChartPoints.Count > 0;
 
         public bool CanSendConfig => HasPendingConfigChanges && !IsSendingConfig;
 
-        public string CurrentFirmwareVersionDisplay => string.IsNullOrWhiteSpace(ControllerFirmwareVersion)
-            ? "Unknown"
-            : ControllerFirmwareVersion;
+        public string LiveChartPauseButtonText => IsLiveChartPaused ? "RESUME" : "PAUSE";
 
-        public bool HasLatestFirmwareGitHubLink => !string.IsNullOrWhiteSpace(_latestFirmwareRelease?.GitHubUrl);
-
-        public string LatestFirmwareGitHubLinkText => string.IsNullOrWhiteSpace(_latestFirmwareRelease?.Version)
-            ? "Latest firmware on GitHub"
-            : $"Latest on GitHub: {_latestFirmwareRelease.Version}";
+        public string LiveChartPinButtonText => IsLiveChartSelectionPinned ? "Unpin" : "Pin";
 
         public ObservableCollection<string> LogEntries => LoggingService.LogEntries;
 
@@ -328,6 +483,8 @@ namespace Cortex.ViewModels
         public ObservableCollection<byte> AnalogueCalibrationPointOptions { get; }
 
         public ObservableCollection<CanIdOption> AvailableCanIds { get; }
+
+        public ObservableCollection<CanBitrateOption> AvailableCanBitrates { get; }
 
         public ObservableCollection<TimeZoneDisplay> TimeZones { get; }
 
@@ -361,6 +518,11 @@ namespace Cortex.ViewModels
         private bool _suppressDirtyTracking;
         private bool _suppressTimeZoneSelectionWriteBack;
         private DataStructures? _controllerConfigBaseline;
+        private TaskCompletionSource<bool>? _configSaveCompletionTcs;
+        private DateTime _nextCellularHealthPollUtc = DateTime.MinValue;
+        private DateTime _suppressCellularNeedsAttentionUntilUtc = DateTime.MinValue;
+        private int _isCellularHealthPollInProgress;
+        private string _lastLoggedCellularHealthStatus = string.Empty;
         private double _activeLogFilterStartMs = double.NaN;
         private double _activeLogFilterEndMs = double.NaN;
         private double _lastRenderedLogViewportStartMs = double.NaN;
@@ -399,11 +561,37 @@ namespace Cortex.ViewModels
             OnPropertyChanged(nameof(CanSendConfig));
         }
 
+        partial void OnIsInternetAvailableChanged(bool value)
+        {
+            OnPropertyChanged(nameof(CanUseOpenRemoteSettings));
+            OnPropertyChanged(nameof(CanProvisionOpenRemote));
+            OnPropertyChanged(nameof(OpenRemoteAvailabilityMessage));
+        }
+
         partial void OnIsSendingConfigChanged(bool value)
         {
             OnPropertyChanged(nameof(CanSendConfig));
+            OnPropertyChanged(nameof(CanTestCellularConnection));
+            OnPropertyChanged(nameof(CanProvisionOpenRemote));
             OnPropertyChanged(nameof(HasControllerSaveStatus));
             OnPropertyChanged(nameof(ControllerSaveStatusText));
+        }
+
+        partial void OnIsLiveChartPausedChanged(bool value)
+        {
+            OnPropertyChanged(nameof(LiveChartPauseButtonText));
+
+            if (value)
+            {
+                return;
+            }
+
+            if (!_hasReceivedLiveData || !IsConnected || !CommsEstablished)
+            {
+                return;
+            }
+
+            RestoreLiveChartSeriesFromHistory();
         }
 
         partial void OnControllerRtcDateChanged(DateTimeOffset? value)
@@ -426,7 +614,7 @@ namespace Cortex.ViewModels
         {
             OnPropertyChanged(nameof(SelectedChannel));
 
-            SelectedChannelLabel = ChannelDisplayList.FirstOrDefault(c => c.Index == newValue);
+            SelectedChannelLabel = ChannelDisplayList.FirstOrDefault(c => c.Index == newValue) ?? ChannelDisplayList.FirstOrDefault() ?? new ChannelLabel(newValue);
             SelectedChannel = SettingsDataView.ChannelsStaticData.ElementAtOrDefault(SelectedChannelIndex);
 
             if (SelectedChannel != null)
@@ -486,6 +674,7 @@ namespace Cortex.ViewModels
 
         partial void OnSelectedChannelChanged(OutputChannel? value)
         {
+            value?.RefreshDelayUiUnitsFromStoredValues();
             NotifyAnalogueChannelUiContextChanged();
         }
 
@@ -977,6 +1166,18 @@ namespace Cortex.ViewModels
             }
         }
 
+        public CanBitrateOption? SelectedCanBusBitrate
+        {
+            get => GetCanBitrateOption(SettingsDataView.SystemParamsStaticData.CANBusBitrate);
+            set
+            {
+                if (value != null)
+                {
+                    SettingsDataView.SystemParamsStaticData.CANBusBitrate = value.Value;
+                }
+            }
+        }
+
         /// <summary>
         /// Called by the view when the user taps a GPS point on the map.
         /// Populates the inspection grid with the 10 Hz rows associated with that second.
@@ -1138,6 +1339,7 @@ namespace Cortex.ViewModels
             CrcFailed = false;
             isPWMChannel = false;
             GpsOK = false;
+            ResetCellularTestStatus();
 
             ChannelIndices = new ObservableCollection<int>(
             Enumerable.Range(0, SettingsDataView.ChannelsStaticData.Count));
@@ -1207,7 +1409,7 @@ namespace Cortex.ViewModels
                 new ChannelCategoryDisplay { Category = OutputChannel.ChannelCategory.Custom, Label = "Custom" },
             };
 
-            SelectedChannelLabel = ChannelDisplayList.FirstOrDefault();
+            SelectedChannelLabel = ChannelDisplayList.FirstOrDefault() ?? new ChannelLabel(0);
 
             SelectedDigitalInput = SettingsDataView.DigitalInputsStaticData.FirstOrDefault();
 
@@ -1247,6 +1449,14 @@ namespace Cortex.ViewModels
                 Enumerable.Range(0, 0x800)
                     .Select(value => new CanIdOption((ushort)value, $"0x{value:X3}")));
 
+            AvailableCanBitrates = new ObservableCollection<CanBitrateOption>
+            {
+                new CanBitrateOption(Constants.CAN_BITRATE_125K, "125 kbit/s"),
+                new CanBitrateOption(Constants.CAN_BITRATE_250K, "250 kbit/s"),
+                new CanBitrateOption(Constants.CAN_BITRATE_500K, "500 kbit/s"),
+                new CanBitrateOption(Constants.CAN_BITRATE_1M, "1 Mbit/s"),
+            };
+
             TimeZones = new ObservableCollection<TimeZoneDisplay>(BuildTimeZoneOptions());
 
             _appCloser = appCloser;
@@ -1273,6 +1483,8 @@ namespace Cortex.ViewModels
             foreach (var ch in LiveDataView.ChannelsLiveData)
             {
                 var points = new ObservableCollection<ObservablePoint>();
+                int seriesIndex = channelNumber - 1;
+                SKColor seriesColor = GetLiveSeriesColor(seriesIndex);
 
                 var series = new LineSeries<ObservablePoint>
                 {
@@ -1282,17 +1494,28 @@ namespace Cortex.ViewModels
                     GeometryStroke = null,
                     GeometryFill = null,
                     Fill = null,
+                    Stroke = new SolidColorPaint(seriesColor) { StrokeThickness = 1.0f },
                     LineSmoothness = 0,
-                    AnimationsSpeed = TimeSpan.Zero,
+                    AnimationsSpeed = LiveChartSeriesAnimationSpeed,
+                    EasingFunction = EasingFunctions.Lineal,
                 };
 
                 seriesCollection.Add(series);
+                var toggle = new ChartSeriesToggleItem(
+                    GetLiveSeriesDisplayName(ch, seriesIndex),
+                    CreateLiveSeriesBrush(seriesColor),
+                    series,
+                    onVisibilityChanged: _ => RefreshLiveChartAxes());
+                LiveSeriesToggles.Add(toggle);
+                ChannelLiveSeriesToggles.Add(toggle);
 
                 foreach (var srs in seriesCollection)
                 {
                     if (srs is LineSeries<ObservablePoint> lineSeries)
                     {
                         lineSeries.LineSmoothness = 0;
+                        lineSeries.AnimationsSpeed = LiveChartSeriesAnimationSpeed;
+                        lineSeries.EasingFunction = EasingFunctions.Lineal;
                         if (lineSeries.Stroke is SolidColorPaint paint)
                         {
                             paint.StrokeThickness = 1.0f;
@@ -1300,6 +1523,41 @@ namespace Cortex.ViewModels
                     }
                 }
             }
+
+            for (int i = 0; i < LiveDataView.AnalogueInputsLiveData.Count; i++)
+            {
+                var analogueInput = LiveDataView.AnalogueInputsLiveData[i];
+                int seriesIndex = LiveDataView.ChannelsLiveData.Count + i;
+                SKColor seriesColor = GetLiveSeriesColor(seriesIndex);
+
+                var series = new LineSeries<ObservablePoint>
+                {
+                    Values = new ObservableCollection<ObservablePoint>(),
+                    Name = $"ANA{i + 1}",
+                    GeometrySize = 0,
+                    GeometryStroke = null,
+                    GeometryFill = null,
+                    Fill = null,
+                    Stroke = new SolidColorPaint(seriesColor) { StrokeThickness = 1.0f },
+                    LineSmoothness = 0,
+                    AnimationsSpeed = LiveChartSeriesAnimationSpeed,
+                    EasingFunction = EasingFunctions.Lineal,
+                };
+
+                seriesCollection.Add(series);
+                var toggle = new ChartSeriesToggleItem(
+                    GetLiveAnalogueSeriesDisplayName(analogueInput, i),
+                    CreateLiveSeriesBrush(seriesColor),
+                    series,
+                    onVisibilityChanged: _ => RefreshLiveChartAxes());
+                LiveSeriesToggles.Add(toggle);
+                AnalogueLiveSeriesToggles.Add(toggle);
+            }
+
+            UpdateLiveSeriesToggleLabels();
+            ApplySavedLiveChartPreferences();
+            RefreshLiveChartAxes();
+            UpdateLiveCrosshairState();
 
             _uiUpdateTimer = new System.Timers.Timer(50);
             _uiUpdateTimer.Elapsed += OnUIUpdateTimerElapsed;
@@ -1313,6 +1571,16 @@ namespace Cortex.ViewModels
             _logViewportMonitorTimer.Tick += (_, _) => RefreshLogSeriesForViewportIfNeeded();
             _logViewportMonitorTimer.Start();
 
+            _liveHoverClearTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(1400),
+            };
+            _liveHoverClearTimer.Tick += (_, _) =>
+            {
+                _liveHoverClearTimer.Stop();
+                ClearLiveChartSelectionState();
+            };
+
             BuildLogParameterSelections();
             InitializeDefaultLogRange();
             if (LogXAxes.FirstOrDefault() is Axis logXAxis)
@@ -1320,6 +1588,9 @@ namespace Cortex.ViewModels
                 logXAxis.Labeler = value => FormatLogTimestampLabel(value);
             }
             UpdateLogCrosshairState();
+            UpdateApplicationUpdateButtonPresentation();
+            NotifyApplicationUpdateInfoChanged();
+            _ = RefreshApplicationUpdateStateAsync();
             _ = RefreshAvailableLogFilesAsync();
         }
 
@@ -1338,6 +1609,10 @@ namespace Cortex.ViewModels
             {
                 IsSendingConfig = false;
             }
+
+            _configSaveCompletionTcs?.TrySetResult(e.Succeeded);
+            _configSaveCompletionTcs = null;
+            OnPropertyChanged(nameof(CanTestCellularConnection));
         }
 
         public async Task FlashLastUpdatedAsync()
@@ -1347,150 +1622,10 @@ namespace Cortex.ViewModels
             LastUpdatedHighlightOpacity = 0;
         }
 
-        private void UpdateFirmwareButtonPresentation()
-        {
-            if (!IsConnected || !CommsEstablished)
-            {
-                FirmwareUpdateButtonText = "No firmware available";
-                FirmwareUpdateButtonBackground = FirmwareIdleBrush;
-                OnPropertyChanged(nameof(CanOpenFirmwareUpdateDialog));
-                return;
-            }
-
-            if (IsCheckingFirmwareUpdate)
-            {
-                FirmwareUpdateButtonText = "Checking firmware...";
-                FirmwareUpdateButtonBackground = FirmwareIdleBrush;
-                OnPropertyChanged(nameof(CanOpenFirmwareUpdateDialog));
-                return;
-            }
-
-            if (_availableFirmwareRelease != null)
-            {
-                FirmwareUpdateButtonText = $"Update {_availableFirmwareRelease.Version}";
-                FirmwareUpdateButtonBackground = FirmwareAvailableBrush;
-                OnPropertyChanged(nameof(CanOpenFirmwareUpdateDialog));
-                return;
-            }
-
-            FirmwareUpdateButtonText = string.IsNullOrWhiteSpace(ControllerFirmwareVersion)
-                ? "No firmware available"
-                : "Firmware up to date";
-            FirmwareUpdateButtonBackground = FirmwareIdleBrush;
-            OnPropertyChanged(nameof(CanOpenFirmwareUpdateDialog));
-        }
-
-        private void NotifyFirmwareInfoChanged()
-        {
-            OnPropertyChanged(nameof(CurrentFirmwareVersionDisplay));
-            OnPropertyChanged(nameof(HasLatestFirmwareGitHubLink));
-            OnPropertyChanged(nameof(LatestFirmwareGitHubLinkText));
-        }
-
-        private void ResetFirmwareUpdateState()
-        {
-            _firmwareCheckCts?.Cancel();
-            _firmwareCheckCts = null;
-            _latestFirmwareRelease = null;
-            _availableFirmwareRelease = null;
-            IsFirmwareUpdateAvailable = false;
-            IsCheckingFirmwareUpdate = false;
-            ControllerFirmwareVersion = string.Empty;
-            NotifyFirmwareInfoChanged();
-            UpdateFirmwareButtonPresentation();
-        }
-
-        private async Task RefreshFirmwareUpdateStateAsync()
-        {
-            if (!IsConnected || !CommsEstablished || _portService == null)
-            {
-                ResetFirmwareUpdateState();
-                return;
-            }
-
-            _firmwareCheckCts?.Cancel();
-            var checkCts = new CancellationTokenSource();
-            _firmwareCheckCts = checkCts;
-
-            IsCheckingFirmwareUpdate = true;
-            _availableFirmwareRelease = null;
-            IsFirmwareUpdateAvailable = false;
-            UpdateFirmwareButtonPresentation();
-
-            try
-            {
-                string? controllerVersion = await _portService.RequestFirmwareVersionAsync();
-                if (_firmwareCheckCts != checkCts || checkCts.IsCancellationRequested)
-                {
-                    return;
-                }
-
-                ControllerFirmwareVersion = controllerVersion?.Trim() ?? string.Empty;
-                _latestFirmwareRelease = await _firmwareUpdateService.GetLatestReleaseAsync(checkCts.Token);
-                if (_firmwareCheckCts != checkCts || checkCts.IsCancellationRequested)
-                {
-                    return;
-                }
-
-                _availableFirmwareRelease = FirmwareUpdateService.IsVersionNewerThanCurrent(_latestFirmwareRelease?.Version, ControllerFirmwareVersion)
-                    ? _latestFirmwareRelease
-                    : null;
-                IsFirmwareUpdateAvailable = _availableFirmwareRelease != null;
-                NotifyFirmwareInfoChanged();
-                if (_availableFirmwareRelease != null)
-                {
-                    AddLog($"Firmware update available: {_availableFirmwareRelease.Version} (controller {ControllerFirmwareVersion}).");
-                }
-            }
-            catch (OperationCanceledException)
-            {
-            }
-            catch (Exception ex)
-            {
-                _latestFirmwareRelease = null;
-                _availableFirmwareRelease = null;
-                IsFirmwareUpdateAvailable = false;
-                NotifyFirmwareInfoChanged();
-                AddLog($"Firmware update check failed: {ex.Message}");
-            }
-            finally
-            {
-                if (_firmwareCheckCts == checkCts)
-                {
-                    IsCheckingFirmwareUpdate = false;
-                    UpdateFirmwareButtonPresentation();
-                }
-            }
-        }
-
-        public ICartesianAxis[] YAxes { get; set; } = [
-        new Axis
-        {
-            Name = "Current (Amps)",
-            Labeler = value => value.ToString("F2"),
-            SubseparatorsPaint = new SolidColorPaint
-            {
-                Color = new SKColor(50, 50, 50),
-                StrokeThickness = 0.5f,
-            },
-            SubseparatorsCount = 9,
-            ZeroPaint = new SolidColorPaint
-            {
-                Color = new SKColor(200, 200, 200),
-                StrokeThickness = 2,
-            },
-            TicksPaint = new SolidColorPaint
-            {
-                Color = new SKColor(200, 200, 200),
-                StrokeThickness = 1.5f,
-            },
-            SubticksPaint = new SolidColorPaint
-            {
-                Color = new SKColor(50, 50, 50),
-                StrokeThickness = 1
-            },
-        }
-    ];
+        public ICartesianAxis[] YAxes { get; set; } =
+        [
+            CreateLiveAxis("Current (Amps)", AxisPosition.Start, value => value.ToString("F2"))
+        ];
 
         public ICartesianAxis[] XAxes { get; set; } = [
         new Axis
@@ -1512,27 +1647,27 @@ namespace Cortex.ViewModels
             SeparatorsPaint = new SolidColorPaint
             {
                 StrokeThickness = 1,
-                Color = new SKColor(200, 200, 200),
+                Color = new SKColor(120, 120, 120),
             },
             SubseparatorsPaint = new SolidColorPaint
             {
-                Color = new SKColor(50, 50, 50),
+                Color = new SKColor(34, 34, 34),
                 StrokeThickness = 0.5f,
             },
             SubseparatorsCount = 9,
             ZeroPaint = new SolidColorPaint
             {
-                Color = new SKColor(200, 200, 200),
+                Color = new SKColor(150, 150, 150),
                 StrokeThickness = 2,
             },
             TicksPaint = new SolidColorPaint
             {
-                Color = new SKColor(200, 200, 200),
+                Color = new SKColor(140, 140, 140),
                 StrokeThickness = 1.5f,
             },
             SubticksPaint = new SolidColorPaint
             {
-                Color = new SKColor(50, 50, 50),
+                Color = new SKColor(34, 34, 34),
                 StrokeThickness = 1
             },
         }
@@ -1572,6 +1707,10 @@ namespace Cortex.ViewModels
                 OnPropertyChanged(nameof(SelectedSystemConfigCanId));
                 OnPropertyChanged(nameof(SelectedChannelDataCanId));
                 OnPropertyChanged(nameof(SelectedConfigDataCanId));
+                OnPropertyChanged(nameof(SelectedCanBusBitrate));
+                OnPropertyChanged(nameof(CanUseOpenRemoteSettings));
+                OnPropertyChanged(nameof(CanProvisionOpenRemote));
+                OnPropertyChanged(nameof(OpenRemoteAvailabilityMessage));
             }
 
             if (e.PropertyName == nameof(AnalogueInput.ChanType) || e.PropertyName == nameof(AnalogueInput.Units))
@@ -1600,6 +1739,7 @@ namespace Cortex.ViewModels
             }
 
             data.SystemParamsStaticData.PropertyChanged += SettingsModelItem_PropertyChanged;
+            data.CellularParamsStaticData.PropertyChanged += SettingsModelItem_PropertyChanged;
         }
 
         private void DetachSettingsTracking(DataStructures data)
@@ -1622,6 +1762,7 @@ namespace Cortex.ViewModels
             }
 
             data.SystemParamsStaticData.PropertyChanged -= SettingsModelItem_PropertyChanged;
+            data.CellularParamsStaticData.PropertyChanged -= SettingsModelItem_PropertyChanged;
         }
 
         private void ReplaceSettingsData(DataStructures newData)
@@ -1678,35 +1819,19 @@ namespace Cortex.ViewModels
                     },
             };
 
-        private void LoadSerialPorts()
-        {
-            string? currentSelection = SelectedSerialPort;
-            var availablePorts = SerialPort.GetPortNames();
-            SerialPorts = new ObservableCollection<string>(availablePorts);
 
-            if (!string.IsNullOrWhiteSpace(currentSelection) && availablePorts.Contains(currentSelection, StringComparer.Ordinal))
-            {
-                SelectedSerialPort = currentSelection;
-                return;
-            }
-
-            SelectedSerialPort = SerialPorts.FirstOrDefault();
-        }
 
         private void OnExit() => _appCloser.CloseApp();
 
-        private void OnClosing()
+        public void OnWindowClosing()
         {
+            SaveLiveChartPreferences();
             _pollTimer.Stop();
             _commsTimer.Stop();
             Disconnect();
         }
 
-        [RelayCommand]
-        private void RefreshSerialPorts()
-        {
-            LoadSerialPorts();
-        }
+
 
         [RelayCommand]
         private async Task ShowAbout()
@@ -1715,116 +1840,110 @@ namespace Cortex.ViewModels
         }
 
         [RelayCommand]
-        private async Task OpenFirmwareUpdate()
+        private void OpenDetailedLogFolder()
         {
-            if (!CanOpenFirmwareUpdateDialog || _portService == null || _availableFirmwareRelease == null)
-            {
-                return;
-            }
-
-            var release = _availableFirmwareRelease;
-            var dialogViewModel = new FirmwareUpdateWindowViewModel(
-                $"Firmware {release.Version} available",
-                (progress, cancellationToken) => _firmwareUpdateService.InstallReleaseAsync(release, _portService, progress, cancellationToken));
-            await _appCloser.ShowFirmwareUpdateDialogAsync(dialogViewModel);
-
-            if (dialogViewModel.IsUpdateComplete)
-            {
-                ControllerFirmwareVersion = release.Version;
-                _availableFirmwareRelease = null;
-                IsFirmwareUpdateAvailable = false;
-                UpdateFirmwareButtonPresentation();
-                AddLog($"Firmware update installed: {release.Version}");
-            }
-        }
-
-        [RelayCommand]
-        private async Task OpenLocalFirmwareUpdate()
-        {
-            if (!CanOpenLocalFirmwareUpdateDialog || _portService == null)
-            {
-                return;
-            }
-
-            LocalFirmwareUpdateSelection? selection;
             try
             {
-                selection = await _appCloser.BrowseLocalFirmwareUpdateFilesAsync();
+                Directory.CreateDirectory(LoggingService.DetailedLogDirectoryPath);
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = LoggingService.DetailedLogDirectoryPath,
+                    UseShellExecute = true,
+                });
             }
             catch (Exception ex)
             {
-                AddLog(ex.Message);
-                return;
-            }
-
-            if (selection == null)
-            {
-                return;
-            }
-
-            var dialogViewModel = new FirmwareUpdateWindowViewModel(
-                $"Local firmware: {selection.DisplayName}",
-                (progress, cancellationToken) => _firmwareUpdateService.InstallLocalFilesAsync(selection, _portService, progress, cancellationToken));
-            await _appCloser.ShowFirmwareUpdateDialogAsync(dialogViewModel);
-
-            if (dialogViewModel.IsUpdateComplete)
-            {
-                AddLog($"Local firmware update installed from {selection.DisplayName}");
+                LoggingService.AddLog($"Failed to open detailed log folder: {ex.Message}");
             }
         }
 
         [RelayCommand]
-        private async Task OpenLatestFirmwareOnGitHub()
+        private void EnableChannelLiveSeries()
         {
-            string? gitHubUrl = _latestFirmwareRelease?.GitHubUrl;
-            if (string.IsNullOrWhiteSpace(gitHubUrl))
-            {
-                return;
-            }
-
-            try
-            {
-                await _appCloser.OpenUrlAsync(gitHubUrl);
-            }
-            catch (Exception ex)
-            {
-                AddLog($"Couldn't open firmware link: {ex.Message}");
-            }
+            SetChannelLiveSeriesEnabled(true);
         }
 
         [RelayCommand]
-        private void Connect(string? selectedPort)
+        private void DisableChannelLiveSeries()
         {
-            string? portName = string.IsNullOrWhiteSpace(selectedPort)
-                ? SelectedSerialPort
-                : selectedPort;
-
-            if (string.IsNullOrWhiteSpace(portName))
-            {
-                AddLog("Select a serial port before connecting.");
-                return;
-            }
-
-            _portService = new SerialPortService(portName);
-            _portService.DataUpdated += _portService_DataUpdated;
-            _portService.ConfigurationSaved += ConfigSaved;
-            _portService.ConfigurationSaveCompleted += ConfigSaveCompleted;
-            refreshStaticData = true;
-            IsConnected = _portService.Open();
-
-            if (IsConnected)
-            {
-                AddLog("Connecting to PDM on " + portName + "...");
-                _portService.InitComms();
-                return;
-            }
-
-            AddLog(_portService.LastError ?? $"Failed to open serial port {portName}.");
-            _portService.DataUpdated -= _portService_DataUpdated;
-            _portService.ConfigurationSaved -= ConfigSaved;
-            _portService.ConfigurationSaveCompleted -= ConfigSaveCompleted;
-            _portService = null;
+            SetChannelLiveSeriesEnabled(false);
         }
+
+        [RelayCommand]
+        private void EnableAnalogueLiveSeries()
+        {
+            SetAnalogueLiveSeriesEnabled(true);
+        }
+
+        [RelayCommand]
+        private void DisableAnalogueLiveSeries()
+        {
+            SetAnalogueLiveSeriesEnabled(false);
+        }
+
+        [RelayCommand]
+        private void ToggleLiveChartPause()
+        {
+            IsLiveChartPaused = !IsLiveChartPaused;
+        }
+
+        [RelayCommand]
+        private void HandleLiveHoveredPointsChanged(object? parameter)
+        {
+            if (!TryGetChartPoints(parameter, out List<ChartPoint> points))
+            {
+                ScheduleLiveChartSelectionClear();
+                return;
+            }
+
+            _liveHoverClearTimer.Stop();
+            UpdateLiveChartSelection(points, pinSelection: false);
+        }
+
+        [RelayCommand]
+        private void HandleLiveChartPointPointerDown(object? parameter)
+        {
+            if (!TryGetChartPoints(parameter, out List<ChartPoint> points))
+            {
+                return;
+            }
+
+            UpdateLiveChartSelection(points, pinSelection: true);
+        }
+
+        [RelayCommand]
+        private void ToggleLiveChartPin()
+        {
+            if (!IsLiveChartSelectionPinned)
+            {
+                if (_lastHoveredLiveChartPoints.Count > 0)
+                {
+                    IsLiveChartSelectionPinned = true;
+                    OnPropertyChanged(nameof(LiveChartPinButtonText));
+                }
+
+                return;
+            }
+
+            IsLiveChartSelectionPinned = false;
+            OnPropertyChanged(nameof(LiveChartPinButtonText));
+
+            LiveChartHoverSummary = _lastHoveredLiveChartPoints.Count > 0
+                ? BuildLiveChartHoverSummary(_lastHoveredLiveChartPoints)
+                : "Hover the chart to inspect live values. Click a point to pin the readout.";
+        }
+
+        [RelayCommand]
+        private void ClearLiveChartSelection()
+        {
+            _lastHoveredLiveChartPoints.Clear();
+            IsLiveChartSelectionPinned = false;
+            LiveChartHoverSummary = "Hover the chart to inspect live values. Click a point to pin the readout.";
+            OnPropertyChanged(nameof(HasLiveChartSelection));
+            OnPropertyChanged(nameof(LiveChartPinButtonText));
+        }
+
+
 
         [RelayCommand]
         private void SendConfig()
@@ -1836,10 +1955,559 @@ namespace Cortex.ViewModels
 
             if (IsConnected && _portService != null)
             {
+                PrepareCellularSettingsForSave();
                 IsSendingConfig = true;
+                _portService.UpdateSettingsData(SettingsDataView);
                 _controllerConfigBaseline = DeepCopyDataStructures(SettingsDataView);
                 _portService.StartSendConfig();
             }
+        }
+
+        private void PrepareCellularSettingsForSave()
+        {
+            SettingsDataView.CellularParamsStaticData.ConfigVersion = Constants.CELLULAR_CONFIG_VERSION;
+            SettingsDataView.CellularParamsStaticData.EnsurePublishTopicFromOpenRemoteFields();
+        }
+
+        private Task<bool> SavePendingConfigForCellularTestAsync()
+        {
+            if (_portService == null)
+            {
+                return Task.FromResult(true);
+            }
+
+            PrepareCellularSettingsForSave();
+            return Task.FromResult(true);
+        }
+
+        [RelayCommand]
+        private async Task TestCellularConnectionAsync()
+        {
+            bool completed = await RunCellularConnectionTestAsync(isAutomaticRun: false, maxAttempts: 18);
+            if (completed || !LooksLikeConnectionTestFailure(CellularTestStatusMessage))
+            {
+                return;
+            }
+
+            SetCellularTestStatus(
+                "The telemetry connection is still settling. Retrying automatically...",
+                [.. CreatePendingCellularTestItems(includeSaveHint: false)]);
+            await Task.Delay(ManualCellularRetryDelayMs);
+            await RunCellularConnectionTestAsync(isAutomaticRun: false, maxAttempts: 18);
+        }
+
+        private async Task<bool> RunCellularConnectionTestAsync(bool isAutomaticRun, int maxAttempts)
+        {
+            if (!CanTestCellularConnection || _portService == null)
+            {
+                AddLog("Cellular connection test unavailable. Check connection and controller comms.");
+                return false;
+            }
+
+            IsTestingCellularConnection = true;
+
+            try
+            {
+                if (!await SavePendingConfigForCellularTestAsync())
+                {
+                    return false;
+                }
+
+                SetCellularTestStatus(
+                    "Checking connection...",
+                    [.. CreatePendingCellularTestItems(includeSaveHint: !isAutomaticRun)]);
+
+                string? lastDiagnostic = null;
+                for (int attempt = 0; attempt < maxAttempts; attempt++)
+                {
+                    CellularParameters? testSettings = attempt == 0 ? SettingsDataView.CellularParamsStaticData : null;
+                    string? diagnostic = await _portService.RequestCellularTestAsync(testSettings, 20000);
+                    if (string.IsNullOrWhiteSpace(diagnostic))
+                    {
+                        SetCellularTestStatus(
+                            "The PDM did not respond. Check the connection and try again.",
+                            new CellularTestStatusItem("Test", "No response", ""));
+                        AddLog(CellularTestStatusMessage);
+                        return false;
+                    }
+
+                    lastDiagnostic = diagnostic;
+                    Debug.WriteLine("Cellular test result:\n" + diagnostic);
+                    UpdateCellularTestStatus(diagnostic, includeSaveHint: !isAutomaticRun);
+                    if (diagnostic.Contains("Internet: Failed", StringComparison.OrdinalIgnoreCase) ||
+                        diagnostic.Contains("Settings: Blocked", StringComparison.OrdinalIgnoreCase) ||
+                        diagnostic.Contains("Data: Failed", StringComparison.OrdinalIgnoreCase) ||
+                        diagnostic.Contains("Data: Skipped", StringComparison.OrdinalIgnoreCase) ||
+                        diagnostic.Contains("MQTT: Blocked", StringComparison.OrdinalIgnoreCase) ||
+                        diagnostic.Contains("MQTT: Connected", StringComparison.OrdinalIgnoreCase) ||
+                        diagnostic.Contains("MQTT: Recovering", StringComparison.OrdinalIgnoreCase) ||
+                        diagnostic.Contains("MQTT: Failed", StringComparison.OrdinalIgnoreCase) ||
+                        diagnostic.Contains("Telemetry: OK", StringComparison.OrdinalIgnoreCase) ||
+                        diagnostic.Contains("Telemetry: Warning", StringComparison.OrdinalIgnoreCase) ||
+                        diagnostic.Contains("Health: OK", StringComparison.OrdinalIgnoreCase) ||
+                        diagnostic.Contains("Health: Failed", StringComparison.OrdinalIgnoreCase) ||
+                        diagnostic.Contains("Health: Warning", StringComparison.OrdinalIgnoreCase))
+                    {
+                        AddLog(CellularTestStatusMessage);
+                        return true;
+                    }
+
+                    await Task.Delay(2500);
+                }
+
+                List<CellularTestStatusItem> timeoutItems = [.. CellularTestStatusItems];
+                timeoutItems.Add(new CellularTestStatusItem("Test", "Timeout", "The PDM did not report a final internet result before Cortex stopped waiting."));
+                SetCellularTestStatus(
+                    isAutomaticRun
+                        ? "Automatic connection test is still waiting for telemetry updates. You can run a manual test when ready."
+                        : "The connection test took too long. Try again in a moment.",
+                    [.. timeoutItems]);
+                Debug.WriteLine("Cellular test timed out before the data connection became ready." +
+                       (string.IsNullOrWhiteSpace(lastDiagnostic) ? string.Empty : "\nLast PDM cellular diagnostic:\n" + lastDiagnostic));
+                AddLog(CellularTestStatusMessage);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Cellular test failed: {ex}");
+                SetCellularTestStatus(
+                    "Connection test failed. Check the PDM connection and try again.",
+                    new CellularTestStatusItem("Test", "Problem", ""));
+                AddLog(CellularTestStatusMessage);
+                return false;
+            }
+            finally
+            {
+                IsTestingCellularConnection = false;
+            }
+        }
+
+        private void ScheduleCellularHealthPoll(bool immediate)
+        {
+            _nextCellularHealthPollUtc = immediate
+                ? DateTime.UtcNow
+                : DateTime.UtcNow.AddMilliseconds(CellularHealthPollIntervalMs);
+        }
+
+        private async Task PollCellularHealthStatusAsync()
+        {
+            if (_portService == null || !IsConnected || !CommsEstablished)
+            {
+                SetCellularConnectionHealthStatus("Offline", shouldLog: true);
+                return;
+            }
+
+            if (!IsConnectedPdmRegistered)
+            {
+                SetCellularConnectionHealthStatus("Offline", shouldLog: true);
+                return;
+            }
+
+            if (IsSendingConfig || IsOpenRemoteProvisioningInProgress)
+            {
+                SetCellularConnectionHealthStatus("Checking", shouldLog: true);
+                return;
+            }
+
+            if (Interlocked.Exchange(ref _isCellularHealthPollInProgress, 1) == 1)
+            {
+                return;
+            }
+
+            try
+            {
+                CellularParameters? testSettings = SettingsDataView.CellularParamsStaticData;
+                string? diagnostic = await _portService.RequestCellularTestAsync(testSettings, 12000);
+                string status = ClassifyCellularConnectionHealthStatus(diagnostic, out string? reason);
+
+                if (status.Equals("Needs attention", StringComparison.OrdinalIgnoreCase) &&
+                    DateTime.UtcNow < _suppressCellularNeedsAttentionUntilUtc)
+                {
+                    status = "Checking";
+                    reason = null;
+                }
+
+                SetCellularConnectionHealthStatus(status, shouldLog: true, reason: reason);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Cellular health poll failed: {ex}");
+                SetCellularConnectionHealthStatus("Needs attention", shouldLog: true, reason: "status check failed");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _isCellularHealthPollInProgress, 0);
+            }
+        }
+
+        private void SetCellularConnectionHealthStatus(string status, bool shouldLog, string? reason = null)
+        {
+            bool changed = !string.Equals(CellularConnectionHealthStatus, status, StringComparison.OrdinalIgnoreCase);
+            CellularConnectionHealthStatus = status;
+
+            if (!shouldLog)
+            {
+                return;
+            }
+
+            if (changed || !string.Equals(_lastLoggedCellularHealthStatus, status, StringComparison.OrdinalIgnoreCase))
+            {
+                _lastLoggedCellularHealthStatus = status;
+                if (status.Equals("Needs attention", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(reason))
+                {
+                    AddLog($"Connectivity status: {status} ({reason}).");
+                    return;
+                }
+
+                AddLog($"Connectivity status: {status}.");
+            }
+        }
+
+        private static string ClassifyCellularConnectionHealthStatus(string? diagnostic, out string? reason)
+        {
+            reason = null;
+
+            if (string.IsNullOrWhiteSpace(diagnostic))
+            {
+                reason = "no response from modem test";
+                return "Offline";
+            }
+
+            if (diagnostic.Contains("Telemetry: OK", StringComparison.OrdinalIgnoreCase) &&
+                diagnostic.Contains("Health: OK", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Healthy";
+            }
+
+            foreach (string line in diagnostic.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (line.Contains("Failed", StringComparison.OrdinalIgnoreCase) ||
+                    line.Contains("Problem", StringComparison.OrdinalIgnoreCase) ||
+                    line.Contains("Blocked", StringComparison.OrdinalIgnoreCase) ||
+                    line.Contains("Skipped", StringComparison.OrdinalIgnoreCase) ||
+                    line.Contains("No response", StringComparison.OrdinalIgnoreCase) ||
+                    line.Contains("Timeout", StringComparison.OrdinalIgnoreCase) ||
+                    line.Contains("Needs setup", StringComparison.OrdinalIgnoreCase) ||
+                    line.Contains("Legacy", StringComparison.OrdinalIgnoreCase) ||
+                    line.Contains("Update needed", StringComparison.OrdinalIgnoreCase))
+                {
+                    reason = line.Trim();
+                    return "Needs attention";
+                }
+            }
+
+            return "Checking";
+        }
+
+        private static List<CellularTestStatusItem> CreatePendingCellularTestItems(bool includeSaveHint)
+        {
+            return
+            [
+                new CellularTestStatusItem("Settings", "Pending", includeSaveHint ? "Save settings, then run the test." : "Settings synced to the PDM."),
+                new CellularTestStatusItem("Mobile data", "Pending", string.Empty),
+                new CellularTestStatusItem("Internet", "Pending", string.Empty),
+                new CellularTestStatusItem(TelemetryServiceStage, "Pending", string.Empty),
+                new CellularTestStatusItem("Health", "Pending", string.Empty)
+            ];
+        }
+
+        private void ResetCellularTestStatus()
+        {
+            SetCellularTestStatus(
+                DefaultCellularTestStatusMessage,
+                [.. CreatePendingCellularTestItems(includeSaveHint: true)]);
+        }
+
+        private void SetCellularTestStatus(string summary, params CellularTestStatusItem[] items)
+        {
+            CellularTestStatusMessage = summary;
+            CellularTestStatusItems.Clear();
+
+            foreach (CellularTestStatusItem item in items)
+            {
+                CellularTestStatusItems.Add(item);
+            }
+
+            UpdateCellularTestProgress(items);
+        }
+
+        private void UpdateCellularTestProgress(IEnumerable<CellularTestStatusItem> items)
+        {
+            if (!IsCellularTestInProgress)
+            {
+                CellularTestProgressValue = 0;
+                return;
+            }
+
+            int completed = items.Count(item =>
+                CellularTestStageOrder.Contains(item.Stage, StringComparer.OrdinalIgnoreCase) &&
+                !item.Status.Equals("Pending", StringComparison.OrdinalIgnoreCase) &&
+                !item.Status.Equals("Checking", StringComparison.OrdinalIgnoreCase) &&
+                !item.Status.Equals("Retrying", StringComparison.OrdinalIgnoreCase));
+
+            CellularTestProgressValue = Math.Clamp(
+                (double)completed / CellularTestStageOrder.Length,
+                0,
+                1);
+        }
+
+        private void UpdateCellularTestStatus(string diagnostic, bool includeSaveHint)
+        {
+            if (diagnostic.Contains(LegacyCellularEnableDataMessage, StringComparison.OrdinalIgnoreCase))
+            {
+                SetCellularTestStatus(
+                    "The PDM is reporting an old cellular settings format.",
+                    new CellularTestStatusItem("Firmware", "Update needed", "Flash the latest PDM firmware so Mobile data becomes the only connection enable setting."),
+                    new CellularTestStatusItem("Settings", "Legacy", "The controller still reports the removed Enable connection setting."));
+                return;
+            }
+
+            List<CellularTestStatusItem> items = CreatePendingCellularTestItems(includeSaveHint);
+            bool hasParsedLine = false;
+
+            foreach (string line in diagnostic.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+            {
+                int colonIndex = line.IndexOf(':');
+                if (colonIndex <= 0 || colonIndex >= line.Length - 1)
+                {
+                    continue;
+                }
+
+                hasParsedLine = true;
+                string stage = line[..colonIndex].Trim();
+                string remainder = line[(colonIndex + 1)..].Trim();
+                string status = remainder;
+                string message = string.Empty;
+
+                if (stage.Equals("SIM", StringComparison.OrdinalIgnoreCase) ||
+                    stage.Equals("Storage", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                int separatorIndex = remainder.IndexOf(" - ", StringComparison.Ordinal);
+                if (separatorIndex >= 0)
+                {
+                    status = remainder[..separatorIndex].Trim();
+                    message = remainder[(separatorIndex + 3)..].Trim();
+                }
+
+                string displayStage = SimplifyCellularTestStage(stage);
+                string displayStatus = SimplifyCellularTestStatus(status);
+                message = SimplifyCellularTestMessage(displayStage, displayStatus, message);
+
+                int existingIndex = items.FindIndex(item => item.Stage.Equals(displayStage, StringComparison.OrdinalIgnoreCase));
+                if (existingIndex >= 0)
+                {
+                    items[existingIndex] = new CellularTestStatusItem(displayStage, displayStatus, message);
+                }
+                else
+                {
+                    items.Add(new CellularTestStatusItem(displayStage, displayStatus, message));
+                }
+            }
+
+            if (!hasParsedLine)
+            {
+                SetCellularTestStatus(
+                    "The PDM returned an unrecognised cellular test response.",
+                    new CellularTestStatusItem("Response", "Raw", diagnostic));
+                return;
+            }
+
+            ReconcileCellularTestStatusItems(items);
+            SetCellularTestStatus(BuildCellularTestSummary(items), [.. items]);
+        }
+
+        private static void ReconcileCellularTestStatusItems(List<CellularTestStatusItem> items)
+        {
+            int openRemoteIndex = items.FindIndex(item => item.Stage.Equals(TelemetryServiceStage, StringComparison.OrdinalIgnoreCase));
+            if (openRemoteIndex < 0)
+            {
+                return;
+            }
+
+            CellularTestStatusItem? telemetry = items.FirstOrDefault(item => item.Stage.Equals("Telemetry", StringComparison.OrdinalIgnoreCase));
+            CellularTestStatusItem? health = items.FirstOrDefault(item => item.Stage.Equals("Health", StringComparison.OrdinalIgnoreCase));
+            bool telemetryIsReady = telemetry?.Status.Equals("Ready", StringComparison.OrdinalIgnoreCase) == true;
+            bool healthHasProblem = health?.Status.Equals("Problem", StringComparison.OrdinalIgnoreCase) == true;
+
+            string currentOpenRemoteStatus = items[openRemoteIndex].Status;
+            bool openRemoteIsInProgress =
+                currentOpenRemoteStatus.Equals("Retrying", StringComparison.OrdinalIgnoreCase) ||
+                currentOpenRemoteStatus.Equals("Checking", StringComparison.OrdinalIgnoreCase);
+
+            if (openRemoteIsInProgress && telemetryIsReady && !healthHasProblem)
+            {
+                items[openRemoteIndex] = new CellularTestStatusItem(TelemetryServiceStage, "Ready", string.Empty);
+            }
+        }
+
+        private static string SimplifyCellularTestMessage(string stage, string status, string message)
+        {
+            if (status.Equals("Ready", StringComparison.OrdinalIgnoreCase))
+            {
+                return string.Empty;
+            }
+
+            if (stage.Equals(TelemetryServiceStage, StringComparison.OrdinalIgnoreCase) && status.Equals("Retrying", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Trying again automatically.";
+            }
+
+            if (stage.Equals("Settings", StringComparison.OrdinalIgnoreCase) && status.Equals("Needs setup", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Enable Mobile data and check APN settings.";
+            }
+
+            if (stage.Equals("Internet", StringComparison.OrdinalIgnoreCase) && status.Equals("Problem", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Check signal, SIM data, or APN settings.";
+            }
+
+            if (stage.Equals(TelemetryServiceStage, StringComparison.OrdinalIgnoreCase) && status.Equals("Problem", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Check the telemetry service settings.";
+            }
+
+            if (stage.Equals("Telemetry", StringComparison.OrdinalIgnoreCase) && status.Equals("Problem", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Telemetry has not updated yet.";
+            }
+
+            return message;
+        }
+
+        private static string SimplifyCellularTestStage(string stage)
+        {
+            if (stage.Equals("Data", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Mobile data";
+            }
+
+            if (stage.Equals("MQTT", StringComparison.OrdinalIgnoreCase))
+            {
+                return TelemetryServiceStage;
+            }
+
+            return stage;
+        }
+
+        private static string SimplifyCellularTestStatus(string status)
+        {
+            if (status.Equals("OK", StringComparison.OrdinalIgnoreCase) ||
+                status.Equals("Connected", StringComparison.OrdinalIgnoreCase) ||
+                status.Equals("Fix", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Ready";
+            }
+
+            if (status.Equals("Recovering", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Retrying";
+            }
+
+            if (status.Equals("Blocked", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Needs setup";
+            }
+
+            if (status.Equals("Failed", StringComparison.OrdinalIgnoreCase) ||
+                status.Equals("Skipped", StringComparison.OrdinalIgnoreCase) ||
+                status.Equals("Warning", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Problem";
+            }
+
+            if (status.Equals("Timeout", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Timed out";
+            }
+
+            if (status.Equals("Sent", StringComparison.OrdinalIgnoreCase) ||
+                status.Equals("Testing", StringComparison.OrdinalIgnoreCase) ||
+                status.Equals("Connecting", StringComparison.OrdinalIgnoreCase) ||
+                status.Equals("Queued", StringComparison.OrdinalIgnoreCase) ||
+                status.Equals("Waiting", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Checking";
+            }
+
+            return status;
+        }
+
+        private static string BuildCellularTestSummary(IReadOnlyList<CellularTestStatusItem> items)
+        {
+            CellularTestStatusItem? settings = items.FirstOrDefault(item => item.Stage.Equals("Settings", StringComparison.OrdinalIgnoreCase));
+            CellularTestStatusItem? internet = items.FirstOrDefault(item => item.Stage.Equals("Internet", StringComparison.OrdinalIgnoreCase));
+            CellularTestStatusItem? mqtt = items.FirstOrDefault(item => item.Stage.Equals(TelemetryServiceStage, StringComparison.OrdinalIgnoreCase));
+            CellularTestStatusItem? health = items.FirstOrDefault(item => item.Stage.Equals("Health", StringComparison.OrdinalIgnoreCase));
+
+            if (settings?.Status.Equals("Needs setup", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                return string.IsNullOrWhiteSpace(settings.Message)
+                    ? "Settings need attention before the connection can start."
+                    : settings.Message;
+            }
+
+            if (mqtt?.Status.Equals("Needs setup", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                return string.IsNullOrWhiteSpace(mqtt.Message)
+                    ? "Telemetry service settings need attention before publishing can start."
+                    : mqtt.Message;
+            }
+
+            if (mqtt?.Status.Equals("Problem", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                return string.IsNullOrWhiteSpace(mqtt.Message)
+                    ? "The telemetry service needs attention."
+                    : mqtt.Message;
+            }
+
+            if (health?.Status.Equals("Problem", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                return string.IsNullOrWhiteSpace(health.Message)
+                    ? "Remote telemetry needs attention."
+                    : health.Message;
+            }
+
+            if (mqtt?.Status.Equals("Retrying", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                return string.IsNullOrWhiteSpace(mqtt.Message)
+                    ? "The telemetry service is trying again."
+                    : mqtt.Message;
+            }
+
+            if (mqtt?.Status.Equals("Ready", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                bool healthReady = health?.Status.Equals("Ready", StringComparison.OrdinalIgnoreCase) == true;
+                return healthReady
+                    ? "Connection test passed. Telemetry is live."
+                    : (string.IsNullOrWhiteSpace(mqtt.Message) ? "The telemetry service is ready." : mqtt.Message);
+            }
+
+            if (internet?.Status.Equals("Ready", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                return "Internet is ready. Checking the telemetry service...";
+            }
+
+            if (internet?.Status.Equals("Problem", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                return "Internet access needs attention.";
+            }
+
+            if (items.Any(item => item.Status.Equals("Checking", StringComparison.OrdinalIgnoreCase) ||
+                                  item.Status.Equals("Retrying", StringComparison.OrdinalIgnoreCase)))
+            {
+                return "Checking connection...";
+            }
+
+            if (items.Any(item => item.Status.Equals("Pending", StringComparison.OrdinalIgnoreCase)))
+            {
+                return "Waiting for test updates from the PDM...";
+            }
+
+            return "Review the connection test details below.";
         }
 
         [RelayCommand]
@@ -1947,11 +2615,17 @@ namespace Cortex.ViewModels
             }
         }
 
+        private void RefreshInternetAvailability()
+        {
+            IsInternetAvailable = NetworkInterface.GetIsNetworkAvailable();
+        }
+
         [RelayCommand]
         private async Task SaveConfigFile()
         {
             try
             {
+                PrepareCellularSettingsForSave();
                 string content = ConfigFileSerializer.SerializeSettings(SettingsDataView);
                 bool saved = await _appCloser.SavePdmFileContentAsync(content);
 
@@ -2116,36 +2790,48 @@ namespace Cortex.ViewModels
             AddLog("Restoring parameters from controller...");
         }
 
-        private void _portService_DataUpdated(DataStructures obj)
-        {
-            lock (_pendingDataLock)
-            {
-                _pendingLiveData = obj;
-                _hasPendingData = true;
-            }
-        }
 
-        private void OnUIUpdateTimerElapsed(object sender, ElapsedEventArgs e)
+
+        private void OnUIUpdateTimerElapsed(object? sender, ElapsedEventArgs e)
         {
             if (_pauseLiveUiUpdates)
             {
                 return;
             }
 
-            DataStructures dataToProcess;
+            DataStructures? dataToProcess = null;
+            bool hasPendingData;
 
             lock (_pendingDataLock)
             {
-                if (!_hasPendingData) return;
+                hasPendingData = _hasPendingData;
+                if (hasPendingData)
+                {
+                    dataToProcess = _pendingLiveData;
+                    _hasPendingData = false;
+                }
+            }
 
-                dataToProcess = _pendingLiveData;
-                _hasPendingData = false;
+            if (!hasPendingData && (!_hasReceivedLiveData || !IsConnected || !CommsEstablished))
+            {
+                return;
             }
 
             // Now marshal to UI thread ONCE per timer tick
             Avalonia.Threading.Dispatcher.UIThread.Post(() =>
             {
-                UpdateUIWithData(dataToProcess);
+                if (hasPendingData && dataToProcess != null)
+                {
+                    UpdateUIWithData(dataToProcess);
+                    return;
+                }
+
+                if (IsLiveChartPaused)
+                {
+                    return;
+                }
+
+                UpdateCharts(LiveDataView, appendNewSamples: false);
             });
         }
 
@@ -2154,8 +2840,13 @@ namespace Cortex.ViewModels
             // Update live data in place
             UpdateLiveDataInPlace(data);
 
+            CaptureLiveChartHistory(LiveDataView);
+
             // Update charts
-            UpdateCharts(LiveDataView);  // Use existing LiveDataView
+            if (!IsLiveChartPaused)
+            {
+                UpdateCharts(LiveDataView, appendNewSamples: true);  // Use existing LiveDataView
+            }
 
             // Update error flags
             UpdateErrorFlags();
@@ -2169,8 +2860,10 @@ namespace Cortex.ViewModels
                 {
                     string? preservedTimeZoneId = SettingsDataView.SystemParamsStaticData.TimeZoneId;
                     byte[] preservedTimeZoneRule = SettingsDataView.SystemParamsStaticData.TimeZoneRule?.ToArray() ?? Array.Empty<byte>();
+                    CellularParameters preservedCellular = DeepCopyDataStructures(SettingsDataView).CellularParamsStaticData;
 
                     ReplaceSettingsData(DeepCopyDataStructures(data));
+                    SettingsDataView.CellularParamsStaticData.PreserveOpenRemoteFieldsFrom(preservedCellular);
                     if (!HasTimeZoneRuleBlob(SettingsDataView.SystemParamsStaticData.TimeZoneRule)
                         && string.IsNullOrWhiteSpace(SettingsDataView.SystemParamsStaticData.TimeZoneId)
                         && !string.IsNullOrWhiteSpace(preservedTimeZoneId))
@@ -2191,6 +2884,8 @@ namespace Cortex.ViewModels
                     OnSelectedChannelIndexChanged(SelectedChannelIndex, SelectedChannelIndex);
                     SelectedAnalogueInput = SettingsDataView.AnalogueInputsStaticData.FirstOrDefault();
                     SelectedDigitalInput = SettingsDataView.DigitalInputsStaticData.FirstOrDefault();
+                    RefreshInternetAvailability();
+                    _ = RefreshConnectedPdmStatusAsync();
                 }
                 finally
                 {
@@ -2297,16 +2992,6 @@ namespace Cortex.ViewModels
                     target.Name = (char[])source.Name.Clone();
                 }
 
-                if (target.RunOn != source.RunOn)
-                {
-                    target.RunOn = source.RunOn;
-                }
-
-                if (target.RunOnTime != source.RunOnTime)
-                {
-                    target.RunOnTime = source.RunOnTime;
-                }
-
                 if (target.PWMSetDuty != source.PWMSetDuty)
                 {
                     target.PWMSetDuty = source.PWMSetDuty;
@@ -2376,10 +3061,38 @@ namespace Cortex.ViewModels
                 {
                     target.IntermittentOffTime = source.IntermittentOffTime;
                 }
+
+                if (target.DelayedOn != source.DelayedOn)
+                {
+                    target.DelayedOn = source.DelayedOn;
+                }
+
+                if (target.DelayedOnTime != source.DelayedOnTime)
+                {
+                    target.DelayedOnTime = source.DelayedOnTime;
+                }
+
+                if (target.DelayedOff != source.DelayedOff)
+                {
+                    target.DelayedOff = source.DelayedOff;
+                }
+
+                if (target.DelayedOffTime != source.DelayedOffTime)
+                {
+                    target.DelayedOffTime = source.DelayedOffTime;
+                }
+
+                if (target.DelayedOffTrigger != source.DelayedOffTrigger)
+                {
+                    target.DelayedOffTrigger = source.DelayedOffTrigger;
+                }
+
+                target.RefreshDelayUiUnitsFromStoredValues();
             }
 
             // Update analogue inputs
             int analogueCount = Math.Min(newData.AnalogueInputsLiveData.Count, LiveDataView.AnalogueInputsLiveData.Count);
+            bool liveAnalogueMetadataChanged = false;
             for (int i = 0; i < analogueCount; i++)
             {
                 var target = LiveDataView.AnalogueInputsLiveData[i];
@@ -2388,11 +3101,13 @@ namespace Cortex.ViewModels
                 if (target.ChanType != source.ChanType)
                 {
                     target.ChanType = source.ChanType;
+                    liveAnalogueMetadataChanged = true;
                 }
 
                 if (target.Units != source.Units)
                 {
                     target.Units = source.Units;
+                    liveAnalogueMetadataChanged = true;
                 }
 
                 if (target.CalibrationPoints != source.CalibrationPoints)
@@ -2462,6 +3177,12 @@ namespace Cortex.ViewModels
             }
 
             UpdateChannelAnalogueVoltageDisplayValues();
+            if (liveAnalogueMetadataChanged)
+            {
+                _lastLiveChartAxisSignature = string.Empty;
+                UpdateLiveSeriesToggleLabels();
+                RefreshLiveChartAxes();
+            }
 
             // Update digital inputs
             int digitalCount = Math.Min(newData.DigitalInputsStaticData.Count, LiveDataView.DigitalInputsLiveData.Count);
@@ -2581,9 +3302,6 @@ namespace Cortex.ViewModels
             }
 
         }
-
-        private double _lastUpdatedHighlightOpacity;
-
         public double LastUpdatedHighlightOpacity
         {
             get => _lastUpdatedHighlightOpacity;
@@ -2599,13 +3317,780 @@ namespace Cortex.ViewModels
 
 
         private const int MAX_CHART_POINTS = 2000;
+        private const int LiveChartHistoryRetentionSeconds = 300;
+        private const int LiveChartHistoryMaxPoints = 6000;
+        private static readonly TimeSpan LiveChartSeriesAnimationSpeed = TimeSpan.FromMilliseconds(90);
         private const double LiveChartYAxisHeadroomAmps = 1.0;
+        private const int LiveChartAnalogueAxisSpacing = 6;
+        private static readonly string LiveChartPreferencesPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Cortex",
+            "live-chart-preferences.json");
 
-        private void UpdateCharts(DataStructures data)
+        private static SKColor GetLiveSeriesColor(int index) => LiveSeriesPalette[index % LiveSeriesPalette.Length];
+
+        private static IBrush CreateLiveSeriesBrush(SKColor color) =>
+            new SolidColorBrush(Color.FromArgb(color.Alpha, color.Red, color.Green, color.Blue));
+
+        private sealed class LiveChartPreferences
+        {
+            public List<bool>? ChannelSeriesEnabled { get; set; }
+
+            public List<bool>? AnalogueSeriesEnabled { get; set; }
+        }
+
+        private bool HasAnyVisibleCurrentSeries => ChannelLiveSeriesToggles.Any(toggle => toggle.IsEnabled);
+
+        private bool HasVisibleSeriesUsingUnit(AnalogueInput.AnalogueUnits units)
+        {
+            int analogueCount = Math.Min(LiveDataView.AnalogueInputsLiveData.Count, AnalogueLiveSeriesToggles.Count);
+            for (int i = 0; i < analogueCount; i++)
+            {
+                if (!AnalogueLiveSeriesToggles[i].IsEnabled)
+                {
+                    continue;
+                }
+
+                if (GetLiveAnalogueSeriesUnit(LiveDataView.AnalogueInputsLiveData[i]) == units)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void ApplySavedLiveChartPreferences()
+        {
+            LiveChartPreferences? preferences = LoadLiveChartPreferences();
+            if (preferences == null)
+            {
+                return;
+            }
+
+            _suppressLiveChartAxisRefresh = true;
+            try
+            {
+                ApplyToggleStates(ChannelLiveSeriesToggles, preferences.ChannelSeriesEnabled);
+                ApplyToggleStates(AnalogueLiveSeriesToggles, preferences.AnalogueSeriesEnabled);
+            }
+            finally
+            {
+                _suppressLiveChartAxisRefresh = false;
+            }
+        }
+
+        private static void ApplyToggleStates(IReadOnlyList<ChartSeriesToggleItem> toggles, IReadOnlyList<bool>? states)
+        {
+            if (states == null)
+            {
+                return;
+            }
+
+            int count = Math.Min(toggles.Count, states.Count);
+            for (int i = 0; i < count; i++)
+            {
+                toggles[i].IsEnabled = states[i];
+            }
+        }
+
+        private static LiveChartPreferences? LoadLiveChartPreferences()
+        {
+            try
+            {
+                if (!File.Exists(LiveChartPreferencesPath))
+                {
+                    return null;
+                }
+
+                string json = File.ReadAllText(LiveChartPreferencesPath);
+                return JsonSerializer.Deserialize<LiveChartPreferences>(json);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private void SaveLiveChartPreferences()
+        {
+            try
+            {
+                string? directory = Path.GetDirectoryName(LiveChartPreferencesPath);
+                if (!string.IsNullOrWhiteSpace(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                var preferences = new LiveChartPreferences
+                {
+                    ChannelSeriesEnabled = ChannelLiveSeriesToggles.Select(toggle => toggle.IsEnabled).ToList(),
+                    AnalogueSeriesEnabled = AnalogueLiveSeriesToggles.Select(toggle => toggle.IsEnabled).ToList(),
+                };
+
+                string json = JsonSerializer.Serialize(preferences, new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(LiveChartPreferencesPath, json);
+            }
+            catch
+            {
+                // Ignore local preference persistence failures.
+            }
+        }
+
+        private static Axis CreateLiveAxis(string name, AxisPosition position, Func<double, string>? labeler = null, int outerPadding = 0, bool showGridLines = true)
+        {
+            return new Axis
+            {
+                Name = name,
+                Position = position,
+                Padding = position == AxisPosition.End
+                    ? new LiveChartsCore.Drawing.Padding(10, 0, outerPadding + 4, 0)
+                    : new LiveChartsCore.Drawing.Padding(10, 0, 10, 0),
+                Labeler = labeler ?? (value => value.ToString("F1")),
+                ShowSeparatorLines = showGridLines,
+                SeparatorsPaint = showGridLines
+                    ? new SolidColorPaint
+                    {
+                        StrokeThickness = 1,
+                        Color = new SKColor(120, 120, 120),
+                    }
+                    : null,
+                SubseparatorsPaint = showGridLines
+                    ? new SolidColorPaint
+                    {
+                        Color = new SKColor(34, 34, 34),
+                        StrokeThickness = 0.5f,
+                    }
+                    : null,
+                SubseparatorsCount = showGridLines ? 9 : 0,
+                ZeroPaint = showGridLines
+                    ? new SolidColorPaint
+                    {
+                        Color = new SKColor(150, 150, 150),
+                        StrokeThickness = 2,
+                    }
+                    : null,
+                TicksPaint = showGridLines
+                    ? new SolidColorPaint
+                    {
+                        Color = new SKColor(140, 140, 140),
+                        StrokeThickness = 1.5f,
+                    }
+                    : null,
+                SubticksPaint = showGridLines
+                    ? new SolidColorPaint
+                    {
+                        Color = new SKColor(34, 34, 34),
+                        StrokeThickness = 1,
+                    }
+                    : null,
+                NameTextSize = 13,
+                TextSize = 13,
+            };
+        }
+
+        private static string GetAnalogueUnitAxisName(AnalogueInput.AnalogueUnits units)
+        {
+            string suffix = GetUnitsSuffix(units);
+            return string.IsNullOrWhiteSpace(suffix)
+                ? "Analogue"
+                : $"Analogue ({suffix})";
+        }
+
+        private static Func<double, string> GetLiveAxisLabeler(AnalogueInput.AnalogueUnits units)
+        {
+            return UseDecimalPrecision(units)
+                ? value => value.ToString("F1")
+                : value => value.ToString("F0");
+        }
+
+        private static AnalogueInput.AnalogueUnits GetLiveAnalogueSeriesUnit(AnalogueInput input)
+        {
+            return input.ChanType == AnalogueInput.AnalogueChannelType.RawVoltage ||
+                   input.ChanType == AnalogueInput.AnalogueChannelType.Digital
+                ? AnalogueInput.AnalogueUnits.Volts
+                : input.Units;
+        }
+
+        private static float? GetLiveAnalogueSeriesValue(AnalogueInput input)
+        {
+            return input.InputValue ?? input.InputVoltage;
+        }
+
+        private static string GetLiveAnalogueSeriesDisplayName(AnalogueInput input, int index)
+        {
+            string suffix = GetUnitsSuffix(GetLiveAnalogueSeriesUnit(input));
+            return string.IsNullOrWhiteSpace(suffix)
+                ? $"Ana/Dig {index + 1}"
+                : $"Ana/Dig {index + 1} ({suffix})";
+        }
+
+        private static bool TryGetChartPoints(object? parameter, out List<ChartPoint> points)
+        {
+            points = [];
+
+            if (parameter is IEnumerable<ChartPoint> manyPoints)
+            {
+                points = manyPoints.Where(point => point != null && !point.IsEmpty).ToList();
+                return points.Count > 0;
+            }
+
+            if (parameter is ChartPoint singlePoint && !singlePoint.IsEmpty)
+            {
+                points = [singlePoint];
+                return true;
+            }
+
+            return false;
+        }
+
+        private string BuildLiveChartHoverSummary(IReadOnlyList<ChartPoint> points)
+        {
+            if (points.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            double timestampMs = points[0].Coordinate.SecondaryValue;
+            string timestamp = DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Round(timestampMs))
+                .LocalDateTime
+                .ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture);
+
+            var values = new List<string>();
+            foreach (ChartPoint point in points.OrderBy(point => point.Context.Series?.Name, StringComparer.Ordinal))
+            {
+                string seriesName = point.Context.Series?.Name ?? "Series";
+                double value = point.Coordinate.PrimaryValue;
+                values.Add($"{seriesName}: {value:F2}");
+            }
+
+            return values.Count == 0
+                ? timestamp
+                : $"{timestamp}  |  {string.Join("  |  ", values)}";
+        }
+
+        private void UpdateLiveChartSelection(IReadOnlyList<ChartPoint> points, bool pinSelection)
+        {
+            _lastHoveredLiveChartPoints = points.Where(point => point != null && !point.IsEmpty).ToList();
+            if (_lastHoveredLiveChartPoints.Count == 0)
+            {
+                ClearLiveChartSelectionState();
+                return;
+            }
+
+            if (pinSelection)
+            {
+                IsLiveChartSelectionPinned = true;
+            }
+
+            LiveChartHoverSummary = BuildLiveChartHoverSummary(_lastHoveredLiveChartPoints);
+            OnPropertyChanged(nameof(HasLiveChartSelection));
+            OnPropertyChanged(nameof(LiveChartPinButtonText));
+        }
+
+        private void ScheduleLiveChartSelectionClear()
+        {
+            if (_lastHoveredLiveChartPoints.Count == 0)
+            {
+                return;
+            }
+
+            _liveHoverClearTimer.Stop();
+            _liveHoverClearTimer.Start();
+        }
+
+        private void ClearLiveChartSelectionState()
+        {
+            _lastHoveredLiveChartPoints.Clear();
+            LiveChartHoverSummary = string.Empty;
+            OnPropertyChanged(nameof(HasLiveChartSelection));
+            OnPropertyChanged(nameof(LiveChartPinButtonText));
+        }
+
+        private string BuildLiveChartAxisSignature()
+        {
+            var parts = new List<string>();
+            if (HasAnyVisibleCurrentSeries)
+            {
+                parts.Add("current");
+            }
+
+            foreach (AnalogueInput.AnalogueUnits units in Enum.GetValues(typeof(AnalogueInput.AnalogueUnits)))
+            {
+                if (HasVisibleSeriesUsingUnit(units))
+                {
+                    parts.Add($"ana:{(int)units}");
+                }
+            }
+
+            return string.Join("|", parts);
+        }
+
+        private void RefreshLiveChartAxes()
+        {
+            if (_suppressLiveChartAxisRefresh)
+            {
+                return;
+            }
+
+            string axisSignature = BuildLiveChartAxisSignature();
+            if (string.Equals(_lastLiveChartAxisSignature, axisSignature, StringComparison.Ordinal))
+            {
+                UpdateLiveSeriesAxisAssignments();
+                UpdateLiveCrosshairState();
+                return;
+            }
+
+            var axes = new List<ICartesianAxis>();
+            if (HasAnyVisibleCurrentSeries)
+            {
+                axes.Add(CreateLiveAxis("Current (Amps)", AxisPosition.Start, value => value.ToString("F2")));
+            }
+
+            int analogueAxisCount = 0;
+            foreach (AnalogueInput.AnalogueUnits units in Enum.GetValues(typeof(AnalogueInput.AnalogueUnits)))
+            {
+                if (!HasVisibleSeriesUsingUnit(units))
+                {
+                    continue;
+                }
+
+                axes.Add(CreateLiveAxis(
+                    GetAnalogueUnitAxisName(units),
+                    AxisPosition.End,
+                    GetLiveAxisLabeler(units),
+                    outerPadding: analogueAxisCount * LiveChartAnalogueAxisSpacing,
+                    showGridLines: false));
+                analogueAxisCount++;
+            }
+
+            if (axes.Count == 0)
+            {
+                axes.Add(CreateLiveAxis("Current (Amps)", AxisPosition.Start, value => value.ToString("F2")));
+            }
+
+            YAxes = axes.ToArray();
+            _lastLiveChartAxisSignature = axisSignature;
+            OnPropertyChanged(nameof(YAxes));
+            UpdateLiveSeriesAxisAssignments();
+            UpdateLiveCrosshairState();
+        }
+
+        private void UpdateLiveSeriesAxisAssignments()
+        {
+            int currentAxisIndex = HasAnyVisibleCurrentSeries ? 0 : -1;
+            int analogueAxisStartIndex = currentAxisIndex >= 0 ? 1 : 0;
+            var analogueAxisMap = new Dictionary<AnalogueInput.AnalogueUnits, int>();
+            int analogueAxisIndex = analogueAxisStartIndex;
+
+            foreach (AnalogueInput.AnalogueUnits units in Enum.GetValues(typeof(AnalogueInput.AnalogueUnits)))
+            {
+                if (!HasVisibleSeriesUsingUnit(units))
+                {
+                    continue;
+                }
+
+                analogueAxisMap[units] = analogueAxisIndex++;
+            }
+
+            for (int i = 0; i < LiveDataView.ChannelsLiveData.Count && i < SeriesCollection.Count; i++)
+            {
+                if (SeriesCollection[i] is LineSeries<ObservablePoint> channelSeries)
+                {
+                    channelSeries.ScalesYAt = Math.Max(currentAxisIndex, 0);
+                }
+            }
+
+            int offset = LiveDataView.ChannelsLiveData.Count;
+            for (int i = 0; i < LiveDataView.AnalogueInputsLiveData.Count && offset + i < SeriesCollection.Count; i++)
+            {
+                if (SeriesCollection[offset + i] is not LineSeries<ObservablePoint> analogueSeries)
+                {
+                    continue;
+                }
+
+                AnalogueInput.AnalogueUnits units = GetLiveAnalogueSeriesUnit(LiveDataView.AnalogueInputsLiveData[i]);
+                analogueSeries.ScalesYAt = analogueAxisMap.TryGetValue(units, out int axisIndex)
+                    ? axisIndex
+                    : Math.Max(currentAxisIndex, 0);
+            }
+        }
+
+        private void SetChannelLiveSeriesEnabled(bool isEnabled)
+        {
+            _suppressLiveChartAxisRefresh = true;
+            try
+            {
+                foreach (var toggle in ChannelLiveSeriesToggles)
+                {
+                    toggle.IsEnabled = isEnabled;
+                }
+            }
+            finally
+            {
+                _suppressLiveChartAxisRefresh = false;
+            }
+
+            _lastLiveChartAxisSignature = string.Empty;
+            RefreshLiveChartAxes();
+        }
+
+        private void SetAnalogueLiveSeriesEnabled(bool isEnabled)
+        {
+            _suppressLiveChartAxisRefresh = true;
+            try
+            {
+                int offset = LiveDataView.ChannelsLiveData.Count;
+                for (int i = offset; i < LiveSeriesToggles.Count; i++)
+                {
+                    LiveSeriesToggles[i].IsEnabled = isEnabled;
+                }
+            }
+            finally
+            {
+                _suppressLiveChartAxisRefresh = false;
+            }
+
+            _lastLiveChartAxisSignature = string.Empty;
+            RefreshLiveChartAxes();
+        }
+
+        private static string GetLiveSeriesDisplayName(OutputChannel channel, int fallbackIndex)
+        {
+            string channelName = channel.Name == null
+                ? string.Empty
+                : new string(channel.Name).TrimEnd('\0', ' ');
+
+            int channelNumber = channel.ChannelNumber > 0 ? channel.ChannelNumber : fallbackIndex + 1;
+            return string.IsNullOrWhiteSpace(channelName)
+                ? $"CH{channelNumber}"
+                : $"CH{channelNumber} {channelName}";
+        }
+
+        private void UpdateLiveSeriesToggleLabels()
+        {
+            int currentCount = Math.Min(LiveDataView.ChannelsLiveData.Count, LiveSeriesToggles.Count);
+            for (int i = 0; i < currentCount; i++)
+            {
+                string label = GetLiveSeriesDisplayName(LiveDataView.ChannelsLiveData[i], i);
+                if (!string.Equals(LiveSeriesToggles[i].DisplayName, label, StringComparison.Ordinal))
+                {
+                    LiveSeriesToggles[i].DisplayName = label;
+                }
+            }
+
+            int analogueOffset = LiveDataView.ChannelsLiveData.Count;
+            int analogueCount = Math.Min(LiveDataView.AnalogueInputsLiveData.Count, Math.Max(0, LiveSeriesToggles.Count - analogueOffset));
+            for (int i = 0; i < analogueCount; i++)
+            {
+                string label = GetLiveAnalogueSeriesDisplayName(LiveDataView.AnalogueInputsLiveData[i], i);
+                ChartSeriesToggleItem toggle = LiveSeriesToggles[analogueOffset + i];
+                if (!string.Equals(toggle.DisplayName, label, StringComparison.Ordinal))
+                {
+                    toggle.DisplayName = label;
+                }
+            }
+        }
+
+        private void EnsureLiveSeriesStateCapacity()
+        {
+            if (_liveSeriesHasSyntheticTail.Length == SeriesCollection.Count && _liveSeriesHistory.Length == SeriesCollection.Count)
+            {
+                return;
+            }
+
+            int previousHistoryLength = _liveSeriesHistory.Length;
+            Array.Resize(ref _liveSeriesHasSyntheticTail, SeriesCollection.Count);
+            Array.Resize(ref _liveSeriesHistory, SeriesCollection.Count);
+
+            for (int i = previousHistoryLength; i < _liveSeriesHistory.Length; i++)
+            {
+                _liveSeriesHistory[i] = new List<ObservablePoint>();
+            }
+
+            for (int i = 0; i < _liveSeriesHistory.Length; i++)
+            {
+                _liveSeriesHistory[i] ??= new List<ObservablePoint>();
+            }
+        }
+
+        private void ResetLiveChartSeries()
+        {
+            EnsureLiveSeriesStateCapacity();
+
+            for (int i = 0; i < _liveSeriesHasSyntheticTail.Length; i++)
+            {
+                _liveSeriesHasSyntheticTail[i] = false;
+            }
+
+            foreach (ISeries series in SeriesCollection)
+            {
+                if (series is not LineSeries<ObservablePoint> lineSeries)
+                {
+                    continue;
+                }
+
+                if (lineSeries.Values is ObservableCollection<ObservablePoint> values)
+                {
+                    values.Clear();
+                }
+                else
+                {
+                    lineSeries.Values = new ObservableCollection<ObservablePoint>();
+                }
+            }
+        }
+
+        private void ResetLiveChartHistory()
+        {
+            EnsureLiveSeriesStateCapacity();
+
+            foreach (List<ObservablePoint> history in _liveSeriesHistory)
+            {
+                history.Clear();
+            }
+        }
+
+        private static void TrimLiveSeriesHistory(List<ObservablePoint> history, long cutoffMs)
+        {
+            while (history.Count > 0 && history[0].X < cutoffMs)
+            {
+                history.RemoveAt(0);
+            }
+
+            while (history.Count > LiveChartHistoryMaxPoints)
+            {
+                history.RemoveAt(0);
+            }
+        }
+
+        private void AppendLiveChartHistoryPoint(int seriesIndex, long nowMs, double currentValue)
+        {
+            EnsureLiveSeriesStateCapacity();
+
+            List<ObservablePoint> history = _liveSeriesHistory[seriesIndex];
+            long x = nowMs;
+            if (history.Count > 0 && history[^1].X.HasValue)
+            {
+                long lastX = (long)history[^1].X!.Value;
+                if (x <= lastX)
+                {
+                    x = lastX + 1;
+                }
+            }
+
+            history.Add(new ObservablePoint(x, currentValue));
+            TrimLiveSeriesHistory(history, nowMs - (LiveChartHistoryRetentionSeconds * 1000L));
+        }
+
+        private void CaptureLiveChartHistory(DataStructures data)
+        {
+            long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+            for (int i = 0; i < data.ChannelsLiveData.Count && i < SeriesCollection.Count; i++)
+            {
+                double current = data.ChannelsLiveData[i].CurrentValue;
+                if (double.IsNaN(current) || double.IsInfinity(current))
+                {
+                    continue;
+                }
+
+                AppendLiveChartHistoryPoint(i, nowMs, current);
+            }
+
+            int analogueSeriesOffset = data.ChannelsLiveData.Count;
+            for (int i = 0; i < data.AnalogueInputsLiveData.Count && analogueSeriesOffset + i < SeriesCollection.Count; i++)
+            {
+                float? analogueValue = GetLiveAnalogueSeriesValue(data.AnalogueInputsLiveData[i]);
+                if (!analogueValue.HasValue || float.IsNaN(analogueValue.Value) || float.IsInfinity(analogueValue.Value))
+                {
+                    continue;
+                }
+
+                AppendLiveChartHistoryPoint(analogueSeriesOffset + i, nowMs, analogueValue.Value);
+            }
+        }
+
+        private Dictionary<int, double> CalculateLiveChartAxisMaxima()
+        {
+            var maxVisibleByAxis = new Dictionary<int, double>();
+
+            foreach (ISeries seriesBase in SeriesCollection)
+            {
+                if (seriesBase is not LineSeries<ObservablePoint> series || !series.IsVisible)
+                {
+                    continue;
+                }
+
+                if (series.Values is not ObservableCollection<ObservablePoint> values)
+                {
+                    continue;
+                }
+
+                foreach (ObservablePoint point in values)
+                {
+                    if (!point.Y.HasValue)
+                    {
+                        continue;
+                    }
+
+                    double y = point.Y.Value;
+                    if (double.IsNaN(y) || double.IsInfinity(y))
+                    {
+                        continue;
+                    }
+
+                    if (maxVisibleByAxis.TryGetValue(series.ScalesYAt, out double existingAxisMax))
+                    {
+                        maxVisibleByAxis[series.ScalesYAt] = Math.Max(existingAxisMax, y);
+                    }
+                    else
+                    {
+                        maxVisibleByAxis[series.ScalesYAt] = y;
+                    }
+                }
+            }
+
+            return maxVisibleByAxis;
+        }
+
+        private void ApplyLiveChartAxisLimits(long nowMs, Dictionary<int, double>? maxVisibleByAxis)
+        {
+            long cutoffMs = nowMs - (SelectedTimeWindowSeconds * 1000L);
+
+            if (XAxes is { Length: > 0 })
+            {
+                XAxes[0].MinLimit = cutoffMs;
+                XAxes[0].MaxLimit = nowMs;
+            }
+
+            if (maxVisibleByAxis != null && YAxes is { Length: > 0 })
+            {
+                for (int i = 0; i < YAxes.Length; i++)
+                {
+                    YAxes[i].MinLimit = null;
+                    YAxes[i].MaxLimit = maxVisibleByAxis.TryGetValue(i, out double axisMax)
+                        ? axisMax + LiveChartYAxisHeadroomAmps
+                        : null;
+                }
+            }
+        }
+
+        private void RestoreLiveChartSeriesFromHistory()
         {
             long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             long cutoffMs = nowMs - (SelectedTimeWindowSeconds * 1000L);
-            double? maxVisibleCurrent = null;
+
+            ResetLiveChartSeries();
+
+            for (int seriesIndex = 0; seriesIndex < SeriesCollection.Count; seriesIndex++)
+            {
+                if (SeriesCollection[seriesIndex] is not LineSeries<ObservablePoint> lineSeries)
+                {
+                    continue;
+                }
+
+                if (lineSeries.Values is not ObservableCollection<ObservablePoint> values)
+                {
+                    values = new ObservableCollection<ObservablePoint>();
+                    lineSeries.Values = values;
+                }
+
+                foreach (ObservablePoint point in _liveSeriesHistory[seriesIndex])
+                {
+                    if (!point.X.HasValue || point.X.Value < cutoffMs)
+                    {
+                        continue;
+                    }
+
+                    values.Add(new ObservablePoint(point.X.Value, point.Y));
+                }
+            }
+
+            ApplyLiveChartAxisLimits(nowMs, CalculateLiveChartAxisMaxima());
+        }
+
+        private static void TrimLiveSeriesValues(ObservableCollection<ObservablePoint> values, long cutoffMs)
+        {
+            while (values.Count > 0 && values[0].X < cutoffMs)
+            {
+                values.RemoveAt(0);
+            }
+
+            while (values.Count > MAX_CHART_POINTS)
+            {
+                values.RemoveAt(0);
+            }
+        }
+
+        private void UpdateLiveSeriesPoints(int seriesIndex, ObservableCollection<ObservablePoint> values, long nowMs, long cutoffMs, double currentValue, bool appendNewSample)
+        {
+            EnsureLiveSeriesStateCapacity();
+
+            if (appendNewSample)
+            {
+                if (_liveSeriesHasSyntheticTail[seriesIndex] && values.Count > 0)
+                {
+                    ObservablePoint tailPoint = values[^1];
+                    tailPoint.X = nowMs;
+                    tailPoint.Y = currentValue;
+                    _liveSeriesHasSyntheticTail[seriesIndex] = false;
+                }
+                else
+                {
+                    long x = nowMs;
+                    if (values.Count > 0 && values[^1].X.HasValue)
+                    {
+                        long lastX = (long)values[^1].X!.Value;
+                        if (x <= lastX)
+                        {
+                            x = lastX + 1;
+                        }
+                    }
+
+                    values.Add(new ObservablePoint(x, currentValue));
+                }
+            }
+            else
+            {
+                if (values.Count == 0)
+                {
+                    return;
+                }
+
+                if (_liveSeriesHasSyntheticTail[seriesIndex])
+                {
+                    ObservablePoint tailPoint = values[^1];
+                    tailPoint.X = nowMs;
+                    tailPoint.Y = currentValue;
+                }
+                else
+                {
+                    long x = nowMs;
+                    if (values[^1].X.HasValue)
+                    {
+                        long lastX = (long)values[^1].X!.Value;
+                        if (x <= lastX)
+                        {
+                            x = lastX + 1;
+                        }
+                    }
+
+                    values.Add(new ObservablePoint(x, currentValue));
+                    _liveSeriesHasSyntheticTail[seriesIndex] = true;
+                }
+            }
+
+            TrimLiveSeriesValues(values, cutoffMs);
+        }
+
+        private void UpdateCharts(DataStructures data, bool appendNewSamples)
+        {
+            long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            long cutoffMs = nowMs - (SelectedTimeWindowSeconds * 1000L);
+            Dictionary<int, double>? maxVisibleByAxis = appendNewSamples ? new Dictionary<int, double>() : null;
+
+            EnsureLiveSeriesStateCapacity();
 
             for (int i = 0; i < data.ChannelsLiveData.Count && i < SeriesCollection.Count; i++)
             {
@@ -2627,21 +4112,17 @@ namespace Cortex.ViewModels
                 if (double.IsNaN(current) || double.IsInfinity(current))
                     continue;
 
-                long x = nowMs;
-                if (values.Count > 0 && values[^1].X.HasValue)
+                UpdateLiveSeriesPoints(i, values, nowMs, cutoffMs, current, appendNewSamples);
+
+                if (!series.IsVisible)
                 {
-                    long lastX = (long)values[^1].X!.Value;
-                    if (x <= lastX)
-                        x = lastX + 1;
+                    continue;
                 }
 
-                values.Add(new ObservablePoint(x, current));
-
-                while (values.Count > 0 && values[0].X < cutoffMs)
-                    values.RemoveAt(0);
-
-                while (values.Count > MAX_CHART_POINTS)
-                    values.RemoveAt(0);
+                if (maxVisibleByAxis == null)
+                {
+                    continue;
+                }
 
                 foreach (var point in values)
                 {
@@ -2652,25 +4133,79 @@ namespace Cortex.ViewModels
                     if (double.IsNaN(y) || double.IsInfinity(y))
                         continue;
 
-                    maxVisibleCurrent = maxVisibleCurrent.HasValue
-                        ? Math.Max(maxVisibleCurrent.Value, y)
-                        : y;
+                    if (maxVisibleByAxis.TryGetValue(series.ScalesYAt, out double existingCurrentMax))
+                    {
+                        maxVisibleByAxis[series.ScalesYAt] = Math.Max(existingCurrentMax, y);
+                    }
+                    else
+                    {
+                        maxVisibleByAxis[series.ScalesYAt] = y;
+                    }
                 }
             }
 
-            if (XAxes is { Length: > 0 })
+            int analogueSeriesOffset = data.ChannelsLiveData.Count;
+            for (int i = 0; i < data.AnalogueInputsLiveData.Count && analogueSeriesOffset + i < SeriesCollection.Count; i++)
             {
-                XAxes[0].MinLimit = cutoffMs;
-                XAxes[0].MaxLimit = nowMs;
+                if (SeriesCollection[analogueSeriesOffset + i] is not LineSeries<ObservablePoint> series)
+                {
+                    continue;
+                }
+
+                if (series.Values is not ObservableCollection<ObservablePoint> values)
+                {
+                    values = new ObservableCollection<ObservablePoint>();
+                    series.Values = values;
+                }
+
+                if (series.Stroke is SolidColorPaint paint)
+                {
+                    paint.StrokeThickness = 1.0f;
+                }
+
+                float? analogueValue = GetLiveAnalogueSeriesValue(data.AnalogueInputsLiveData[i]);
+                if (!analogueValue.HasValue || float.IsNaN(analogueValue.Value) || float.IsInfinity(analogueValue.Value))
+                {
+                    continue;
+                }
+
+                UpdateLiveSeriesPoints(analogueSeriesOffset + i, values, nowMs, cutoffMs, analogueValue.Value, appendNewSamples);
+
+                if (!series.IsVisible)
+                {
+                    continue;
+                }
+
+                if (maxVisibleByAxis == null)
+                {
+                    continue;
+                }
+
+                foreach (var point in values)
+                {
+                    if (!point.Y.HasValue)
+                    {
+                        continue;
+                    }
+
+                    double y = point.Y.Value;
+                    if (double.IsNaN(y) || double.IsInfinity(y))
+                    {
+                        continue;
+                    }
+
+                    if (maxVisibleByAxis.TryGetValue(series.ScalesYAt, out double existingAnalogueMax))
+                    {
+                        maxVisibleByAxis[series.ScalesYAt] = Math.Max(existingAnalogueMax, y);
+                    }
+                    else
+                    {
+                        maxVisibleByAxis[series.ScalesYAt] = y;
+                    }
+                }
             }
 
-            if (YAxes is { Length: > 0 })
-            {
-                YAxes[0].MinLimit = null;
-                YAxes[0].MaxLimit = maxVisibleCurrent.HasValue
-                    ? maxVisibleCurrent.Value + LiveChartYAxisHeadroomAmps
-                    : null;
-            }
+            ApplyLiveChartAxisLimits(nowMs, appendNewSamples ? maxVisibleByAxis : null);
         }
 
         private void UpdateErrorFlags()
@@ -2692,31 +4227,10 @@ namespace Cortex.ViewModels
             return JsonSerializer.Deserialize<DataStructures>(json) ?? new DataStructures();
         }
 
-        private void HandleComms()
-        {
-            if (IsConnected)
-            {
-                if (!CommsEstablished)
-                {
-                    if (_portService != null)
-                    {
-                        CommsEstablished = _portService.InitComms();
-                        if (CommsEstablished)
-                        {
-                            AddLog("PDM Connected.");
-                        }
-                    }
-                }
-                else if (_portService != null)
-                {
-                    _portService.EnsureLiveRequestPolling();
-                }
-            }
-        }
+
 
         public void SendOverrideCommand(OutputChannel channel)
         {
-            // Find the channel index
             int channelIndex = LiveDataView.ChannelsLiveData.IndexOf(channel);
             if (channelIndex >= 0)
             {
@@ -2724,27 +4238,17 @@ namespace Cortex.ViewModels
             }
         }
 
-        [RelayCommand]
-        private void Disconnect()
-        {
-            if (_portService != null)
-            {
-                _portService.DataUpdated -= _portService_DataUpdated;
-                _portService.ConfigurationSaved -= ConfigSaved;
-                _portService.ConfigurationSaveCompleted -= ConfigSaveCompleted;
-                _portService.Close();
-                _portService = null;
-            }
 
-            IsSendingConfig = false;
-            CommsEstablished = false;
-            IsConnected = false;
-            AddLog("Disconnected from PDM.");
-        }
 
-        public void AddLog(string message)
+        public void AddLog(
+            string message,
+            string? details = null,
+            Exception? exception = null,
+            [CallerMemberName] string callerMemberName = "",
+            [CallerFilePath] string callerFilePath = "",
+            [CallerLineNumber] int callerLineNumber = 0)
         {
-            LoggingService.AddLog(message);
+            LoggingService.AddLog(message, details, exception, callerMemberName, callerFilePath, callerLineNumber);
         }
 
         partial void OnPullUpEnabledChanged(bool value)
@@ -2759,275 +4263,6 @@ namespace Cortex.ViewModels
                 PullUpEnabled = false;
         }
 
-        [ObservableProperty]
-        private bool isLogBusy;
-
-        [ObservableProperty]
-        private string logStatusMessage = string.Empty;
-
-        [ObservableProperty]
-        private double logDownloadProgress;
-
-        [ObservableProperty]
-        private bool isLogProgressIndeterminate;
-
-        [ObservableProperty]
-        private ObservableCollection<LogFile> availableLogFiles = new();
-
-        [ObservableProperty]
-        private LogFile? selectedLogFile;
-
-        [ObservableProperty]
-        private DateTimeOffset? logRangeStartDate;
-
-        [ObservableProperty]
-        private TimeSpan? logRangeStartTime;
-
-        [ObservableProperty]
-        private DateTimeOffset? logRangeEndDate;
-
-        [ObservableProperty]
-        private TimeSpan? logRangeEndTime;
-
-        [ObservableProperty]
-        private ObservableCollection<LogParameterSelection> systemParameterSelections = new();
-
-        [ObservableProperty]
-        private bool areAllSystemParametersSelected;
-
-        [ObservableProperty]
-        private ObservableCollection<LogChannelSelection> channelSelections = new();
-
-        [ObservableProperty]
-        private bool areAllChannelsSelected;
-
-        [ObservableProperty]
-        private ObservableCollection<LogParameterSelection> channelFieldSelections = new();
-
-        [ObservableProperty]
-        private bool areAllChannelFieldsSelected;
-
-        [ObservableProperty]
-        private ObservableCollection<LogParameterSelection> digitalInputSelections = new();
-
-        [ObservableProperty]
-        private bool areAllDigitalInputsSelected;
-
-        [ObservableProperty]
-        private ObservableCollection<LogParameterSelection> analogueInputSelections = new();
-
-        [ObservableProperty]
-        private bool areAllAnalogueInputsSelected;
-
-        [ObservableProperty]
-        private bool isLogCrosshairEnabled = true;
-
-        [ObservableProperty]
-        private ObservableCollection<ISeries> logSeriesCollection = new();
-
-        [ObservableProperty]
-        private ObservableCollection<LogMetricRow> logMetricRows = new();
-
-        public bool CanDownloadSelectedLog => !IsLogBusy && SelectedLogFile is not null && !SelectedLogFile.IsDownloaded;
-
-        public bool CanCancelLogDownload => IsLogBusy;
-
-        public bool CanResetLogs => !IsLogBusy && IsConnected;
-
-        public bool CanAccessOperationalTabs => IsConnected && !IsLogBusy;
-
-        public FindingStrategy LogFindingStrategy => FindingStrategy.CompareOnlyXTakeClosest;
-
-        public ICartesianAxis[] LogYAxes { get; set; } =
-        [
-            new Axis
-            {
-                Name = "Value",
-                Labeler = value => value.ToString("F2"),
-                SeparatorsPaint = new SolidColorPaint
-                {
-                    StrokeThickness = 1,
-                    Color = new SKColor(200, 200, 200),
-                },
-                SubseparatorsPaint = new SolidColorPaint
-                {
-                    Color = new SKColor(50, 50, 50),
-                    StrokeThickness = 0.5f,
-                },
-                SubseparatorsCount = 9,
-                ZeroPaint = new SolidColorPaint
-                {
-                    Color = new SKColor(200, 200, 200),
-                    StrokeThickness = 2,
-                },
-                TicksPaint = new SolidColorPaint
-                {
-                    Color = new SKColor(200, 200, 200),
-                    StrokeThickness = 1.5f,
-                },
-                SubticksPaint = new SolidColorPaint
-                {
-                    Color = new SKColor(50, 50, 50),
-                    StrokeThickness = 1,
-                },
-            }
-        ];
-
-        public ICartesianAxis[] LogXAxes { get; set; } =
-        [
-            new Axis
-            {
-                Name = "Time",
-                Labeler = value => value.ToString("F0"),
-                SeparatorsPaint = new SolidColorPaint
-                {
-                    StrokeThickness = 1,
-                    Color = new SKColor(200, 200, 200),
-                },
-                SubseparatorsPaint = new SolidColorPaint
-                {
-                    Color = new SKColor(50, 50, 50),
-                    StrokeThickness = 0.5f,
-                },
-                SubseparatorsCount = 9,
-                ZeroPaint = new SolidColorPaint
-                {
-                    Color = new SKColor(200, 200, 200),
-                    StrokeThickness = 2,
-                },
-                TicksPaint = new SolidColorPaint
-                {
-                    Color = new SKColor(200, 200, 200),
-                    StrokeThickness = 1.5f,
-                },
-                SubticksPaint = new SolidColorPaint
-                {
-                    Color = new SKColor(50, 50, 50),
-                    StrokeThickness = 1,
-                },
-            }
-        ];
-
-        private readonly List<ParsedLogRow> _parsedLogRows = [];
-        private readonly Dictionary<string, List<LogSeriesPoint>> _parsedLogSeries = new(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<string, string> _parsedLogSeriesUnits = new(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<string, string> _downloadedLogCache = new(StringComparer.OrdinalIgnoreCase);
-        private Dictionary<string, List<LogSeriesPoint>> _activeFilteredLogSeries = new(StringComparer.OrdinalIgnoreCase);
-        private List<string> _activeLogSeriesKeys = [];
-        private IReadOnlyDictionary<string, string> _activeSystemDisplayNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        private CancellationTokenSource? _logLoadCts;
-        private int _selectedLogLoadVersion;
-        private bool _updatingLogSelectionMasterState;
-        private bool _bulkUpdatingLogSelections;
-        private const int MaxRenderedLogPointsPerSeries = 1800;
-        private const int MinimumViewportRenderedPointsPerSeries = 600;
-        private static readonly SKColor[] LogSeriesPalette =
-        {
-            new(33, 150, 243),
-            new(244, 67, 54),
-            new(76, 175, 80),
-            new(255, 193, 7),
-            new(156, 39, 176),
-            new(255, 87, 34),
-            new(0, 188, 212),
-            new(205, 220, 57),
-        };
-
-        private static readonly string[] SystemHeaderFields =
-        {
-            "Date",
-            "Time",
-            "System Temp",
-            "SIM Module Temp",
-            "IMU Temp",
-            "System Voltage",
-            "System Current",
-            "Error Flags",
-            "IMU Accel X",
-            "IMU Accel Y",
-            "IMU Accel Z",
-            "IMU Gyro X",
-            "IMU Gyro Y",
-            "IMU Gyro Z",
-            "IMU Mag X",
-            "IMU Mag Y",
-            "IMU Mag Z",
-            "Lat",
-            "Lon",
-            "Alt",
-            "Speed",
-            "Accuracy"
-        };
-
-        private static readonly string[] ChannelHeaderFields =
-        {
-            "Channel Type",
-            "Enabled",
-            "Current Value",
-            "Current Threshold High",
-            "Current Threshold Low",
-            "Multi-Channel",
-            "Group Number",
-            "Channel Error Flags",
-            "Analogue Input"
-        };
-
-        private static readonly string[] DigitalInputHeaderFields =
-        {
-            "Digital Input 1",
-            "Digital Input 2",
-            "Digital Input 3",
-            "Digital Input 4",
-            "Digital Input 5",
-            "Digital Input 6",
-            "Digital Input 7",
-            "Digital Input 8"
-        };
-
-        private static readonly string[] AnalogueInputHeaderFields =
-        {
-            "Analogue Input 1",
-            "Analogue Input 2",
-            "Analogue Input 3",
-            "Analogue Input 4",
-            "Analogue Input 5",
-            "Analogue Input 6",
-            "Analogue Input 7",
-            "Analogue Input 8"
-        };
-
-        private static readonly Regex NumericWithUnitRegex = new(
-            @"^\s*(?<value>[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)\s*(?<unit>.*)?$",
-            RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-        private static readonly Regex LogFileTimestampRegex = new(
-            @"(?<timestamp>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:\.[^.]+)?$",
-            RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-        private static readonly Regex LegacyLogFileTimestampRegex = new(
-            @"(?<date>\d{6})-(?<time>\d{6})(?:\.[^.]+)?$",
-            RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-        private static readonly string PreferredDownloadedLogDirectory = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-            "Synapse PDM Logs");
-
-        partial void OnSelectedLogFileChanged(LogFile? value)
-        {
-            OnPropertyChanged(nameof(CanDownloadSelectedLog));
-            _ = HandleSelectedLogFileChangedAsync(value);
-        }
-
-        partial void OnIsLogBusyChanged(bool value)
-        {
-            OnPropertyChanged(nameof(CanDownloadSelectedLog));
-            OnPropertyChanged(nameof(CanCancelLogDownload));
-            OnPropertyChanged(nameof(CanResetLogs));
-            OnPropertyChanged(nameof(CanAccessOperationalTabs));
-            OnPropertyChanged(nameof(CanSetControllerRtc));
-            OnPropertyChanged(nameof(CanFactoryReset));
-        }
-
         partial void OnIsConnectedChanged(bool value)
         {
             OnPropertyChanged(nameof(CanResetLogs));
@@ -3036,16 +4271,36 @@ namespace Cortex.ViewModels
             OnPropertyChanged(nameof(CanOpenLocalFirmwareUpdateDialog));
             OnPropertyChanged(nameof(CanSetControllerRtc));
             OnPropertyChanged(nameof(CanFactoryReset));
+            OnPropertyChanged(nameof(CanTestCellularConnection));
+            OnPropertyChanged(nameof(CanProvisionOpenRemote));
 
             if (!value)
             {
                 IsSendingConfig = false;
                 IsFactoryResetInProgress = false;
+                IsTestingCellularConnection = false;
+                IsAutomaticCellularTestInProgress = false;
+                IsOpenRemoteProvisioningInProgress = false;
                 FactoryResetStatusMessage = string.Empty;
+                ResetCellularTestStatus();
+                _suppressCellularNeedsAttentionUntilUtc = DateTime.MinValue;
+                SetCellularConnectionHealthStatus("Offline", shouldLog: true);
+                _nextCellularHealthPollUtc = DateTime.MinValue;
                 ResetFirmwareUpdateState();
             }
             else
             {
+                if (IsConnectedPdmRegistered)
+                {
+                    SetCellularConnectionHealthStatus("Checking", shouldLog: true);
+                    ScheduleCellularHealthPoll(immediate: true);
+                }
+                else
+                {
+                    SetCellularConnectionHealthStatus("Offline", shouldLog: true);
+                    _nextCellularHealthPollUtc = DateTime.MinValue;
+                }
+
                 UpdateFirmwareButtonPresentation();
             }
         }
@@ -3056,6 +4311,8 @@ namespace Cortex.ViewModels
             OnPropertyChanged(nameof(CanOpenLocalFirmwareUpdateDialog));
             OnPropertyChanged(nameof(CanSetControllerRtc));
             OnPropertyChanged(nameof(CanFactoryReset));
+            OnPropertyChanged(nameof(CanTestCellularConnection));
+            OnPropertyChanged(nameof(CanProvisionOpenRemote));
 
             if (!value)
             {
@@ -3063,30 +4320,27 @@ namespace Cortex.ViewModels
                 _availableFirmwareRelease = null;
                 IsFirmwareUpdateAvailable = false;
                 IsCheckingFirmwareUpdate = false;
+                _suppressCellularNeedsAttentionUntilUtc = DateTime.MinValue;
+                SetCellularConnectionHealthStatus("Offline", shouldLog: true);
+                _nextCellularHealthPollUtc = DateTime.MinValue;
                 NotifyFirmwareInfoChanged();
                 UpdateFirmwareButtonPresentation();
                 return;
             }
 
+            if (IsConnectedPdmRegistered)
+            {
+                SetCellularConnectionHealthStatus("Checking", shouldLog: true);
+                ScheduleCellularHealthPoll(immediate: true);
+                _ = PollCellularHealthStatusAsync();
+            }
+            else
+            {
+                SetCellularConnectionHealthStatus("Offline", shouldLog: true);
+                _nextCellularHealthPollUtc = DateTime.MinValue;
+            }
+
             _ = RefreshFirmwareUpdateStateAsync();
-        }
-
-        partial void OnIsCheckingFirmwareUpdateChanged(bool value)
-        {
-            OnPropertyChanged(nameof(CanOpenFirmwareUpdateDialog));
-            OnPropertyChanged(nameof(CanOpenLocalFirmwareUpdateDialog));
-            UpdateFirmwareButtonPresentation();
-        }
-
-        partial void OnIsFirmwareUpdateAvailableChanged(bool value)
-        {
-            OnPropertyChanged(nameof(CanOpenFirmwareUpdateDialog));
-            UpdateFirmwareButtonPresentation();
-        }
-
-        partial void OnControllerFirmwareVersionChanged(string value)
-        {
-            OnPropertyChanged(nameof(CurrentFirmwareVersionDisplay));
         }
 
         partial void OnIsSettingControllerRtcChanged(bool value)
@@ -3099,6 +4353,30 @@ namespace Cortex.ViewModels
         {
             OnPropertyChanged(nameof(CanFactoryReset));
             OnPropertyChanged(nameof(FactoryResetButtonText));
+        }
+
+        partial void OnIsTestingCellularConnectionChanged(bool value)
+        {
+            OnPropertyChanged(nameof(CanTestCellularConnection));
+            OnPropertyChanged(nameof(CellularTestButtonText));
+            OnPropertyChanged(nameof(IsCellularTestInProgress));
+            UpdateCellularTestProgress(CellularTestStatusItems);
+        }
+
+        partial void OnIsAutomaticCellularTestInProgressChanged(bool value)
+        {
+            OnPropertyChanged(nameof(CanTestCellularConnection));
+            OnPropertyChanged(nameof(CellularTestButtonText));
+            OnPropertyChanged(nameof(IsCellularTestInProgress));
+            UpdateCellularTestProgress(CellularTestStatusItems);
+        }
+
+        partial void OnIsOpenRemoteProvisioningInProgressChanged(bool value)
+        {
+            OnPropertyChanged(nameof(CanProvisionOpenRemote));
+            OnPropertyChanged(nameof(OpenRemoteProvisioningButtonText));
+            OnPropertyChanged(nameof(CanRenamePdm));
+            OnPropertyChanged(nameof(CanUnregisterPdm));
         }
 
         partial void OnLogRangeStartDateChanged(DateTimeOffset? value)
@@ -3129,618 +4407,9 @@ namespace Cortex.ViewModels
             NotifyLogMapRouteChanged();
         }
 
-        partial void OnAreAllSystemParametersSelectedChanged(bool value)
+        partial void OnIsLiveCrosshairEnabledChanged(bool value)
         {
-            if (_updatingLogSelectionMasterState)
-            {
-                return;
-            }
-
-            SetAllSelections(SystemParameterSelections, value);
-        }
-
-        partial void OnAreAllChannelsSelectedChanged(bool value)
-        {
-            if (_updatingLogSelectionMasterState)
-            {
-                return;
-            }
-
-            SetAllSelections(ChannelSelections, value);
-        }
-
-        partial void OnAreAllChannelFieldsSelectedChanged(bool value)
-        {
-            if (_updatingLogSelectionMasterState)
-            {
-                return;
-            }
-
-            SetAllSelections(ChannelFieldSelections, value);
-        }
-
-        partial void OnAreAllDigitalInputsSelectedChanged(bool value)
-        {
-            if (_updatingLogSelectionMasterState)
-            {
-                return;
-            }
-
-            SetAllSelections(DigitalInputSelections, value);
-        }
-
-        partial void OnAreAllAnalogueInputsSelectedChanged(bool value)
-        {
-            if (_updatingLogSelectionMasterState)
-            {
-                return;
-            }
-
-            SetAllSelections(AnalogueInputSelections, value);
-        }
-
-        partial void OnIsLogCrosshairEnabledChanged(bool value)
-        {
-            UpdateLogCrosshairState();
-        }
-
-        [RelayCommand]
-        private async Task RefreshAvailableLogFilesAsync()
-        {
-            if (IsLogBusy)
-            {
-                return;
-            }
-
-            IsLogBusy = true;
-            LogStatusMessage = "Loading available log files...";
-            LogDownloadProgress = 0;
-            IsLogProgressIndeterminate = true;
-
-            try
-            {
-                List<LogFile> files;
-                if (IsConnected && _portService != null)
-                {
-                    var controllerFiles = await _portService.RequestLogFileListAsync(5000);
-                    files = controllerFiles
-                        .Select((file, index) => new LogFile
-                        {
-                            FileName = file.FileName,
-                            FullPath = file.FileName,
-                            LastWriteTimeUtc = TryParseLogFileTimestampUtc(file.FileName) ?? DateTime.MinValue,
-                            FileSizeBytes = file.FileSizeBytes,
-                            IsDownloaded = HasDownloadedControllerLog(file.FileName, file.FileSizeBytes),
-                            IsControllerFile = true,
-                            ControllerIndex = index,
-                        })
-                        .ToList();
-                }
-                else
-                {
-                    files = [];
-                }
-
-                files = files
-                    .OrderByDescending(file => file.LastWriteTimeUtc)
-                    .ThenByDescending(file => file.ControllerIndex)
-                    .ThenByDescending(file => file.FileName, StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
-                AvailableLogFiles = new ObservableCollection<LogFile>(files);
-
-                if (AvailableLogFiles.Count == 0)
-                {
-                    SelectedLogFile = null;
-                    LogStatusMessage = "Click refresh to retrieve PDM logs.";
-                    LogSeriesCollection = new ObservableCollection<ISeries>();
-                    _parsedLogRows.Clear();
-                    return;
-                }
-
-                LogStatusMessage = $"Found {AvailableLogFiles.Count} log files.";
-
-                if (SelectedLogFile == null || !AvailableLogFiles.Any(f => f.FullPath == SelectedLogFile.FullPath))
-                {
-                    SelectedLogFile = AvailableLogFiles.FirstOrDefault();
-                }
-            }
-            catch (Exception ex)
-            {
-                LogStatusMessage = "Failed to load log file list.";
-                AddLog($"Log list load failed: {ex.Message}");
-            }
-            finally
-            {
-                IsLogBusy = false;
-                IsLogProgressIndeterminate = false;
-            }
-        }
-
-        [RelayCommand]
-        private async Task DownloadSelectedLogFileAsync()
-        {
-            if (SelectedLogFile == null)
-            {
-                return;
-            }
-
-            string cacheKey = BuildLogCacheKey(SelectedLogFile);
-            if (_downloadedLogCache.TryGetValue(cacheKey, out string? cachedContent))
-            {
-                EnsureValidLogContent(cachedContent);
-                ParseLogContent(cachedContent);
-                ApplyLogFilters();
-                SelectedLogFile.IsDownloaded = true;
-                LogStatusMessage = $"Loaded cached {SelectedLogFile.FileName}.";
-                LogDownloadProgress = 100;
-                IsLogProgressIndeterminate = false;
-                OnPropertyChanged(nameof(CanDownloadSelectedLog));
-                return;
-            }
-
-            if (SelectedLogFile.IsControllerFile && TryGetStoredControllerLogCopy(SelectedLogFile, out string? storedLogPath))
-            {
-                string storedContent = await File.ReadAllTextAsync(storedLogPath!, CancellationToken.None);
-                EnsureValidLogContent(storedContent);
-                _downloadedLogCache[cacheKey] = storedContent;
-                ParseLogContent(storedContent);
-                ApplyLogFilters();
-                SelectedLogFile.IsDownloaded = true;
-                LogStatusMessage = $"Loaded saved copy of {SelectedLogFile.FileName}.";
-                LogDownloadProgress = 100;
-                IsLogProgressIndeterminate = false;
-                OnPropertyChanged(nameof(CanDownloadSelectedLog));
-                return;
-            }
-
-            _logLoadCts?.Cancel();
-            _logLoadCts = new CancellationTokenSource();
-            var token = _logLoadCts.Token;
-
-            _pauseLiveUiUpdates = true;
-            IsLogBusy = true;
-            LogStatusMessage = $"Downloading {SelectedLogFile.FileName}...";
-            LogDownloadProgress = 0;
-            IsLogProgressIndeterminate = true;
-
-            try
-            {
-                string content;
-                if (IsConnected && _portService != null && SelectedLogFile.IsControllerFile)
-                {
-                    int selectedIndex = SelectedLogFile.ControllerIndex;
-                    if (selectedIndex < 0)
-                    {
-                        throw new InvalidOperationException("Selected controller log index is invalid.");
-                    }
-
-                    AddLog($"Opening controller log: {SelectedLogFile.FileName}");
-
-                    _portService.BeginLogTransferSession();
-                    bool transferOpened = false;
-                    try
-                    {
-                        bool opened = await _portService.OpenLogTransferAsync((byte)selectedIndex);
-                        if (!opened)
-                        {
-                            throw new InvalidOperationException("Controller refused log transfer open request.");
-                        }
-
-                        transferOpened = true;
-                        content = await ReadLogFromControllerAsync(token);
-                    }
-                    finally
-                    {
-                        if (transferOpened)
-                        {
-                            _portService.CancelLogTransfer();
-                        }
-
-                        _portService.EndLogTransferSession();
-                    }
-                }
-                else
-                {
-                    if (IsConnected && _portService != null)
-                    {
-                        AddLog("Selected file is local; reading from disk.");
-                    }
-                    content = await ReadLogFileWithProgressAsync(SelectedLogFile.FullPath, token);
-                }
-
-                EnsureValidLogContent(content);
-
-                if (SelectedLogFile.IsControllerFile)
-                {
-                    await PersistDownloadedControllerLogAsync(SelectedLogFile, content, token);
-                }
-
-                _downloadedLogCache[cacheKey] = content;
-                SelectedLogFile.IsDownloaded = true;
-                OnPropertyChanged(nameof(CanDownloadSelectedLog));
-
-                ParseLogContent(content);
-                ApplyLogFilters();
-                LogStatusMessage = $"Loaded {SelectedLogFile.FileName}.";
-                LogDownloadProgress = 100;
-                IsLogProgressIndeterminate = false;
-            }
-            catch (OperationCanceledException)
-            {
-                LogStatusMessage = "Log download cancelled.";
-                _portService?.CancelLogTransfer();
-                _portService?.EndLogTransferSession();
-                IsLogProgressIndeterminate = false;
-            }
-            catch (Exception ex)
-            {
-                _parsedLogRows.Clear();
-                LogSeriesCollection = new ObservableCollection<ISeries>();
-                LogStatusMessage = "Failed to download selected log file.";
-                AddLog($"Log download failed: {ex.Message}");
-                LogDownloadProgress = 0;
-                _portService?.CancelLogTransfer();
-                _portService?.EndLogTransferSession();
-                IsLogProgressIndeterminate = false;
-            }
-            finally
-            {
-                IsLogBusy = false;
-                _pauseLiveUiUpdates = false;
-                OnPropertyChanged(nameof(CanDownloadSelectedLog));
-            }
-        }
-
-        private async Task HandleSelectedLogFileChangedAsync(LogFile? selectedFile)
-        {
-            int loadVersion = Interlocked.Increment(ref _selectedLogLoadVersion);
-
-            if (selectedFile == null)
-            {
-                ResetParsedLogContent();
-                LogStatusMessage = "No log file selected.";
-                return;
-            }
-
-            if (IsLogBusy)
-            {
-                return;
-            }
-
-            string cacheKey = BuildLogCacheKey(selectedFile);
-            if (_downloadedLogCache.TryGetValue(cacheKey, out string? cachedContent))
-            {
-                if (!IsSelectedLogLoadCurrent(selectedFile, loadVersion))
-                {
-                    return;
-                }
-
-                EnsureValidLogContent(cachedContent);
-                ParseLogContent(cachedContent);
-                ApplyLogFilters();
-                selectedFile.IsDownloaded = true;
-                LogStatusMessage = $"Loaded {selectedFile.FileName}.";
-                return;
-            }
-
-            if (selectedFile.IsControllerFile && TryGetStoredControllerLogCopy(selectedFile, out string? storedLogPath))
-            {
-                try
-                {
-                    string content = await File.ReadAllTextAsync(storedLogPath!);
-                    if (!IsSelectedLogLoadCurrent(selectedFile, loadVersion))
-                    {
-                        return;
-                    }
-
-                    EnsureValidLogContent(content);
-                    _downloadedLogCache[cacheKey] = content;
-                    selectedFile.IsDownloaded = true;
-                    ParseLogContent(content);
-                    ApplyLogFilters();
-                    LogStatusMessage = $"Loaded {selectedFile.FileName}.";
-                }
-                catch (Exception ex)
-                {
-                    if (!IsSelectedLogLoadCurrent(selectedFile, loadVersion))
-                    {
-                        return;
-                    }
-
-                    ResetParsedLogContent();
-                    LogStatusMessage = "Failed to load saved log copy.";
-                    AddLog($"Saved log load failed: {ex.Message}");
-                }
-
-                return;
-            }
-
-            if (!selectedFile.IsControllerFile && File.Exists(selectedFile.FullPath))
-            {
-                try
-                {
-                    string content = await File.ReadAllTextAsync(selectedFile.FullPath);
-                    if (!IsSelectedLogLoadCurrent(selectedFile, loadVersion))
-                    {
-                        return;
-                    }
-
-                    EnsureValidLogContent(content);
-                    _downloadedLogCache[cacheKey] = content;
-                    selectedFile.IsDownloaded = true;
-                    ParseLogContent(content);
-                    ApplyLogFilters();
-                    LogStatusMessage = $"Loaded {selectedFile.FileName}.";
-                }
-                catch (InvalidDataException ex)
-                {
-                    if (!IsSelectedLogLoadCurrent(selectedFile, loadVersion))
-                    {
-                        return;
-                    }
-
-                    ResetParsedLogContent();
-                    LogStatusMessage = ex.Message;
-                    AddLog($"Local log validation failed: {ex.Message}");
-                }
-                catch (Exception ex)
-                {
-                    if (!IsSelectedLogLoadCurrent(selectedFile, loadVersion))
-                    {
-                        return;
-                    }
-
-                    ResetParsedLogContent();
-                    LogStatusMessage = "Failed to load selected local log file.";
-                    AddLog($"Local log load failed: {ex.Message}");
-                }
-
-                return;
-            }
-
-            if (!IsSelectedLogLoadCurrent(selectedFile, loadVersion))
-            {
-                return;
-            }
-
-            ResetParsedLogContent();
-            LogStatusMessage = $"Selected {selectedFile.FileName}. Download to load chart data.";
-        }
-
-        [RelayCommand]
-        private void CancelLogDownload()
-        {
-            if (!IsLogBusy)
-            {
-                return;
-            }
-
-            _logLoadCts?.Cancel();
-            _portService?.CancelLogTransfer();
-            LogStatusMessage = "Cancelling log download...";
-        }
-
-        [RelayCommand]
-        private async Task BrowseLocalLogFileAsync()
-        {
-            if (IsLogBusy)
-            {
-                return;
-            }
-
-            string? selectedPath = await _appCloser.BrowseLocalLogFilePathAsync(PreferredDownloadedLogDirectory);
-            if (string.IsNullOrWhiteSpace(selectedPath))
-            {
-                return;
-            }
-
-            try
-            {
-                var fileInfo = new FileInfo(selectedPath);
-                if (!fileInfo.Exists)
-                {
-                    throw new FileNotFoundException("Selected log file could not be found.", selectedPath);
-                }
-
-                string content = await File.ReadAllTextAsync(fileInfo.FullName);
-                EnsureValidLogContent(content);
-
-                var logFile = new LogFile
-                {
-                    FileName = fileInfo.Name,
-                    FullPath = fileInfo.FullName,
-                    LastWriteTimeUtc = fileInfo.LastWriteTimeUtc,
-                    FileSizeBytes = fileInfo.Length,
-                    IsDownloaded = true,
-                    IsControllerFile = false,
-                    ControllerIndex = -1,
-                };
-
-                _downloadedLogCache[BuildLogCacheKey(logFile)] = content;
-                ParseLogContent(content);
-                ApplyLogFilters();
-                LogDownloadProgress = 100;
-                IsLogProgressIndeterminate = false;
-                LogStatusMessage = $"Local file {logFile.FileName} loaded";
-            }
-            catch (InvalidDataException ex)
-            {
-                LogStatusMessage = ex.Message;
-                AddLog($"Local log validation failed: {ex.Message}");
-            }
-            catch (Exception ex)
-            {
-                LogStatusMessage = "Failed to load selected local log file.";
-                AddLog($"Local log browse failed: {ex.Message}");
-            }
-        }
-
-        [RelayCommand]
-        private async Task ResetLogsAsync()
-        {
-            if (IsLogBusy || !IsConnected || _portService == null)
-            {
-                return;
-            }
-
-            bool confirmed = await _appCloser.ConfirmAsync(
-                "Reset Logs",
-                "This will erase all log files on the controller SD card and clear the log list. Continue?");
-
-            if (!confirmed)
-            {
-                return;
-            }
-
-            IsLogBusy = true;
-            _pauseLiveUiUpdates = true;
-            IsLogProgressIndeterminate = true;
-            LogStatusMessage = "Resetting controller logs...";
-
-            try
-            {
-                bool resetOk = await _portService.ResetLogStorageAsync(10000);
-                if (!resetOk)
-                {
-                    throw new InvalidOperationException("Controller log reset failed.");
-                }
-
-                _downloadedLogCache.Clear();
-                AvailableLogFiles.Clear();
-                SelectedLogFile = null;
-                _parsedLogRows.Clear();
-                LogSeriesCollection = new ObservableCollection<ISeries>();
-                LogDownloadProgress = 0;
-                LogStatusMessage = "Controller logs reset.";
-                AddLog("Controller log storage reset complete.");
-
-                await RefreshAvailableLogFilesAsync();
-            }
-            catch (Exception ex)
-            {
-                LogStatusMessage = "Failed to reset controller logs.";
-                AddLog($"Reset logs failed: {ex.Message}");
-            }
-            finally
-            {
-                IsLogBusy = false;
-                _pauseLiveUiUpdates = false;
-                IsLogProgressIndeterminate = false;
-                OnPropertyChanged(nameof(CanDownloadSelectedLog));
-                OnPropertyChanged(nameof(CanResetLogs));
-                OnPropertyChanged(nameof(CanCancelLogDownload));
-            }
-        }
-
-        private async Task<string> ReadLogFromControllerAsync(CancellationToken token)
-        {
-            if (_portService == null)
-            {
-                throw new InvalidOperationException("Serial port service is unavailable.");
-            }
-
-            AddLog("Downloading log.");
-            try
-            {
-                return await _portService.ReadLogBulkAsync(progress =>
-                {
-                    IsLogProgressIndeterminate = false;
-                    LogDownloadProgress = progress;
-                }, token);
-            }
-            catch (Exception ex) when (ex is IOException || ex is InvalidOperationException)
-            {
-                AddLog($"Stream download failed. Trying alternative download mode...");
-                _portService.CancelLogTransfer();
-                await Task.Delay(50, token);
-                return await ReadLogFromControllerPullAsync(token);
-            }
-        }
-
-        private async Task<string> ReadLogFromControllerPullAsync(CancellationToken token, StringBuilder? existingBuilder = null)
-        {
-            var builder = existingBuilder ?? new StringBuilder();
-            int consecutiveChunkFailures = 0;
-            const int maxConsecutiveChunkFailures = 12;
-            const int pullChunkTimeoutMs = 2000;
-            int processedChunkCount = 0;
-
-            while (true)
-            {
-                token.ThrowIfCancellationRequested();
-                var chunk = await _portService!.RequestLogChunkAsync(pullChunkTimeoutMs);
-                if (chunk == null)
-                {
-                    consecutiveChunkFailures++;
-                    if (consecutiveChunkFailures >= maxConsecutiveChunkFailures)
-                    {
-                        throw new IOException("Controller log chunk request timed out.");
-                    }
-
-                    int retryDelayMs = Math.Min(500, 75 * consecutiveChunkFailures);
-                    await Task.Delay(retryDelayMs, token);
-                    continue;
-                }
-
-                consecutiveChunkFailures = 0;
-
-                if (!string.IsNullOrEmpty(chunk.Text))
-                {
-                    builder.Append(chunk.Text);
-                }
-
-                IsLogProgressIndeterminate = false;
-                LogDownloadProgress = chunk.Progress;
-
-                if (chunk.Done)
-                {
-                    break;
-                }
-
-                processedChunkCount++;
-                if ((processedChunkCount % 16) == 0)
-                {
-                    await Task.Yield();
-                }
-            }
-
-            return builder.ToString();
-        }
-
-        private async Task<string> ReadLogFileWithProgressAsync(string filePath, CancellationToken token)
-        {
-            var fileInfo = new FileInfo(filePath);
-            long totalBytes = fileInfo.Exists ? fileInfo.Length : 0;
-
-            await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 4096, useAsync: true);
-            using var reader = new StreamReader(stream);
-
-            var builder = new StringBuilder();
-            int lineCounter = 0;
-
-            while (true)
-            {
-                token.ThrowIfCancellationRequested();
-                var line = await reader.ReadLineAsync(token);
-                if (line == null)
-                {
-                    break;
-                }
-
-                builder.AppendLine(line);
-                lineCounter++;
-
-                if (lineCounter % 25 == 0)
-                {
-                    LogDownloadProgress = totalBytes > 0
-                        ? Math.Min(100.0, (stream.Position * 100.0) / totalBytes)
-                        : 0;
-                    await Task.Yield();
-                }
-            }
-
-            return builder.ToString();
+            UpdateLiveCrosshairState();
         }
 
         [RelayCommand]
@@ -4843,6 +5512,12 @@ namespace Cortex.ViewModels
             return AvailableCanIds.ElementAtOrDefault(index);
         }
 
+        private CanBitrateOption? GetCanBitrateOption(uint value)
+        {
+            CanBitrateOption? match = AvailableCanBitrates.FirstOrDefault(option => option.Value == value);
+            return match ?? AvailableCanBitrates.FirstOrDefault(option => option.Value == Constants.DEFAULT_CAN_BITRATE);
+        }
+
         private bool HasDownloadedControllerLog(string fileName, long fileSizeBytes)
         {
             var file = new LogFile
@@ -5199,6 +5874,28 @@ namespace Cortex.ViewModels
             {
                 axis.CrosshairPaint = crosshairPaint;
                 axis.CrosshairSnapEnabled = IsLogCrosshairEnabled;
+            }
+        }
+
+        private void UpdateLiveCrosshairState()
+        {
+            var crosshairPaint = IsLiveCrosshairEnabled
+                ? new SolidColorPaint(new SKColor(235, 235, 235, 180))
+                {
+                    StrokeThickness = 1,
+                }
+                : null;
+
+            foreach (var axis in XAxes.OfType<Axis>())
+            {
+                axis.CrosshairPaint = crosshairPaint;
+                axis.CrosshairSnapEnabled = IsLiveCrosshairEnabled;
+            }
+
+            foreach (var axis in YAxes.OfType<Axis>())
+            {
+                axis.CrosshairPaint = crosshairPaint;
+                axis.CrosshairSnapEnabled = IsLiveCrosshairEnabled;
             }
         }
 
@@ -5878,6 +6575,19 @@ public sealed class CanIdOption
     }
 
     public ushort Value { get; }
+
+    public string Label { get; }
+}
+
+public sealed class CanBitrateOption
+{
+    public CanBitrateOption(uint value, string label)
+    {
+        Value = value;
+        Label = label;
+    }
+
+    public uint Value { get; }
 
     public string Label { get; }
 }

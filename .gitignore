@@ -3,3 +3,9 @@
 /.vs
 .github/copilot-instructions.md
 /out
+/artifacts
+/tests/Cortex.Tests/bin
+/tests/Cortex.Tests/obj
+build-warnings.log
+/InnoSetup Script/Output
+/artifacts/publish

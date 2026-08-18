@@ -12,6 +12,7 @@ namespace Cortex.BindingProxies
             get => GetValue(DataProperty);
             set => SetValue(DataProperty, value);
         }
+
     }
 
 }

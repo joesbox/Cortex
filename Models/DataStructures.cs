@@ -32,11 +32,18 @@ namespace Cortex.Models
         [ObservableProperty]
         public SystemParameters systemParamsStaticData;
 
+        [ObservableProperty]
+        public CellularParameters cellularParams;
+
+        [ObservableProperty]
+        public CellularParameters cellularParamsStaticData;
+
         public DataStructures()
         {
             channelsLiveData = new ObservableCollection<OutputChannel>();
             channelsStaticData = new ObservableCollection<OutputChannel>();
             systemParamsStaticData = new SystemParameters();
+            cellularParamsStaticData = new CellularParameters();
 
             for (int i = 0; i < Constants.NUM_OUTPUT_CHANNELS; i++)
             {
@@ -63,6 +70,7 @@ namespace Cortex.Models
             }
 
             systemParams = new SystemParameters();
+            cellularParams = new CellularParameters();
         }
     }
 }

@@ -6,3 +6,4 @@
 using System.Diagnostics.CodeAnalysis;
 
 [assembly: SuppressMessage("StyleCop.CSharp.ReadabilityRules", "SA1101:Prefix local calls with this", Justification = "<Pending>", Scope = "member", Target = "~M:Cortex.ViewModels.MainWindowViewModel._portService_DataUpdated(Cortex.Models.DataStructures)")]
+namespace Cortex;

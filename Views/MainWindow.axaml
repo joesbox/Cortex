@@ -61,6 +61,7 @@
                     <MenuItem Command="{Binding ExitCommand}" Header="Exit" />
                 </MenuItem>
                 <MenuItem Header="Help">
+                    <MenuItem Command="{Binding OpenDetailedLogFolderCommand}" Header="Open Detailed Log Folder" />
                     <MenuItem Command="{Binding ShowAboutCommand}" Header="About" />
                 </MenuItem>
             </Menu>
@@ -72,7 +73,7 @@
                 Margin="0,0,0,0"
                 HorizontalAlignment="Left"
                 Fill="#302042" />
-            <TabControl SelectedIndex="0" TabStripPlacement="Left">
+            <TabControl x:Name="MainTabs" SelectedIndex="0" TabStripPlacement="Left">
                 <!--  Connection tab  -->
                 <TabItem
                     Padding="10,0,10,0"

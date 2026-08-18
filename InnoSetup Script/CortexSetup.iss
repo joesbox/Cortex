@@ -2,13 +2,33 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 ; Non-commercial use only
 
+#ifndef MyAppName
 #define MyAppName "Cortex"
-#define MyAppVersion "0.1.5"
+#endif
+
+#ifndef MyAppVersion
+#define MyAppVersion "0.1.6"
+#endif
+
+#ifndef MyAppPublisher
 #define MyAppPublisher "Joe Mann"
+#endif
+
+#ifndef MyAppURL
 #define MyAppURL "https://wiki.joeblogs.uk"
+#endif
+
+#ifndef MyAppExeName
 #define MyAppExeName "Cortex.exe"
+#endif
+
+#ifndef MyProjectRoot
 #define MyProjectRoot ".."
+#endif
+
+#ifndef MyPublishDir
 #define MyPublishDir MyProjectRoot + "\\artifacts\\publish\\win-x64"
+#endif
 
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.

@@ -22,15 +22,24 @@
             var vm = new MainWindowViewModel(this);
             DataContext = vm;
 
+            _ = vm.RestoreProvisioningSessionAsync();
+
             Closing += async (_, args) =>
             {
-                if (_allowCloseWithoutUnsavedPrompt)
+                if (DataContext is not MainWindowViewModel mainViewModel)
                 {
                     return;
                 }
 
-                if (DataContext is not MainWindowViewModel mainViewModel || !mainViewModel.HasPendingConfigChanges)
+                if (_allowCloseWithoutUnsavedPrompt)
                 {
+                    mainViewModel.OnWindowClosing();
+                    return;
+                }
+
+                if (!mainViewModel.HasPendingConfigChanges)
+                {
+                    mainViewModel.OnWindowClosing();
                     return;
                 }
 
@@ -46,6 +55,7 @@
                 }
 
                 _allowCloseWithoutUnsavedPrompt = true;
+                mainViewModel.OnWindowClosing();
                 Close();
             };
 
@@ -308,6 +318,11 @@
 
         private void UpdateConnectionState(bool isConnected)
         {
+            if (!isConnected)
+            {
+                MainTabs.SelectedIndex = 0;
+            }
+
             StatusRect.Classes.Set("connected", isConnected);
             StatusRect.Classes.Set("disconnected", !isConnected);
 

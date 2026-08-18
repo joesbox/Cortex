@@ -21,10 +21,10 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
 
-namespace Cortex.Views
+namespace Cortex.Views;
+
+public partial class LogHistoryTabView : UserControl
 {
-    public partial class LogHistoryTabView : UserControl
-    {
         private const double MinimumVisibleMarkerSpacingPixels = 18;
 
         private readonly DispatcherTimer _logMapRefreshTimer;
@@ -41,8 +41,6 @@ namespace Cortex.Views
         private ScreenPosition? _lastLogMapPointerPosition;
         private LogMapGridRow? _lockedLogMapRow;
         private bool _isLogMapSelectionLocked;
-        private bool _lastLogMapHadRoute;
-        private int _lastLogMapSelectedColumnCount;
 
         public LogHistoryTabView()
         {
@@ -104,8 +102,6 @@ namespace Cortex.Views
 
             _viewModel.PropertyChanged += ViewModel_PropertyChanged;
             _pendingLogMapFitToRoute = true;
-            _lastLogMapHadRoute = false;
-            _lastLogMapSelectedColumnCount = 0;
             QueueLogMapRefresh(immediate: _viewModel.SelectedLogDetailTabIndex == 1);
         }
 
@@ -191,9 +187,7 @@ namespace Cortex.Views
             IReadOnlyList<LogMapGridRow> routeRows = _viewModel.BuildLogMapRows(int.MaxValue, viewport);
             IReadOnlyList<LogMapGridRow> markerRows = BuildDisplayedLogMapMarkerRows(routeRows, maxPointCount);
             IReadOnlyList<LogMapParameterColumn> columns = _viewModel.GetSelectedLogMapParameterColumns();
-            bool shouldCenterLogMap = _pendingLogMapFitToRoute &&
-                routeRows.Count > 0 &&
-                (!_lastLogMapHadRoute || _lastLogMapSelectedColumnCount == 0);
+            bool shouldCenterLogMap = _pendingLogMapFitToRoute && routeRows.Count > 0;
 
             MRect? routeFocusExtent = shouldCenterLogMap
                 ? TryGetLogMapRouteFocusExtent(_viewModel)
@@ -206,9 +200,6 @@ namespace Cortex.Views
             UpdateLogMapInspectionRow();
 
             UpdateLogMapLayers(routeRows, markerRows, routeFocusExtent);
-
-            _lastLogMapHadRoute = routeRows.Count > 0;
-            _lastLogMapSelectedColumnCount = columns.Count;
         }
 
         private int GetLogMapPointBudget()
@@ -852,4 +843,3 @@ namespace Cortex.Views
             _logMap?.Refresh();
         }
     }
-}
