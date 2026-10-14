@@ -7,7 +7,7 @@
 		<BuiltInComInteropSupport>true</BuiltInComInteropSupport>
 		<ApplicationManifest>app.manifest</ApplicationManifest>
 		<AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
-		<Version>0.1.6</Version>
+		<Version>0.1.7</Version>
 		<Copyright>Joe Mann</Copyright>
 		<PackageIcon>cortex.ico</PackageIcon>
 		<ApplicationIcon>Assets\cortex.ico</ApplicationIcon>

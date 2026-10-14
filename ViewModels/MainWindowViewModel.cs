@@ -35,6 +35,7 @@ using static Cortex.ViewModels.MainWindowViewModel;
 
  * Version history:
     ----              -------       ----------------------------------------------------------------------------------------------------------------------------------------------------
+    2026-08-19        v0.1.7        Firmware update check fix for version parsing (detects v0.10 correctly).
     2026-06-20        v0.1.6        Comms protocol fix - much faster saves
                                     Added delayed ON and OFF functions
                                     CAN bus sbaud rate selection added to config screen.
@@ -43,6 +44,7 @@ using static Cortex.ViewModels.MainWindowViewModel;
                                     Added pause/resume in live view.
                                     Cortex application update check and download from GitHub releases.
                                     Added telemetry upload and GSM data settings to config screen.
+                                    Debug log added to help menu.
     2026-04-29        v0.1.5        Channel type change bug fix.
                                     Minor UI bug fixes
                                     Added digital and analogue status CAN IDs to config screen.

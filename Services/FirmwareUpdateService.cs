@@ -8,6 +8,7 @@ using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -538,12 +539,16 @@ namespace Cortex.Services
 
         private sealed class LatestFirmwareResponse
         {
+            [JsonPropertyName("firmware")]
             public string Firmware { get; set; } = string.Empty;
 
+            [JsonPropertyName("signature")]
             public string Signature { get; set; } = string.Empty;
 
+            [JsonPropertyName("size")]
             public long Size { get; set; }
 
+            [JsonPropertyName("version")]
             public string Version { get; set; } = string.Empty;
         }
 
