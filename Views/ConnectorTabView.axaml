@@ -1,0 +1,146 @@
+<UserControl
+    x:Class="Cortex.Views.ConnectorTabView"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Cortex.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:models="using:Cortex.Models"
+    xmlns:vm="using:Cortex.ViewModels"
+    x:DataType="vm:MainWindowViewModel"
+    mc:Ignorable="d">
+    <UserControl.Styles>
+        <Style Selector="TextBlock.connectorTitle">
+            <Setter Property="FontSize" Value="16" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+        <Style Selector="Border.connectorLegendChip">
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="10,6" />
+            <Setter Property="Margin" Value="0,0,8,8" />
+        </Style>
+    </UserControl.Styles>
+    <Grid RowDefinitions="Auto,2*">
+        <Border
+            Grid.Row="0"
+            Margin="8,8,8,4"
+            Padding="10"
+            BorderBrush="#443553"
+            BorderThickness="1"
+            CornerRadius="10">
+            <Border.Background>
+                <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                    <GradientStop Color="#FF141722" Offset="0" />
+                    <GradientStop Color="#FF221C34" Offset="0.5" />
+                    <GradientStop Color="#FF302042" Offset="1" />
+                </LinearGradientBrush>
+            </Border.Background>
+            <StackPanel Spacing="8">
+                <StackPanel>
+                    <TextBlock Classes="connectorTitle" Text="35-way Ampseal connector" />
+                </StackPanel>
+                <ItemsControl ItemsSource="{Binding ConnectorLegendItems}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <WrapPanel />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="models:ConnectorLegendItem">
+                            <Border Classes="connectorLegendChip" Background="{Binding Background}">
+                                <TextBlock Foreground="{Binding Foreground}" Text="{Binding Text}" />
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <controls:ConnectorDiagramControl
+                    Height="500"
+                    Margin="0,-55,0,-55"
+                    HorizontalAlignment="Stretch"
+                    Pins="{Binding ConnectorPins}" />
+            </StackPanel>
+        </Border>
+        <Border
+            Grid.Row="1"
+            Margin="8,4,8,8"
+            Padding="12"
+            BorderBrush="#443553"
+            BorderThickness="1"
+            CornerRadius="10">
+            <Border.Background>
+                <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                    <GradientStop Color="#FF141722" Offset="0" />
+                    <GradientStop Color="#FF221C34" Offset="0.5" />
+                    <GradientStop Color="#FF302042" Offset="1" />
+                </LinearGradientBrush>
+            </Border.Background>
+            <Grid RowDefinitions="Auto,*" RowSpacing="10">
+                <StackPanel>
+                    <TextBlock Classes="connectorTitle" Margin="0,0,0,4" Text="Pin summary" />
+                </StackPanel>
+                <DataGrid
+                    Grid.Row="1"
+                    AutoGenerateColumns="False"
+                    CanUserReorderColumns="False"
+                    CanUserResizeColumns="True"
+                    CanUserSortColumns="True"
+                    GridLinesVisibility="All"
+                    IsReadOnly="True"
+                    MinWidth="1360"
+                    ItemsSource="{Binding ConnectorPins}">
+                    <DataGrid.Styles>
+
+                        <Style Selector="DataGridColumnHeader">
+                            <Setter Property="FontSize" Value="14" />
+                            <Setter Property="FontWeight" Value="SemiBold" />
+                        </Style>
+                    </DataGrid.Styles>
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Binding="{Binding PinNumberText}" Header="Pin" MinWidth="80" Width="80" />
+                        <DataGridTextColumn Binding="{Binding PhysicalFunction}" Header="Physical role" MinWidth="260" Width="2*" />
+                        <DataGridTemplateColumn Header="Configured type" MinWidth="230" Width="220">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate x:DataType="models:ConnectorPinDisplayItem">
+                                    <Border
+                                        Background="{Binding BadgeBrush}"
+                                        CornerRadius="6"
+                                        Padding="8,4"
+                                        HorizontalAlignment="Stretch"
+                                        VerticalAlignment="Center">
+                                        <TextBlock
+                                            Foreground="{Binding PinTextBrush}"
+                                            FontWeight="SemiBold"
+                                            HorizontalAlignment="Center"
+                                            Text="{Binding ConfiguredType}" />
+                                    </Border>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTextColumn Binding="{Binding SettingsSummary}" Header="Settings" MinWidth="320" Width="3*" />
+                        <DataGridTemplateColumn Header="Active" MinWidth="150" Width="150">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate x:DataType="models:ConnectorPinDisplayItem">
+                                    <Border
+                                        Background="{Binding StatusBrush}"
+                                        CornerRadius="6"
+                                        Padding="8,4"
+                                        HorizontalAlignment="Stretch"
+                                        VerticalAlignment="Center">
+                                        <TextBlock
+                                            Foreground="#F7FAFF"
+                                            FontWeight="SemiBold"
+                                            HorizontalAlignment="Center"
+                                            Text="{Binding ActiveState}" />
+                                    </Border>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTextColumn Binding="{Binding LiveValue}" Header="Live reading" MinWidth="220" Width="220" />
+                        <DataGridTextColumn Binding="{Binding LimitsSummary}" Header="Protection / scaling" MinWidth="330" Width="3*" />
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>

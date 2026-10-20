@@ -1,13 +1,13 @@
-﻿
+
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.13.35931.197
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Cortex", "Cortex.csproj", "{6DE3CFE7-CF24-4A42-80AF-99DC0C807D63}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Cortex", "Cortex.csproj", "{6DE3CFE7-CF24-4A42-80AF-99DC0C807D63}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{0AB3BF05-4346-4AA6-1389-037BE0695223}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Cortex.Tests", "tests\Cortex.Tests\Cortex.Tests.csproj", "{0083CA12-3BE0-4C4D-BAD9-352A8695EEFE}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Cortex.Tests", "tests\Cortex.Tests\Cortex.Tests.csproj", "{0083CA12-3BE0-4C4D-BAD9-352A8695EEFE}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -54,3 +54,4 @@ Global
 		SolutionGuid = {D6AFE939-6E0E-47FF-87A2-C06AF51E54FA}
 	EndGlobalSection
 EndGlobal
+

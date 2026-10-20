@@ -1,4 +1,5 @@
 using Cortex.Models;
+using Cortex.Services;
 using System;
 using System.Collections.Generic;
 using System.Reflection;
@@ -8,6 +9,18 @@ namespace Cortex.Tests;
 
 public class SerialPortProtocolTests
 {
+    [Theory]
+    [InlineData(OutputChannel.MathOperandType.Constant, 0)]
+    [InlineData(OutputChannel.MathOperandType.Channel, 1)]
+    [InlineData(OutputChannel.MathOperandType.AnalogueInput, 2)]
+    [InlineData(OutputChannel.MathOperandType.SystemValue, 3)]
+    [InlineData(OutputChannel.MathOperandType.Rule, 4)]
+    [InlineData(OutputChannel.MathOperandType.DigitalInput, 5)]
+    public void MathOperandType_MatchesControllerProtocol(OutputChannel.MathOperandType operandType, int expected)
+    {
+        Assert.Equal((byte)expected, (byte)operandType);
+    }
+
     [Fact]
     public void ExpectsFramedResponse_IsTrue_ForProvisioningAndLiveDataCommands()
     {
@@ -20,6 +33,190 @@ public class SerialPortProtocolTests
     {
         Assert.False(InvokeExpectsFramedResponse(Constants.COMMAND_ID_BEGIN));
         Assert.False(InvokeExpectsFramedResponse(Constants.COMMAND_ID_SAVECHANGES));
+    }
+
+    [Fact]
+    public void ExpectsFramedResponse_IsTrue_ForMathStatusCommand()
+    {
+        Assert.True(InvokeExpectsFramedResponse(Constants.COMMAND_ID_MATH_STATUS));
+    }
+
+    [Fact]
+    public void ExpectsFramedResponse_IsTrue_ForDigitalInputStatusCommand()
+    {
+        Assert.True(InvokeExpectsFramedResponse(Constants.COMMAND_ID_DIGITAL_INPUT_STATUS));
+    }
+
+    [Fact]
+    public void ProcessData_ParsesDigitalInputStatusFrame()
+    {
+        SerialPortService service = CreateService();
+
+        try
+        {
+            SetReceivedDataBuffer(service, BuildDigitalInputStatusFrame(0, 1, 0, 1, 0, 1, 0, 1));
+
+            Assert.True((bool)InvokeInstanceMethod(service, "TryDequeueNextFramedPacket")!);
+            Assert.True((bool)InvokeInstanceMethod(service, "ParseDigitalInputStatusPacket")!);
+
+            DataStructures data = GetField<DataStructures>(service, "dataStructures");
+            Assert.False(data.DigitalInputsLiveData[0].LiveElectricalState);
+            Assert.True(data.DigitalInputsLiveData[1].LiveElectricalState);
+            Assert.Equal("Supported", GetField<object>(service, "_digitalInputStatusSupportState").ToString());
+        }
+        finally
+        {
+            StopProcessTimer(service);
+        }
+    }
+
+    [Fact]
+    public void ProcessData_RejectsDigitalInputStatusFrameWithBadChecksum()
+    {
+        SerialPortService service = CreateService();
+
+        try
+        {
+            byte[] frame = BuildDigitalInputStatusFrame(1, 1, 1, 1, 1, 1, 1, 1);
+            frame[^1]++;
+            SetReceivedDataBuffer(service, frame);
+
+            bool processed = (bool)InvokeInstanceMethod(service, "processData")!;
+            DataStructures data = GetField<DataStructures>(service, "dataStructures");
+
+            Assert.False(processed);
+            Assert.All(data.DigitalInputsLiveData, input => Assert.Null(input.LiveElectricalState));
+        }
+        finally
+        {
+            StopProcessTimer(service);
+        }
+    }
+
+    [Fact]
+    public void ProcessData_WaitsForCompleteDigitalInputStatusFrameAcrossFragments()
+    {
+        SerialPortService service = CreateService();
+
+        try
+        {
+            byte[] frame = BuildDigitalInputStatusFrame(1, 0, 1, 0, 1, 0, 1, 0);
+            AppendReceivedDataBuffer(service, frame[..7]);
+            Assert.False((bool)InvokeInstanceMethod(service, "TryDequeueNextFramedPacket")!);
+
+            AppendReceivedDataBuffer(service, frame[7..]);
+            Assert.True((bool)InvokeInstanceMethod(service, "TryDequeueNextFramedPacket")!);
+            Assert.True((bool)InvokeInstanceMethod(service, "ParseDigitalInputStatusPacket")!);
+
+            DataStructures data = GetField<DataStructures>(service, "dataStructures");
+            Assert.True(data.DigitalInputsLiveData[0].LiveElectricalState);
+            Assert.False(data.DigitalInputsLiveData[1].LiveElectricalState);
+        }
+        finally
+        {
+            StopProcessTimer(service);
+        }
+    }
+
+    [Fact]
+    public void ParseDigitalInputStatusPacket_RejectsInvalidStateValues()
+    {
+        SerialPortService service = CreateService();
+
+        try
+        {
+            byte[] frame = BuildDigitalInputStatusFrame(0, 1, 2, 1, 0, 1, 0, 1);
+            SetField(service, "dataBytes", frame);
+            SetField(service, "dataLength", frame.Length);
+
+            bool parsed = (bool)InvokeInstanceMethod(service, "ParseDigitalInputStatusPacket")!;
+
+            Assert.False(parsed);
+        }
+        finally
+        {
+            StopProcessTimer(service);
+        }
+    }
+
+    [Fact]
+    public void UpdateDigitalInputStatusSupport_MarksUnsupportedAfterProbeTimeout()
+    {
+        SerialPortService service = CreateService();
+
+        try
+        {
+            DataStructures data = GetField<DataStructures>(service, "dataStructures");
+            data.DigitalInputsLiveData[0].LiveElectricalState = true;
+            SetField(service, "_lastDigitalInputStatusRequestSentTick", Environment.TickCount64 - 4000);
+
+            InvokeInstanceMethod(service, "UpdateDigitalInputStatusSupport", Environment.TickCount64, 1500);
+
+            Assert.Equal("Unsupported", GetField<object>(service, "_digitalInputStatusSupportState").ToString());
+            Assert.Null(data.DigitalInputsLiveData[0].LiveElectricalState);
+        }
+        finally
+        {
+            StopProcessTimer(service);
+        }
+    }
+
+    [Fact]
+    public void MarkControllerSessionLost_ResetsDigitalInputStatusSupport()
+    {
+        SerialPortService service = CreateService();
+
+        try
+        {
+            SetReceivedDataBuffer(service, BuildDigitalInputStatusFrame(1, 1, 1, 1, 1, 1, 1, 1));
+            Assert.True((bool)InvokeInstanceMethod(service, "TryDequeueNextFramedPacket")!);
+            Assert.True((bool)InvokeInstanceMethod(service, "ParseDigitalInputStatusPacket")!);
+
+            InvokeInstanceMethod(service, "MarkControllerSessionLost", true);
+            DataStructures data = GetField<DataStructures>(service, "dataStructures");
+
+            Assert.Equal("Unknown", GetField<object>(service, "_digitalInputStatusSupportState").ToString());
+            Assert.All(data.DigitalInputsLiveData, input => Assert.Null(input.LiveElectricalState));
+        }
+        finally
+        {
+            StopProcessTimer(service);
+        }
+    }
+
+    [Fact]
+    public void AdvanceConfigCursor_ForMathRuleParameters_WalksRuleSlotsBeforeNextParameter()
+    {
+        SerialPortService service = CreateService();
+
+        try
+        {
+            SetField(service, "settingIndex", 0);
+            SetField(service, "parameterIndex", 36);
+            SetField(service, "mathRuleIndex", 0);
+            SetField(service, "channelIndex", 0);
+            SetField(service, "sendingConfig", true);
+            SetField(service, "_controllerCapabilities", ControllerProtocolCapabilities.V010);
+
+            bool advanced = (bool)InvokeInstanceMethod(service, "AdvanceConfigCursor")!;
+
+            Assert.True(advanced);
+            Assert.Equal(36, GetField<int>(service, "parameterIndex"));
+            Assert.Equal(1, GetField<int>(service, "mathRuleIndex"));
+
+            for (int i = 1; i < Constants.NUM_MATH_RULE_SLOTS; i++)
+            {
+                advanced = (bool)InvokeInstanceMethod(service, "AdvanceConfigCursor")!;
+            }
+
+            Assert.True(advanced);
+            Assert.Equal(37, GetField<int>(service, "parameterIndex"));
+            Assert.Equal(0, GetField<int>(service, "mathRuleIndex"));
+        }
+        finally
+        {
+            StopProcessTimer(service);
+        }
     }
 
     [Fact]
@@ -231,6 +428,15 @@ public class SerialPortProtocolTests
         field.SetValue(instance, value);
     }
 
+    private static T GetField<T>(object instance, string fieldName)
+    {
+        FieldInfo field = instance.GetType().GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException($"Unable to find field {fieldName}.");
+
+        return (T)(field.GetValue(instance)
+            ?? throw new InvalidOperationException($"Field {fieldName} was null."));
+    }
+
     private static List<byte> GetSendBuffer(SerialPortService service)
     {
         FieldInfo sendBufferField = typeof(SerialPortService).GetField("_sendBuffer", BindingFlags.NonPublic | BindingFlags.Instance)
@@ -238,6 +444,48 @@ public class SerialPortProtocolTests
 
         return (List<byte>)(sendBufferField.GetValue(service)
             ?? throw new InvalidOperationException("_sendBuffer was null."));
+    }
+
+    private static void SetReceivedDataBuffer(SerialPortService service, params byte[] bytes)
+    {
+        FieldInfo bufferField = typeof(SerialPortService).GetField("receivedDataBuffer", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException("Unable to find receivedDataBuffer field.");
+
+        bufferField.SetValue(service, new List<byte>(bytes));
+    }
+
+    private static void AppendReceivedDataBuffer(SerialPortService service, params byte[] bytes)
+    {
+        FieldInfo bufferField = typeof(SerialPortService).GetField("receivedDataBuffer", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException("Unable to find receivedDataBuffer field.");
+
+        List<byte> buffer = (List<byte>)(bufferField.GetValue(service)
+            ?? throw new InvalidOperationException("receivedDataBuffer was null."));
+        buffer.AddRange(bytes);
+    }
+
+    private static byte[] BuildDigitalInputStatusFrame(params byte[] states)
+    {
+        List<byte> frame =
+        [
+            Constants.SERIAL_HEADER1,
+            Constants.SERIAL_HEADER2,
+            (byte)Constants.COMMAND_ID_DIGITAL_INPUT_STATUS,
+            (byte)states.Length,
+        ];
+
+        frame.AddRange(states);
+        frame.Add(Constants.SERIAL_TRAILER1);
+        frame.Add(Constants.SERIAL_TRAILER2);
+
+        uint checksum = 0;
+        foreach (byte value in frame)
+        {
+            checksum += value;
+        }
+
+        frame.AddRange(BitConverter.GetBytes(checksum));
+        return frame.ToArray();
     }
 
     private static void StopProcessTimer(SerialPortService service)

@@ -24,12 +24,20 @@ public sealed class ConfigurationSaveCompletedEventArgs : EventArgs
 
 public class SerialPortService
 {
+    private enum DigitalInputStatusSupportState
+    {
+        Unknown,
+        Supported,
+        Unsupported,
+    }
+
     private static readonly bool EnableLogTransferDebug = false;
     private const int ExtendedLiveSystemPayloadBytes = 23;
     private const int ExtendedStaticSystemPayloadBytes = 61;
     private const int StaticTimeZoneRulePayloadBytes = Constants.TIME_ZONE_RULE_LENGTH;
     private const int StaticCellularPayloadBytes = Constants.CELLULAR_STATIC_PAYLOAD_BYTES;
     private const int StaticSnapshotRetryIntervalMs = 1500;
+    private const int DigitalInputStatusProbeTimeoutMs = 2500;
     private const int StandaloneCommandDrainDelayMs = 25;
     private const int OpenRemoteProvisioningMaxRequestBytes = 8191;
 
@@ -76,6 +84,7 @@ public class SerialPortService
     private int channelIndex;
     private int analogueIndex;
     private int digitalIndex;
+    private int mathRuleIndex;
 
     private TaskCompletionSource<IReadOnlyList<ControllerLogFileInfo>>? _logFileListTcs;
     private TaskCompletionSource<bool>? _logOpenTcs;
@@ -95,8 +104,13 @@ public class SerialPortService
     private volatile bool _logTransferSessionActive;
     private long _lastLiveRequestSentTick;
     private long _lastLiveStatusFrameTick;
+    private long _lastDigitalInputStatusRequestSentTick;
+    private long _lastDigitalInputStatusFrameTick;
+    private long _lastMathStatusRequestSentTick;
+    private long _lastMathStatusFrameTick;
     private long _lastStaticRequestSentTick;
     private long _lastHandshakeAttemptTick;
+    private DigitalInputStatusSupportState _digitalInputStatusSupportState = DigitalInputStatusSupportState.Unknown;
     private int _lastChunkProgressLogged = -1;
     private int _txLogChunkCounter = 0;
     private long _lastPendingFrameLogTick = 0;
@@ -105,6 +119,7 @@ public class SerialPortService
     private int _postLogRefreshRequestRetryCount;
     private bool _repeatAnalogueSettingsAfterChannelsPending;
     private bool _finalAnalogueResendActive;
+    private int _mathStatusPollingChannelIndex = -1;
     private ControllerProtocolCapabilities _controllerCapabilities = ControllerProtocolCapabilities.V09;
 
 
@@ -227,6 +242,8 @@ public class SerialPortService
     {
         return commandId == Constants.COMMAND_ID_REQUEST ||
                commandId == Constants.COMMAND_ID_REQUEST_STATIC ||
+               commandId == Constants.COMMAND_ID_DIGITAL_INPUT_STATUS ||
+               commandId == Constants.COMMAND_ID_MATH_STATUS ||
                commandId == Constants.COMMAND_ID_LOG_LIST ||
                commandId == Constants.COMMAND_ID_LOG_CHUNK ||
                commandId == Constants.COMMAND_ID_LOG_STREAM ||
@@ -288,6 +305,8 @@ public class SerialPortService
         lastCommandSent = '\0';
         _lastLiveRequestSentTick = 0;
         _lastLiveStatusFrameTick = 0;
+        _lastMathStatusRequestSentTick = 0;
+        _lastMathStatusFrameTick = 0;
         _lastStaticRequestSentTick = 0;
         _lastHandshakeAttemptTick = 0;
 
@@ -303,11 +322,53 @@ public class SerialPortService
         _controllerCapabilities = ControllerProtocolCapabilities.V09;
         _lastLiveRequestSentTick = 0;
         _lastLiveStatusFrameTick = 0;
+        _lastDigitalInputStatusRequestSentTick = 0;
+        _lastDigitalInputStatusFrameTick = 0;
+        _lastMathStatusRequestSentTick = 0;
+        _lastMathStatusFrameTick = 0;
         _lastStaticRequestSentTick = 0;
+        _digitalInputStatusSupportState = DigitalInputStatusSupportState.Unknown;
+        ClearDigitalInputLiveStates();
 
         if (requestStaticSnapshot)
         {
             UpdateStaticData = true;
+        }
+    }
+
+    private void ClearDigitalInputLiveStates()
+    {
+        foreach (DigitalInput input in dataStructures.DigitalInputsLiveData)
+        {
+            input.LiveElectricalState = null;
+        }
+    }
+
+    private void MarkDigitalInputStatusUnsupported()
+    {
+        _digitalInputStatusSupportState = DigitalInputStatusSupportState.Unsupported;
+        _lastDigitalInputStatusFrameTick = 0;
+        ClearDigitalInputLiveStates();
+    }
+
+    private void UpdateDigitalInputStatusSupport(long now, int idleThresholdMs)
+    {
+        if (_digitalInputStatusSupportState != DigitalInputStatusSupportState.Unknown ||
+            _lastDigitalInputStatusRequestSentTick == 0)
+        {
+            return;
+        }
+
+        if (_lastDigitalInputStatusFrameTick >= _lastDigitalInputStatusRequestSentTick)
+        {
+            _digitalInputStatusSupportState = DigitalInputStatusSupportState.Supported;
+            return;
+        }
+
+        int timeoutMs = Math.Max(idleThresholdMs * 2, DigitalInputStatusProbeTimeoutMs);
+        if ((now - _lastDigitalInputStatusRequestSentTick) >= timeoutMs)
+        {
+            MarkDigitalInputStatusUnsupported();
         }
     }
 
@@ -646,6 +707,74 @@ public class SerialPortService
                 return false;
             }
 
+            if (receivedDataBuffer[0] == Constants.SERIAL_HEADER1 &&
+                receivedDataBuffer[1] == Constants.SERIAL_HEADER2 &&
+                receivedDataBuffer.Count >= 4 &&
+                receivedDataBuffer[2] == (byte)Constants.COMMAND_ID_DIGITAL_INPUT_STATUS)
+            {
+                int stateCount = receivedDataBuffer[3];
+                if (stateCount <= 0 || stateCount > Constants.NUM_DIGITAL_INPUTS)
+                {
+                    receivedDataBuffer.RemoveAt(0);
+                    _packetReady = BufferContainsTrailer(receivedDataBuffer);
+                    return false;
+                }
+
+                int packetLength = stateCount + 10;
+                if (receivedDataBuffer.Count < packetLength)
+                {
+                    return false;
+                }
+
+                int trailerIndex = 4 + stateCount;
+                bool invalidDigitalStatusFrame =
+                    receivedDataBuffer[trailerIndex] != Constants.SERIAL_TRAILER1 ||
+                    receivedDataBuffer[trailerIndex + 1] != Constants.SERIAL_TRAILER2;
+
+                for (int i = 0; i < stateCount && !invalidDigitalStatusFrame; i++)
+                {
+                    byte state = receivedDataBuffer[4 + i];
+                    if (state > 1)
+                    {
+                        invalidDigitalStatusFrame = true;
+                    }
+                }
+
+                int localCheckSum = 0;
+                for (int i = 0; i < packetLength - 4; i++)
+                {
+                    localCheckSum += receivedDataBuffer[i];
+                }
+
+                uint receivedCheckSum =
+                    (uint)(receivedDataBuffer[packetLength - 4]
+                    | (receivedDataBuffer[packetLength - 3] << 8)
+                    | (receivedDataBuffer[packetLength - 2] << 16)
+                    | (receivedDataBuffer[packetLength - 1] << 24));
+
+                if (invalidDigitalStatusFrame || localCheckSum != receivedCheckSum)
+                {
+                    receivedDataBuffer.RemoveAt(0);
+                    _packetReady = BufferContainsTrailer(receivedDataBuffer);
+                    return false;
+                }
+
+                dataLength = packetLength;
+                if (dataLength > dataBytes.Length)
+                {
+                    dataBytes = new byte[dataLength * 2];
+                }
+
+                for (int i = 0; i < dataLength; i++)
+                {
+                    dataBytes[i] = receivedDataBuffer[i];
+                }
+
+                receivedDataBuffer.RemoveRange(0, dataLength);
+                _packetReady = BufferContainsTrailer(receivedDataBuffer);
+                return true;
+            }
+
             // Fast path for streamed LOG_CHUNK frames:
             // frame = header(2) + cmd(1) + progress(1) + done(1) + chunkLen(2) + text(chunkLen) + trailer(2) + checksum(4)
             if (receivedDataBuffer[0] == Constants.SERIAL_HEADER1 &&
@@ -822,6 +951,31 @@ public class SerialPortService
             target.SoftStopTime = source.SoftStopTime;
             target.IntermittentOnTime = source.IntermittentOnTime;
             target.IntermittentOffTime = source.IntermittentOffTime;
+            target.MathRuleCount = source.MathRuleCount;
+            target.MathRootRule = source.MathRootRule;
+            target.MathOutputMode = source.MathOutputMode;
+            target.MathCalculatedRootValue = source.MathCalculatedRootValue;
+            target.MathError = source.MathError;
+            target.EnsureMathRuleSlots();
+            source.EnsureMathRuleSlots();
+            for (int ruleIndex = 0; ruleIndex < Constants.NUM_MATH_RULE_SLOTS; ruleIndex++)
+            {
+                OutputChannel.MathRule sourceRule = source.MathRules[ruleIndex];
+                OutputChannel.MathRule targetRule = target.MathRules[ruleIndex];
+                targetRule.Operation = sourceRule.Operation;
+                targetRule.HysteresisEnabled = sourceRule.HysteresisEnabled;
+                targetRule.OnThreshold = sourceRule.OnThreshold;
+                targetRule.OffThreshold = sourceRule.OffThreshold;
+                targetRule.OperandAType = sourceRule.OperandAType;
+                targetRule.OperandAIndex = sourceRule.OperandAIndex;
+                targetRule.OperandAConstant = sourceRule.OperandAConstant;
+                targetRule.OperandBType = sourceRule.OperandBType;
+                targetRule.OperandBIndex = sourceRule.OperandBIndex;
+                targetRule.OperandBConstant = sourceRule.OperandBConstant;
+                targetRule.RuntimeValue = sourceRule.RuntimeValue;
+                targetRule.RuntimeError = sourceRule.RuntimeError;
+                targetRule.Evaluated = sourceRule.Evaluated;
+            }
             target.DelayedOn = source.DelayedOn;
             target.DelayedOnTime = source.DelayedOnTime;
             target.DelayedOff = source.DelayedOff;
@@ -972,6 +1126,129 @@ public class SerialPortService
         dataStructures.SystemParams.SystemCurrent = reader.ReadSingle();
         dataStructures.SystemParams.ErrorFlags = reader.ReadUInt16();
         dataStructures.SystemParams.MobileSignalPercent = reader.ReadByte();
+        return true;
+    }
+
+    private bool ParseDigitalInputStatusPacket()
+    {
+        int stateCount = dataBytes[3];
+        if (stateCount <= 0 || stateCount > Constants.NUM_DIGITAL_INPUTS || dataLength != stateCount + 10)
+        {
+            return false;
+        }
+
+        int trailerIndex = 4 + stateCount;
+        if (dataBytes[trailerIndex] != Constants.SERIAL_TRAILER1 ||
+            dataBytes[trailerIndex + 1] != Constants.SERIAL_TRAILER2)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < stateCount; i++)
+        {
+            byte state = dataBytes[4 + i];
+            if (state > 1)
+            {
+                return false;
+            }
+
+            if (i < dataStructures.DigitalInputsLiveData.Count)
+            {
+                dataStructures.DigitalInputsLiveData[i].LiveElectricalState = state != 0;
+            }
+        }
+
+        for (int i = stateCount; i < dataStructures.DigitalInputsLiveData.Count; i++)
+        {
+            dataStructures.DigitalInputsLiveData[i].LiveElectricalState = null;
+        }
+
+        _digitalInputStatusSupportState = DigitalInputStatusSupportState.Supported;
+        return true;
+    }
+
+    private bool ParseMathStatusPacket()
+    {
+        if (dataBytes[3] != Constants.NUM_OUTPUT_CHANNELS)
+        {
+            return false;
+        }
+
+        int packetEndIndex = dataLength - 4;
+        var reader = new ByteReader(dataBytes, 4);
+        int channelCount = dataBytes[3];
+
+        const int bytesPerMathRule = 28;
+        const int bytesPerMathChannel = 10 + (Constants.NUM_MATH_RULE_SLOTS * bytesPerMathRule);
+        if ((packetEndIndex - reader.Position) < (channelCount * bytesPerMathChannel))
+        {
+            return false;
+        }
+
+        for (int channelIndex = 0; channelIndex < channelCount; channelIndex++)
+        {
+            byte channelType = reader.ReadByte();
+            byte ruleCount = reader.ReadByte();
+            byte rootRule = reader.ReadByte();
+            byte outputMode = reader.ReadByte();
+            float rootValue = reader.ReadSingle();
+            byte channelMathError = reader.ReadByte();
+            byte enabled = reader.ReadByte();
+
+            OutputChannel? targetChannel = channelIndex < dataStructures.ChannelsLiveData.Count
+                ? dataStructures.ChannelsLiveData[channelIndex]
+                : null;
+
+            if (targetChannel != null)
+            {
+                targetChannel.ChanType = (ChannelType)channelType;
+                targetChannel.MathRuleCount = ruleCount;
+                targetChannel.MathRootRule = rootRule;
+                targetChannel.MathOutputMode = outputMode;
+                targetChannel.MathCalculatedRootValue = rootValue;
+                targetChannel.MathError = channelMathError;
+                targetChannel.Enabled = enabled;
+                targetChannel.EnsureMathRuleSlots();
+            }
+
+            for (int ruleIndex = 0; ruleIndex < Constants.NUM_MATH_RULE_SLOTS; ruleIndex++)
+            {
+                byte operation = reader.ReadByte();
+                byte hysteresis = reader.ReadByte();
+                float onThreshold = reader.ReadSingle();
+                float offThreshold = reader.ReadSingle();
+                byte operandAType = reader.ReadByte();
+                byte operandAIndex = reader.ReadByte();
+                float operandAConstant = reader.ReadSingle();
+                byte operandBType = reader.ReadByte();
+                byte operandBIndex = reader.ReadByte();
+                float operandBConstant = reader.ReadSingle();
+                float runtimeValue = reader.ReadSingle();
+                byte runtimeError = reader.ReadByte();
+                byte evaluated = reader.ReadByte();
+
+                if (targetChannel == null)
+                {
+                    continue;
+                }
+
+                OutputChannel.MathRule rule = targetChannel.MathRules[ruleIndex];
+                rule.Operation = operation;
+                rule.HysteresisEnabled = hysteresis;
+                rule.OnThreshold = onThreshold;
+                rule.OffThreshold = offThreshold;
+                rule.OperandAType = operandAType;
+                rule.OperandAIndex = operandAIndex;
+                rule.OperandAConstant = operandAConstant;
+                rule.OperandBType = operandBType;
+                rule.OperandBIndex = operandBIndex;
+                rule.OperandBConstant = operandBConstant;
+                rule.RuntimeValue = runtimeValue;
+                rule.RuntimeError = runtimeError;
+                rule.Evaluated = evaluated;
+            }
+        }
+
         return true;
     }
 
@@ -1195,11 +1472,21 @@ public class SerialPortService
                         ParseLiveStatusPacket();
                         break;
 
+                    case (byte)Constants.COMMAND_ID_DIGITAL_INPUT_STATUS:
+                        _lastDigitalInputStatusFrameTick = Environment.TickCount64;
+                        ParseDigitalInputStatusPacket();
+                        break;
+
                     case (byte)Constants.COMMAND_ID_REQUEST_STATIC:
                         _lastLiveStatusFrameTick = Environment.TickCount64;
                         _awaitingPostLogRefreshStatusFrame = false;
                         _postLogRefreshRequestRetryCount = 0;
                         ParseStaticStatusPacket();
+                        break;
+
+                    case (byte)Constants.COMMAND_ID_MATH_STATUS:
+                        _lastMathStatusFrameTick = Environment.TickCount64;
+                        ParseMathStatusPacket();
                         break;
 
                     case (byte)Constants.COMMAND_ID_LOG_LIST:
@@ -1370,10 +1657,24 @@ public class SerialPortService
         switch (settingIndex)
         {
             case 0: // Channel data
-                parameterIndex++;
+                if (parameterIndex >= 36 && parameterIndex <= Constants.LAST_CHANNEL_PARAM_INDEX)
+                {
+                    mathRuleIndex++;
+                    if (mathRuleIndex >= Constants.NUM_MATH_RULE_SLOTS)
+                    {
+                        mathRuleIndex = 0;
+                        parameterIndex++;
+                    }
+                }
+                else
+                {
+                    parameterIndex++;
+                }
+
                 if (parameterIndex > _controllerCapabilities.LastChannelParameterIndex)
                 {
                     parameterIndex = 0;
+                    mathRuleIndex = 0;
                     channelIndex++;
                     if (channelIndex >= Constants.NUM_OUTPUT_CHANNELS)
                     {
@@ -1455,7 +1756,7 @@ public class SerialPortService
 
         if (!sendingConfig)
         {
-            parameterIndex = channelIndex = analogueIndex = settingIndex = digitalIndex = 0;
+            parameterIndex = channelIndex = analogueIndex = settingIndex = digitalIndex = mathRuleIndex = 0;
             return false;
         }
 
@@ -1967,6 +2268,182 @@ public class SerialPortService
                             AddData(0, true);
                             AddData(0, true);
                             AddData(0, true);
+                        }
+                        break;
+                    case 33: // MATH rule count
+                        if (dataStructures.ChannelsLiveData[channelIndex].MathRuleCount != settingsData.ChannelsStaticData[channelIndex].MathRuleCount)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].MathRuleCount, true);
+                        }
+                        break;
+                    case 34: // MATH root rule
+                        if (dataStructures.ChannelsLiveData[channelIndex].MathRootRule != settingsData.ChannelsStaticData[channelIndex].MathRootRule)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].MathRootRule, true);
+                        }
+                        break;
+                    case 35: // MATH output mode
+                        if (dataStructures.ChannelsLiveData[channelIndex].MathOutputMode != settingsData.ChannelsStaticData[channelIndex].MathOutputMode)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].MathOutputMode, true);
+                        }
+                        break;
+                    case 36: // MATH operation
+                        dataStructures.ChannelsLiveData[channelIndex].EnsureMathRuleSlots();
+                        settingsData.ChannelsStaticData[channelIndex].EnsureMathRuleSlots();
+                        if (dataStructures.ChannelsLiveData[channelIndex].MathRules[mathRuleIndex].Operation != settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].Operation)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData((byte)mathRuleIndex, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].Operation, true);
+                        }
+                        break;
+                    case 37: // MATH hysteresis enabled
+                        dataStructures.ChannelsLiveData[channelIndex].EnsureMathRuleSlots();
+                        settingsData.ChannelsStaticData[channelIndex].EnsureMathRuleSlots();
+                        if (dataStructures.ChannelsLiveData[channelIndex].MathRules[mathRuleIndex].HysteresisEnabled != settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].HysteresisEnabled)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData((byte)mathRuleIndex, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].HysteresisEnabled, true);
+                        }
+                        break;
+                    case 38: // MATH on threshold
+                        dataStructures.ChannelsLiveData[channelIndex].EnsureMathRuleSlots();
+                        settingsData.ChannelsStaticData[channelIndex].EnsureMathRuleSlots();
+                        if (dataStructures.ChannelsLiveData[channelIndex].MathRules[mathRuleIndex].OnThreshold != settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].OnThreshold)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData((byte)mathRuleIndex, true);
+                            byte[] floatBytes = BitConverter.GetBytes(settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].OnThreshold);
+                            foreach (byte b in floatBytes)
+                            {
+                                AddData(b, true);
+                            }
+                        }
+                        break;
+                    case 39: // MATH off threshold
+                        dataStructures.ChannelsLiveData[channelIndex].EnsureMathRuleSlots();
+                        settingsData.ChannelsStaticData[channelIndex].EnsureMathRuleSlots();
+                        if (dataStructures.ChannelsLiveData[channelIndex].MathRules[mathRuleIndex].OffThreshold != settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].OffThreshold)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData((byte)mathRuleIndex, true);
+                            byte[] floatBytes = BitConverter.GetBytes(settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].OffThreshold);
+                            foreach (byte b in floatBytes)
+                            {
+                                AddData(b, true);
+                            }
+                        }
+                        break;
+                    case 40: // MATH operand A type
+                        dataStructures.ChannelsLiveData[channelIndex].EnsureMathRuleSlots();
+                        settingsData.ChannelsStaticData[channelIndex].EnsureMathRuleSlots();
+                        if (dataStructures.ChannelsLiveData[channelIndex].MathRules[mathRuleIndex].OperandAType != settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].OperandAType)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData((byte)mathRuleIndex, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].OperandAType, true);
+                        }
+                        break;
+                    case 41: // MATH operand A index
+                        dataStructures.ChannelsLiveData[channelIndex].EnsureMathRuleSlots();
+                        settingsData.ChannelsStaticData[channelIndex].EnsureMathRuleSlots();
+                        if (dataStructures.ChannelsLiveData[channelIndex].MathRules[mathRuleIndex].OperandAIndex != settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].OperandAIndex)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData((byte)mathRuleIndex, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].OperandAIndex, true);
+                        }
+                        break;
+                    case 42: // MATH operand A constant
+                        dataStructures.ChannelsLiveData[channelIndex].EnsureMathRuleSlots();
+                        settingsData.ChannelsStaticData[channelIndex].EnsureMathRuleSlots();
+                        if (dataStructures.ChannelsLiveData[channelIndex].MathRules[mathRuleIndex].OperandAConstant != settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].OperandAConstant)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData((byte)mathRuleIndex, true);
+                            byte[] floatBytes = BitConverter.GetBytes(settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].OperandAConstant);
+                            foreach (byte b in floatBytes)
+                            {
+                                AddData(b, true);
+                            }
+                        }
+                        break;
+                    case 43: // MATH operand B type
+                        dataStructures.ChannelsLiveData[channelIndex].EnsureMathRuleSlots();
+                        settingsData.ChannelsStaticData[channelIndex].EnsureMathRuleSlots();
+                        if (dataStructures.ChannelsLiveData[channelIndex].MathRules[mathRuleIndex].OperandBType != settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].OperandBType)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData((byte)mathRuleIndex, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].OperandBType, true);
+                        }
+                        break;
+                    case 44: // MATH operand B index
+                        dataStructures.ChannelsLiveData[channelIndex].EnsureMathRuleSlots();
+                        settingsData.ChannelsStaticData[channelIndex].EnsureMathRuleSlots();
+                        if (dataStructures.ChannelsLiveData[channelIndex].MathRules[mathRuleIndex].OperandBIndex != settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].OperandBIndex)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData((byte)mathRuleIndex, true);
+                            AddData(settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].OperandBIndex, true);
+                        }
+                        break;
+                    case 45: // MATH operand B constant
+                        dataStructures.ChannelsLiveData[channelIndex].EnsureMathRuleSlots();
+                        settingsData.ChannelsStaticData[channelIndex].EnsureMathRuleSlots();
+                        if (dataStructures.ChannelsLiveData[channelIndex].MathRules[mathRuleIndex].OperandBConstant != settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].OperandBConstant)
+                        {
+                            configChanged = true;
+                            AddData((byte)settingIndex, true);
+                            AddData((byte)parameterIndex, true);
+                            AddData((byte)channelIndex, true);
+                            AddData((byte)mathRuleIndex, true);
+                            byte[] floatBytes = BitConverter.GetBytes(settingsData.ChannelsStaticData[channelIndex].MathRules[mathRuleIndex].OperandBConstant);
+                            foreach (byte b in floatBytes)
+                            {
+                                AddData(b, true);
+                            }
                         }
                         break;
 
@@ -2996,6 +3473,7 @@ public class SerialPortService
         channelIndex = 0;
         analogueIndex = 0;
         digitalIndex = 0;
+        mathRuleIndex = 0;
         parameterIndex = 0;
         _configRetryCount = 0;
         _saveRetryCount = 0;
@@ -3027,6 +3505,14 @@ public class SerialPortService
             if (commandId == Constants.COMMAND_ID_REQUEST_STATIC)
             {
                 _lastStaticRequestSentTick = Environment.TickCount64;
+            }
+            if (commandId == Constants.COMMAND_ID_DIGITAL_INPUT_STATUS)
+            {
+                _lastDigitalInputStatusRequestSentTick = Environment.TickCount64;
+            }
+            if (commandId == Constants.COMMAND_ID_MATH_STATUS)
+            {
+                _lastMathStatusRequestSentTick = Environment.TickCount64;
             }
         }
     }
@@ -3063,15 +3549,11 @@ public class SerialPortService
             return;
         }
 
+        UpdateDigitalInputStatusSupport(now, idleThresholdMs);
+
         long lastActivityTick = Math.Max(_lastLiveRequestSentTick, _lastLiveStatusFrameTick);
 
-        if (lastActivityTick == 0)
-        {
-            SendCommand(Constants.COMMAND_ID_REQUEST);
-            return;
-        }
-
-        if ((now - lastActivityTick) >= reconnectThresholdMs)
+        if (lastActivityTick != 0 && (now - lastActivityTick) >= reconnectThresholdMs)
         {
             LoggingService.AddLog("Controller comms lost. Reconnecting...");
             MarkControllerSessionLost(requestStaticSnapshot: true);
@@ -3079,9 +3561,33 @@ public class SerialPortService
             return;
         }
 
-        if ((now - lastActivityTick) >= idleThresholdMs)
+        if (lastActivityTick == 0 || (now - lastActivityTick) >= idleThresholdMs)
         {
             SendCommand(Constants.COMMAND_ID_REQUEST);
+        }
+
+        if (_digitalInputStatusSupportState != DigitalInputStatusSupportState.Unsupported)
+        {
+            int digitalStatusPollIntervalMs = _digitalInputStatusSupportState == DigitalInputStatusSupportState.Supported
+                ? idleThresholdMs
+                : Math.Max(idleThresholdMs * 2, DigitalInputStatusProbeTimeoutMs);
+
+            if (_lastDigitalInputStatusRequestSentTick == 0 ||
+                (now - _lastDigitalInputStatusRequestSentTick) >= digitalStatusPollIntervalMs)
+            {
+                SendCommand(Constants.COMMAND_ID_DIGITAL_INPUT_STATUS);
+            }
+        }
+
+        if (_mathStatusPollingChannelIndex >= 0 &&
+            _mathStatusPollingChannelIndex < dataStructures.ChannelsLiveData.Count &&
+            dataStructures.ChannelsLiveData[_mathStatusPollingChannelIndex].ChanType == ChannelType.MATH)
+        {
+            int mathIdleThresholdMs = Math.Max(idleThresholdMs * 3, idleThresholdMs);
+            if (_lastMathStatusRequestSentTick == 0 || (now - _lastMathStatusRequestSentTick) >= mathIdleThresholdMs)
+            {
+                SendCommand(Constants.COMMAND_ID_MATH_STATUS);
+            }
         }
     }
 
@@ -3094,6 +3600,13 @@ public class SerialPortService
 
         UpdateStaticData = true;
         SendCommand(Constants.COMMAND_ID_REQUEST_STATIC);
+    }
+
+    public void SetMathStatusPollingChannel(int channelIndex)
+    {
+        _mathStatusPollingChannelIndex = channelIndex >= 0 && channelIndex < Constants.NUM_OUTPUT_CHANNELS
+            ? channelIndex
+            : -1;
     }
 
     private void SendCommandWithByte(char commandId, byte value)

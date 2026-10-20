@@ -104,6 +104,36 @@ namespace Cortex.Services
                     targetChannel.SoftStopTime = sourceChannel.SoftStopTime ?? targetChannel.SoftStopTime;
                     targetChannel.IntermittentOnTime = sourceChannel.IntermittentOnTime ?? targetChannel.IntermittentOnTime;
                     targetChannel.IntermittentOffTime = sourceChannel.IntermittentOffTime ?? targetChannel.IntermittentOffTime;
+                    targetChannel.MathRuleCount = sourceChannel.MathRuleCount ?? targetChannel.MathRuleCount;
+                    targetChannel.MathRootRule = sourceChannel.MathRootRule ?? targetChannel.MathRootRule;
+                    targetChannel.MathOutputMode = sourceChannel.MathOutputMode ?? targetChannel.MathOutputMode;
+                    targetChannel.MathCalculatedRootValue = sourceChannel.MathCalculatedRootValue ?? targetChannel.MathCalculatedRootValue;
+                    targetChannel.MathError = sourceChannel.MathError ?? targetChannel.MathError;
+                    targetChannel.EnsureMathRuleSlots();
+
+                    if (sourceChannel.MathRules != null)
+                    {
+                        int ruleCount = Math.Min(Constants.NUM_MATH_RULE_SLOTS, sourceChannel.MathRules.Count);
+                        for (int ruleIndex = 0; ruleIndex < ruleCount; ruleIndex++)
+                        {
+                            OutputChannel.MathRule rule = targetChannel.MathRules[ruleIndex];
+                            MathRuleSnapshot sourceRule = sourceChannel.MathRules[ruleIndex];
+                            rule.Operation = sourceRule.Operation ?? rule.Operation;
+                            rule.HysteresisEnabled = sourceRule.HysteresisEnabled ?? rule.HysteresisEnabled;
+                            rule.OnThreshold = sourceRule.OnThreshold ?? rule.OnThreshold;
+                            rule.OffThreshold = sourceRule.OffThreshold ?? rule.OffThreshold;
+                            rule.OperandAType = sourceRule.OperandAType ?? rule.OperandAType;
+                            rule.OperandAIndex = sourceRule.OperandAIndex ?? rule.OperandAIndex;
+                            rule.OperandAConstant = sourceRule.OperandAConstant ?? rule.OperandAConstant;
+                            rule.OperandBType = sourceRule.OperandBType ?? rule.OperandBType;
+                            rule.OperandBIndex = sourceRule.OperandBIndex ?? rule.OperandBIndex;
+                            rule.OperandBConstant = sourceRule.OperandBConstant ?? rule.OperandBConstant;
+                            rule.RuntimeValue = sourceRule.RuntimeValue ?? rule.RuntimeValue;
+                            rule.RuntimeError = sourceRule.RuntimeError ?? rule.RuntimeError;
+                            rule.Evaluated = sourceRule.Evaluated ?? rule.Evaluated;
+                        }
+                    }
+
                     targetChannel.DelayedOn = sourceChannel.DelayedOn ?? targetChannel.DelayedOn;
                     targetChannel.DelayedOnTime = sourceChannel.DelayedOnTime ?? targetChannel.DelayedOnTime;
                     bool hasExplicitDelayedOff = sourceChannel.DelayedOff.HasValue ||
@@ -251,6 +281,29 @@ namespace Cortex.Services
                     SoftStopTime = channel.SoftStopTime,
                     IntermittentOnTime = channel.IntermittentOnTime,
                     IntermittentOffTime = channel.IntermittentOffTime,
+                    MathRuleCount = channel.MathRuleCount,
+                    MathRootRule = channel.MathRootRule,
+                    MathOutputMode = channel.MathOutputMode,
+                    MathCalculatedRootValue = channel.MathCalculatedRootValue,
+                    MathError = channel.MathError,
+                    MathRules = channel.MathRules
+                        .Take(Constants.NUM_MATH_RULE_SLOTS)
+                        .Select(rule => new MathRuleSnapshot
+                        {
+                            Operation = rule.Operation,
+                            HysteresisEnabled = rule.HysteresisEnabled,
+                            OnThreshold = rule.OnThreshold,
+                            OffThreshold = rule.OffThreshold,
+                            OperandAType = rule.OperandAType,
+                            OperandAIndex = rule.OperandAIndex,
+                            OperandAConstant = rule.OperandAConstant,
+                            OperandBType = rule.OperandBType,
+                            OperandBIndex = rule.OperandBIndex,
+                            OperandBConstant = rule.OperandBConstant,
+                            RuntimeValue = rule.RuntimeValue,
+                            RuntimeError = rule.RuntimeError,
+                            Evaluated = rule.Evaluated,
+                        }).ToList(),
                     DelayedOn = channel.DelayedOn,
                     DelayedOnTime = channel.DelayedOnTime,
                     DelayedOff = channel.DelayedOff,
@@ -463,6 +516,47 @@ namespace Cortex.Services
         public float? IntermittentOnTime { get; set; }
 
         public float? IntermittentOffTime { get; set; }
+
+        public byte? MathRuleCount { get; set; }
+
+        public byte? MathRootRule { get; set; }
+
+        public byte? MathOutputMode { get; set; }
+
+        public float? MathCalculatedRootValue { get; set; }
+
+        public byte? MathError { get; set; }
+
+        public List<MathRuleSnapshot>? MathRules { get; set; }
+    }
+
+    public sealed class MathRuleSnapshot
+    {
+        public byte? Operation { get; set; }
+
+        public byte? HysteresisEnabled { get; set; }
+
+        public float? OnThreshold { get; set; }
+
+        public float? OffThreshold { get; set; }
+
+        public byte? OperandAType { get; set; }
+
+        public byte? OperandAIndex { get; set; }
+
+        public float? OperandAConstant { get; set; }
+
+        public byte? OperandBType { get; set; }
+
+        public byte? OperandBIndex { get; set; }
+
+        public float? OperandBConstant { get; set; }
+
+        public float? RuntimeValue { get; set; }
+
+        public byte? RuntimeError { get; set; }
+
+        public byte? Evaluated { get; set; }
     }
 
     public sealed class DigitalInputSnapshot

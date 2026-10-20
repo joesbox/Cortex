@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/launchsettings.json",
+  "profiles": {
+    "Cortex": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "workingDirectory": "."
+    }
+  }
+}

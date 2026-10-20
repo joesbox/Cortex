@@ -187,4 +187,79 @@ public class ConfigFileSerializerTests
 
         Assert.Equal(InputPinCatalog.IgnitionInputPin, data.ChannelsStaticData[0].InputControlPin);
     }
+
+    [Fact]
+    public void SerializeAndApplySnapshot_RoundTripsMathChannelAndRuleFields()
+    {
+        var source = new DataStructures();
+        OutputChannel channel = source.ChannelsStaticData[0];
+        channel.ChanType = OutputChannel.ChannelType.MATH;
+        channel.MathRuleCount = 3;
+        channel.MathRootRule = 2;
+        channel.MathOutputMode = (byte)OutputChannel.MathOutputModeType.PWM;
+        channel.MathCalculatedRootValue = 12.5f;
+        channel.MathError = 1;
+
+        channel.EnsureMathRuleSlots();
+        OutputChannel.MathRule rule0 = channel.MathRules[0];
+        rule0.Operation = (byte)OutputChannel.MathOperation.ADD;
+        rule0.HysteresisEnabled = 1;
+        rule0.OnThreshold = 10.0f;
+        rule0.OffThreshold = 8.0f;
+        rule0.OperandAType = (byte)OutputChannel.MathOperandType.SystemValue;
+        rule0.OperandAIndex = (byte)OutputChannel.MathSystemValue.MagneticFieldZ;
+        rule0.OperandAConstant = 2.5f;
+        rule0.OperandBType = (byte)OutputChannel.MathOperandType.Channel;
+        rule0.OperandBIndex = 4;
+        rule0.OperandBConstant = -1.0f;
+        rule0.RuntimeValue = 6.75f;
+        rule0.RuntimeError = 0;
+        rule0.Evaluated = 1;
+
+        OutputChannel.MathRule rule1 = channel.MathRules[1];
+        rule1.Operation = (byte)OutputChannel.MathOperation.AND;
+        rule1.OperandAType = (byte)OutputChannel.MathOperandType.DigitalInput;
+        rule1.OperandAIndex = 0;
+        rule1.OperandBType = (byte)OutputChannel.MathOperandType.DigitalInput;
+        rule1.OperandBIndex = (byte)(Constants.NUM_DIGITAL_INPUTS - 1);
+
+        string json = ConfigFileSerializer.SerializeSettings(source);
+        Assert.True(ConfigFileSerializer.TryDeserialize(json, out ConfigSnapshot? snapshot, out string? error));
+        Assert.Null(error);
+        Assert.NotNull(snapshot);
+
+        var target = new DataStructures();
+        ConfigFileSerializer.ApplySnapshot(target, snapshot!);
+
+        OutputChannel applied = target.ChannelsStaticData[0];
+        Assert.Equal(OutputChannel.ChannelType.MATH, applied.ChanType);
+        Assert.Equal((byte)3, applied.MathRuleCount);
+        Assert.Equal((byte)2, applied.MathRootRule);
+        Assert.Equal((byte)OutputChannel.MathOutputModeType.PWM, applied.MathOutputMode);
+        Assert.Equal(12.5f, applied.MathCalculatedRootValue);
+        Assert.Equal((byte)1, applied.MathError);
+
+        OutputChannel.MathRule appliedRule0 = applied.MathRules[0];
+        Assert.Equal((byte)OutputChannel.MathOperation.ADD, appliedRule0.Operation);
+        Assert.Equal((byte)1, appliedRule0.HysteresisEnabled);
+        Assert.Equal(10.0f, appliedRule0.OnThreshold);
+        Assert.Equal(8.0f, appliedRule0.OffThreshold);
+        Assert.Equal((byte)OutputChannel.MathOperandType.SystemValue, appliedRule0.OperandAType);
+        Assert.Equal((byte)OutputChannel.MathSystemValue.MagneticFieldZ, appliedRule0.OperandAIndex);
+        Assert.Equal(2.5f, appliedRule0.OperandAConstant);
+        Assert.Equal((byte)OutputChannel.MathOperandType.Channel, appliedRule0.OperandBType);
+        Assert.Equal((byte)4, appliedRule0.OperandBIndex);
+        Assert.Equal(-1.0f, appliedRule0.OperandBConstant);
+        Assert.Equal(6.75f, appliedRule0.RuntimeValue);
+        Assert.Equal((byte)0, appliedRule0.RuntimeError);
+        Assert.Equal((byte)1, appliedRule0.Evaluated);
+        Assert.Equal(Constants.NUM_MATH_RULE_SLOTS, applied.MathRules.Count);
+
+        OutputChannel.MathRule appliedRule1 = applied.MathRules[1];
+        Assert.Equal((byte)OutputChannel.MathOperation.AND, appliedRule1.Operation);
+        Assert.Equal((byte)5, appliedRule1.OperandAType);
+        Assert.Equal((byte)0, appliedRule1.OperandAIndex);
+        Assert.Equal((byte)5, appliedRule1.OperandBType);
+        Assert.Equal((byte)(Constants.NUM_DIGITAL_INPUTS - 1), appliedRule1.OperandBIndex);
+    }
 }

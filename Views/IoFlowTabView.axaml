@@ -1,0 +1,243 @@
+<UserControl
+	x:Class="Cortex.Views.IoFlowTabView"
+	xmlns="https://github.com/avaloniaui"
+	xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+	xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+	xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+	xmlns:nodify="clr-namespace:Nodify.Avalonia;assembly=Nodify.Avalonia"
+	xmlns:ncon="clr-namespace:Nodify.Avalonia.Connections;assembly=Nodify.Avalonia"
+	xmlns:io="using:Cortex.ViewModels.IoFlow"
+	xmlns:vm="using:Cortex.ViewModels"
+	x:DataType="vm:MainWindowViewModel"
+	x:CompileBindings="False"
+	mc:Ignorable="d">
+	<UserControl.Styles>
+		<Style Selector="Border.ioFlowNode">
+			<Setter Property="Background" Value="#2B213C" />
+			<Setter Property="BorderThickness" Value="2" />
+			<Setter Property="CornerRadius" Value="8" />
+			<Setter Property="Padding" Value="10" />
+			<Setter Property="MinWidth" Value="260" />
+			<Setter Property="MaxWidth" Value="340" />
+		</Style>
+		<Style Selector="TextBlock.ioFlowFieldLabel">
+			<Setter Property="FontSize" Value="12" />
+			<Setter Property="Foreground" Value="#FFD0C3E8" />
+		</Style>
+		<Style Selector="ncon|Connector.ioFlowConnector">
+			<Setter Property="Width" Value="18" />
+			<Setter Property="Height" Value="18" />
+			<Setter Property="Background" Value="#AA7CD4FF" />
+			<Setter Property="BorderBrush" Value="#FFCEE8FF" />
+			<Setter Property="BorderThickness" Value="1" />
+			<Setter Property="VerticalAlignment" Value="Center" />
+		</Style>
+		<Style Selector="ncon|Connection">
+			<Setter Property="Stroke" Value="#FFAF8CFF" />
+			<Setter Property="StrokeThickness" Value="2" />
+		</Style>
+		<Style Selector="ncon|PendingConnection">
+			<Setter Property="Stroke" Value="#CC6DA7FF" />
+			<Setter Property="StrokeThickness" Value="2" />
+		</Style>
+	</UserControl.Styles>
+
+	<Grid RowDefinitions="Auto,*" Margin="5">
+		<Border Grid.Row="0" Margin="0,0,0,8" Padding="10" BorderBrush="#443553" BorderThickness="1" CornerRadius="10">
+			<Border.Background>
+				<LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+					<GradientStop Color="#FF141722" Offset="0" />
+					<GradientStop Color="#FF221C34" Offset="0.5" />
+					<GradientStop Color="#FF302042" Offset="1" />
+				</LinearGradientBrush>
+			</Border.Background>
+			<StackPanel Spacing="8">
+				<TextBlock FontSize="16" FontWeight="SemiBold" Text="I/O Flow" />
+				<TextBlock Foreground="#FFD0C3E8" TextWrapping="Wrap" Text="Right-click the canvas for add/import/remove/arrange actions. Drag between connector dots to wire nodes." />
+			</StackPanel>
+		</Border>
+
+		<Border x:Name="IoFlowSurfaceBorder" Grid.Row="1" BorderBrush="#443553" BorderThickness="1" CornerRadius="10">
+			<Border.Background>
+				<LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+					<GradientStop Color="#FF141722" Offset="0" />
+					<GradientStop Color="#FF221C34" Offset="0.5" />
+					<GradientStop Color="#FF302042" Offset="1" />
+				</LinearGradientBrush>
+			</Border.Background>
+			<Border.ContextMenu>
+				<ContextMenu>
+					<MenuItem Header="Add digital input node" Command="{Binding IoFlowGraph.AddNextDigitalNodeCommand}" />
+					<MenuItem Header="Add analogue input node" Command="{Binding IoFlowGraph.AddNextAnalogueNodeCommand}" />
+					<MenuItem Header="Add output channel node" Command="{Binding IoFlowGraph.AddNextOutputNodeCommand}" />
+					<MenuItem Header="Import current selected channel" Command="{Binding IoFlowGraph.ImportCurrentChannelCommand}" CommandParameter="{Binding SelectedChannel}" />
+					<MenuItem Header="Add logic node for selected output" Command="{Binding IoFlowGraph.AddLogicNodeForSelectedOutputCommand}" />
+					<Separator />
+					<MenuItem Header="Remove selected nodes" Command="{Binding IoFlowGraph.RemoveSelectedNodesCommand}" />
+					<MenuItem Header="Auto arrange" Command="{Binding IoFlowGraph.AutoArrangeNodesCommand}" />
+					<MenuItem Header="Restore all nodes" Command="{Binding IoFlowGraph.RestoreAllNodesCommand}" />
+				</ContextMenu>
+			</Border.ContextMenu>
+
+			<Grid Margin="8">
+				<nodify:NodifyEditor x:Name="IoFlowEditor" DisplayConnectionsOnTop="True" ItemsSource="{Binding IoFlowGraph.Nodes}" Connections="{Binding IoFlowGraph.Connections}" ConnectionCompletedCommand="{Binding IoFlowGraph.ConnectionCompletedCommand}" SelectedItems="{Binding IoFlowGraph.SelectedNodes}">
+					<nodify:NodifyEditor.ConnectionTemplate>
+						<DataTemplate x:DataType="io:IoFlowConnectionViewModel">
+							<!-- Nodify's default connection template does not bind endpoint coordinates. -->
+							<ncon:Connection Source="{Binding Source.Anchor}" Target="{Binding Target.Anchor}" />
+						</DataTemplate>
+					</nodify:NodifyEditor.ConnectionTemplate>
+					<nodify:NodifyEditor.ItemContainerTheme>
+						<ControlTheme TargetType="nodify:ItemContainer" BasedOn="{StaticResource {x:Type nodify:ItemContainer}}">
+							<Setter Property="Location" Value="{Binding DataContext.Location, RelativeSource={RelativeSource Self}, Mode=TwoWay}" />
+							<Setter Property="IsDraggable" Value="False" />
+						</ControlTheme>
+					</nodify:NodifyEditor.ItemContainerTheme>
+					<nodify:NodifyEditor.DataTemplates>
+					<DataTemplate x:DataType="io:DigitalInputNodeViewModel">
+						<Border Classes="ioFlowNode" BorderBrush="{Binding BorderHex}">
+							<StackPanel Spacing="6">
+								<Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+									<TextBlock Grid.Column="0" FontSize="14" FontWeight="SemiBold" Text="{Binding Title}" />
+									<ncon:Connector Grid.Column="1" Classes="ioFlowConnector" DataContext="{Binding OutputConnector}" Anchor="{Binding Anchor, Mode=TwoWay}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+								</Grid>
+								<TextBlock Classes="ioFlowFieldLabel" Text="Electrical mode" />
+								<TextBlock Text="Active high (fixed)" />
+								<TextBlock Classes="ioFlowFieldLabel" Text="Live state" />
+								<TextBlock Text="{Binding LiveStatusText}" />
+							</StackPanel>
+						</Border>
+					</DataTemplate>
+
+					<DataTemplate x:DataType="io:AnalogueInputNodeViewModel">
+						<Border Classes="ioFlowNode" BorderBrush="{Binding BorderHex}">
+							<StackPanel Spacing="6">
+								<Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+									<TextBlock Grid.Column="0" FontSize="14" FontWeight="SemiBold" Text="{Binding Title}" />
+									<ncon:Connector Grid.Column="1" Classes="ioFlowConnector" DataContext="{Binding OutputConnector}" Anchor="{Binding Anchor, Mode=TwoWay}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+								</Grid>
+								<TextBlock Classes="ioFlowFieldLabel" Text="Live voltage" />
+								<TextBlock Text="{Binding LiveVoltageText}" />
+								<TextBlock Classes="ioFlowFieldLabel" Text="Live value" />
+								<TextBlock Text="{Binding LiveValueText}" />
+								<TextBlock Classes="ioFlowFieldLabel" Text="Input type" />
+								<ComboBox ItemsSource="{Binding $parent[UserControl].DataContext.AnalogueChannelTypes}" DisplayMemberBinding="{Binding Label}" SelectedValueBinding="{Binding Type}" SelectedValue="{Binding Input.ChanType, Mode=TwoWay}" />
+								<TextBlock Classes="ioFlowFieldLabel" Text="Units" />
+								<ComboBox IsEnabled="{Binding Input.IsUnitsSelectable}" ItemsSource="{Binding $parent[UserControl].DataContext.FilteredAnalogueUnits}" DisplayMemberBinding="{Binding Label}" SelectedValueBinding="{Binding Units}" SelectedValue="{Binding Input.Units, Mode=TwoWay}" />
+								<TextBlock Classes="ioFlowFieldLabel" Text="Pull-up resistor" />
+								<ToggleSwitch IsEnabled="{Binding Input.AllowPullResistors}" IsChecked="{Binding Input.PullUpEnable, Mode=TwoWay}" OffContent="Off" OnContent="On" />
+								<TextBlock Classes="ioFlowFieldLabel" Text="Pull-down resistor" />
+								<ToggleSwitch IsEnabled="{Binding Input.AllowPullResistors}" IsChecked="{Binding Input.PullDownEnable, Mode=TwoWay}" OffContent="Off" OnContent="On" />
+							</StackPanel>
+						</Border>
+					</DataTemplate>
+
+					<DataTemplate x:DataType="io:OutputNodeViewModel">
+						<Border Classes="ioFlowNode" BorderBrush="{Binding BorderHex}">
+							<StackPanel Spacing="6">
+								<Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+									<ncon:Connector Grid.Column="0" Classes="ioFlowConnector" DataContext="{Binding InputConnector}" Anchor="{Binding Anchor, Mode=TwoWay}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+									<TextBlock Grid.Column="1" FontSize="14" FontWeight="SemiBold" Text="{Binding Title}" />
+									<ncon:Connector Grid.Column="2" Classes="ioFlowConnector" DataContext="{Binding OutputConnector}" Anchor="{Binding Anchor, Mode=TwoWay}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+								</Grid>
+								<TextBlock Classes="ioFlowFieldLabel" Text="Live channel current" />
+								<TextBlock Text="{Binding LiveCurrentText}" />
+								<TextBlock Classes="ioFlowFieldLabel" Text="Channel type" />
+								<ComboBox ItemsSource="{Binding $parent[UserControl].DataContext.ChannelTypes}" DisplayMemberBinding="{Binding Label}" SelectedValueBinding="{Binding ChannelType}" SelectedValue="{Binding Channel.ChanType, Mode=TwoWay}" />
+								<TextBlock Classes="ioFlowFieldLabel" Text="Category" />
+								<ComboBox ItemsSource="{Binding $parent[UserControl].DataContext.ChannelCategories}" DisplayMemberBinding="{Binding Label}" SelectedValueBinding="{Binding Category}" SelectedValue="{Binding Channel.Category, Mode=TwoWay}" />
+								<TextBlock Classes="ioFlowFieldLabel" Text="Assigned input" />
+								<ComboBox ItemsSource="{Binding $parent[UserControl].DataContext.InputDisplayList}" DisplayMemberBinding="{Binding Label}" SelectedValueBinding="{Binding Pin}" SelectedValue="{Binding Channel.InputControlPin, Mode=TwoWay}" />
+								<TextBlock Classes="ioFlowFieldLabel" Text="Duty (%)" />
+								<TextBox Text="{Binding Channel.PWMSetDuty, Mode=TwoWay}" />
+								<TextBlock Classes="ioFlowFieldLabel" Text="Retry count" />
+								<TextBox Text="{Binding Channel.RetryCount, Mode=TwoWay}" />
+								<Expander Header="Current / Inrush">
+									<StackPanel Spacing="6" Margin="0,6,0,0">
+										<TextBlock Classes="ioFlowFieldLabel" Text="Current threshold low" />
+										<TextBox Text="{Binding Channel.CurrentThresholdLow, Mode=TwoWay}" />
+										<TextBlock Classes="ioFlowFieldLabel" Text="Current threshold high" />
+										<TextBox Text="{Binding Channel.CurrentThresholdHigh, Mode=TwoWay}" />
+										<TextBlock Classes="ioFlowFieldLabel" Text="Inrush delay" />
+										<TextBox Text="{Binding Channel.InrushDelay, Mode=TwoWay}" />
+										<TextBlock Classes="ioFlowFieldLabel" Text="Inrush current limit" />
+										<TextBox Text="{Binding Channel.InrushCurrentLimit, Mode=TwoWay}" />
+									</StackPanel>
+								</Expander>
+								<Expander Header="Analogue thresholds / scaling">
+									<StackPanel Spacing="6" Margin="0,6,0,0">
+										<TextBlock IsVisible="{Binding Channel.IsAnalogueThresholdChannel}" Classes="ioFlowFieldLabel" Text="On threshold" />
+										<TextBox IsVisible="{Binding Channel.IsAnalogueThresholdChannel}" Text="{Binding Channel.OnThreshold, Mode=TwoWay}" />
+										<TextBlock IsVisible="{Binding Channel.IsAnalogueThresholdChannel}" Classes="ioFlowFieldLabel" Text="Off threshold" />
+										<TextBox IsVisible="{Binding Channel.IsAnalogueThresholdChannel}" Text="{Binding Channel.OffThreshold, Mode=TwoWay}" />
+										<TextBlock IsVisible="{Binding Channel.IsAnalogueScaledChannel}" Classes="ioFlowFieldLabel" Text="Scale min" />
+										<TextBox IsVisible="{Binding Channel.IsAnalogueScaledChannel}" Text="{Binding Channel.ScaleMin, Mode=TwoWay}" />
+										<TextBlock IsVisible="{Binding Channel.IsAnalogueScaledChannel}" Classes="ioFlowFieldLabel" Text="Scale max" />
+										<TextBox IsVisible="{Binding Channel.IsAnalogueScaledChannel}" Text="{Binding Channel.ScaleMax, Mode=TwoWay}" />
+										<TextBlock IsVisible="{Binding Channel.IsAnalogueScaledChannel}" Classes="ioFlowFieldLabel" Text="PWM min" />
+										<TextBox IsVisible="{Binding Channel.IsAnalogueScaledChannel}" Text="{Binding Channel.PWMMin, Mode=TwoWay}" />
+										<TextBlock IsVisible="{Binding Channel.IsAnalogueScaledChannel}" Classes="ioFlowFieldLabel" Text="PWM max" />
+										<TextBox IsVisible="{Binding Channel.IsAnalogueScaledChannel}" Text="{Binding Channel.PWMMax, Mode=TwoWay}" />
+									</StackPanel>
+								</Expander>
+								<Expander Header="Timing">
+									<StackPanel Spacing="6" Margin="0,6,0,0">
+										<TextBlock IsVisible="{Binding Channel.IsIntermittentChannel}" Classes="ioFlowFieldLabel" Text="Intermittent ON time" />
+										<TextBox IsVisible="{Binding Channel.IsIntermittentChannel}" Text="{Binding Channel.IntermittentOnTime, Mode=TwoWay}" />
+										<TextBlock IsVisible="{Binding Channel.IsIntermittentChannel}" Classes="ioFlowFieldLabel" Text="Intermittent OFF time" />
+										<TextBox IsVisible="{Binding Channel.IsIntermittentChannel}" Text="{Binding Channel.IntermittentOffTime, Mode=TwoWay}" />
+										<TextBlock Classes="ioFlowFieldLabel" Text="Delayed ON enable" />
+										<ToggleSwitch IsChecked="{Binding Channel.IsDelayedOnEnabled, Mode=TwoWay}" OffContent="Off" OnContent="On" />
+										<TextBlock Classes="ioFlowFieldLabel" Text="Delayed ON time (ms)" />
+										<TextBox Text="{Binding Channel.DelayedOnTime, Mode=TwoWay}" />
+										<TextBlock Classes="ioFlowFieldLabel" Text="Delayed OFF enable" />
+										<ToggleSwitch IsChecked="{Binding Channel.IsDelayedOffEnabled, Mode=TwoWay}" OffContent="Off" OnContent="On" />
+										<TextBlock Classes="ioFlowFieldLabel" Text="Delayed OFF time (ms)" />
+										<TextBox Text="{Binding Channel.DelayedOffTime, Mode=TwoWay}" />
+										<TextBlock Classes="ioFlowFieldLabel" Text="Delayed OFF trigger" />
+										<ToggleSwitch IsChecked="{Binding Channel.DelayedOffUsesAssignedInputTrigger, Mode=TwoWay}" OffContent="Ignition" OnContent="Assigned input" />
+										<TextBlock Classes="ioFlowFieldLabel" Text="Soft start enable" />
+										<ToggleSwitch IsChecked="{Binding Channel.SoftStartEnabled, Mode=TwoWay}" OffContent="Off" OnContent="On" />
+										<TextBlock Classes="ioFlowFieldLabel" Text="Soft start time" />
+										<TextBox Text="{Binding Channel.SoftStartTime, Mode=TwoWay}" />
+										<TextBlock Classes="ioFlowFieldLabel" Text="Soft stop enable" />
+										<ToggleSwitch IsChecked="{Binding Channel.SoftStopEnabled, Mode=TwoWay}" OffContent="Off" OnContent="On" />
+										<TextBlock Classes="ioFlowFieldLabel" Text="Soft stop time" />
+										<TextBox Text="{Binding Channel.SoftStopTime, Mode=TwoWay}" />
+									</StackPanel>
+								</Expander>
+							</StackPanel>
+						</Border>
+					</DataTemplate>
+
+					<DataTemplate x:DataType="io:MathRuleNodeViewModel">
+						<Border Classes="ioFlowNode" BorderBrush="{Binding BorderHex}">
+							<StackPanel Spacing="6">
+								<Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+									<ncon:Connector Grid.Column="0" Classes="ioFlowConnector" DataContext="{Binding InputConnector}" Anchor="{Binding Anchor, Mode=TwoWay}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+									<TextBlock Grid.Column="1" FontSize="14" FontWeight="SemiBold" Text="{Binding Title}" />
+									<ncon:Connector Grid.Column="2" Classes="ioFlowConnector" DataContext="{Binding OutputConnector}" Anchor="{Binding Anchor, Mode=TwoWay}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+								</Grid>
+								<TextBlock Classes="ioFlowFieldLabel" Text="Operation" />
+								<ComboBox ItemsSource="{Binding $parent[UserControl].DataContext.MathOperations}" SelectedIndex="{Binding Rule.Operation, Mode=TwoWay}" />
+								<TextBlock Classes="ioFlowFieldLabel" Text="Operand A type" />
+								<TextBox Text="{Binding Rule.OperandAType, Mode=TwoWay}" />
+								<TextBlock Classes="ioFlowFieldLabel" Text="Operand A index" />
+								<TextBox Text="{Binding Rule.OperandAIndex, Mode=TwoWay}" />
+								<TextBlock Classes="ioFlowFieldLabel" Text="Operand B type" />
+								<TextBox Text="{Binding Rule.OperandBType, Mode=TwoWay}" />
+								<TextBlock Classes="ioFlowFieldLabel" Text="Operand B index" />
+								<TextBox Text="{Binding Rule.OperandBIndex, Mode=TwoWay}" />
+								<TextBlock Classes="ioFlowFieldLabel" Text="Operand A constant" />
+								<TextBox Text="{Binding Rule.OperandAConstant, Mode=TwoWay}" />
+								<TextBlock Classes="ioFlowFieldLabel" Text="Operand B constant" />
+								<TextBox Text="{Binding Rule.OperandBConstant, Mode=TwoWay}" />
+							</StackPanel>
+						</Border>
+					</DataTemplate>
+									</nodify:NodifyEditor.DataTemplates>
+								</nodify:NodifyEditor>
+							</Grid>
+						</Border>
+					</Grid>
+				</UserControl>

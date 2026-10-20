@@ -8,6 +8,8 @@
 
         public const int NUM_ANALOGUE_INPUTS = 8;
 
+        public const int NUM_MATH_RULE_SLOTS = 8;
+
         public const int SERIAL_TRAILER1 = 0x24;
 
         public const int SERIAL_TRAILER2 = 0x20;
@@ -74,9 +76,13 @@
 
         public const char COMMAND_ID_OPENREMOTE_PROVISION = 'M';
 
+        public const char COMMAND_ID_MATH_STATUS = 'j';
+
+        public const char COMMAND_ID_DIGITAL_INPUT_STATUS = 'D';
+
         public const int LOG_FILE_NAME_LENGTH = 24;
 
-        public const int LAST_CHANNEL_PARAM_INDEX = 32;
+        public const int LAST_CHANNEL_PARAM_INDEX = 45;
 
         public const int LAST_ANALOGUE_PARAM_INDEX = 12;
 

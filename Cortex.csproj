@@ -7,7 +7,7 @@
 		<BuiltInComInteropSupport>true</BuiltInComInteropSupport>
 		<ApplicationManifest>app.manifest</ApplicationManifest>
 		<AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
-		<Version>0.1.7</Version>
+		<Version>0.1.8</Version>
 		<Copyright>Joe Mann</Copyright>
 		<PackageIcon>cortex.ico</PackageIcon>
 		<ApplicationIcon>Assets\cortex.ico</ApplicationIcon>
@@ -52,6 +52,7 @@
 		<PackageReference Include="Xaml.Behaviors.Avalonia" Version="11.3.9.6" />
 		<PackageReference Include="Xaml.Behaviors.Interactions" Version="11.3.9.6" />
 		<PackageReference Include="Xaml.Behaviors.Interactivity" Version="11.3.9.6" />
+		<PackageReference Include="Nodify.Avalonia" Version="1.0.2" />
 		<PackageReference Include="System.Text.Json" Version="10.0.10" />
 	</ItemGroup>
 

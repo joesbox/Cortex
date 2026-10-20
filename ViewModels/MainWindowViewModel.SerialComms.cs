@@ -72,6 +72,7 @@ namespace Cortex.ViewModels
                 Debug.WriteLine($"Connecting to PDM on {portName}.");
                 AddLog("Connecting to PDM...");
                 _portService.InitComms();
+                UpdateMathStatusPollingSelection();
                 return;
             }
 
@@ -129,6 +130,7 @@ namespace Cortex.ViewModels
         {
             if (_portService != null)
             {
+                _portService.SetMathStatusPollingChannel(-1);
                 _portService.DataUpdated -= _portService_DataUpdated;
                 _portService.ConfigurationSaved -= ConfigSaved;
                 _portService.ConfigurationSaveCompleted -= ConfigSaveCompleted;

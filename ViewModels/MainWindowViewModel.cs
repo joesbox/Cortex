@@ -4,6 +4,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Cortex.Models;
 using Cortex.Services;
+using Cortex.ViewModels.IoFlow;
 using LiveChartsCore;
 using LiveChartsCore.Defaults;
 using LiveChartsCore.Kernel;
@@ -35,6 +36,7 @@ using static Cortex.ViewModels.MainWindowViewModel;
 
  * Version history:
     ----              -------       ----------------------------------------------------------------------------------------------------------------------------------------------------
+    2026-10-15        v0.1.8        Added support for new math channel type and functions.
     2026-08-19        v0.1.7        Firmware update check fix for version parsing (detects v0.10 correctly).
     2026-06-20        v0.1.6        Comms protocol fix - much faster saves
                                     Added delayed ON and OFF functions
@@ -349,6 +351,12 @@ namespace Cortex.ViewModels
         private ChannelTypeDisplay? selectedChannelTypeDisplay;
 
         [ObservableProperty]
+        private int selectedMathRuleSlotIndex;
+
+        [ObservableProperty]
+        private string mathValidationErrorMessage = string.Empty;
+
+        [ObservableProperty]
         private ChannelCategoryDisplay? selectedChannelCategoryDisplay;
 
         [ObservableProperty]
@@ -401,6 +409,22 @@ namespace Cortex.ViewModels
 
         [ObservableProperty]
         private ObservableCollection<LogMapInspectionRow> logMapInspectionRows = [];
+
+        private ObservableCollection<ConnectorPinDisplayItem> connectorPins = [];
+
+        public ObservableCollection<ConnectorPinDisplayItem> ConnectorPins
+        {
+            get => connectorPins;
+            private set => SetProperty(ref connectorPins, value);
+        }
+
+        private ObservableCollection<ConnectorLegendItem> connectorLegendItems = [];
+
+        public ObservableCollection<ConnectorLegendItem> ConnectorLegendItems
+        {
+            get => connectorLegendItems;
+            private set => SetProperty(ref connectorLegendItems, value);
+        }
 
         [ObservableProperty]
         private int logMapDataVersion;
@@ -478,6 +502,14 @@ namespace Cortex.ViewModels
 
         public ObservableCollection<ChannelCategoryDisplay> ChannelCategories { get; }
 
+        public ObservableCollection<string> MathOutputModes { get; }
+
+        public ObservableCollection<string> MathOperations { get; }
+
+        public ObservableCollection<string> MathOperandTypes { get; }
+
+        public ObservableCollection<string> MathSystemValues { get; }
+
         public ObservableCollection<AnalogueTypeDisplay> AnalogueChannelTypes { get; }
 
         public ObservableCollection<AnalogueUnitDisplay> AnalogueUnits { get; }
@@ -492,6 +524,281 @@ namespace Cortex.ViewModels
 
         public string SpeedUnit => SettingsDataView.SystemParamsStaticData.SpeedUnitPref ? "mph" : "km/h";
         public string DistanceUnit => SettingsDataView.SystemParamsStaticData.DistanceUnitPref ? "feet" : "metres";
+
+        public bool IsSelectedChannelMath => SelectedChannel?.IsMathChannel == true;
+
+        public bool IsSelectedChannelNonMath => !IsSelectedChannelMath;
+
+        public bool HasMathValidationError => !string.IsNullOrWhiteSpace(MathValidationErrorMessage);
+
+        public string MathValidationStatusMessage => HasMathValidationError
+            ? MathValidationErrorMessage
+            : "No validation errors detected.";
+
+        public IBrush MathValidationStatusBrush => HasMathValidationError
+            ? new SolidColorBrush(Color.Parse("#FFD8A56D"))
+            : new SolidColorBrush(Color.Parse("#FF78C29A"));
+
+        public string MathValidationStatusIcon => HasMathValidationError ? "▲" : "●";
+
+        public string SelectedMathRuntimeRootValueText => SelectedLiveChannel is null
+            ? "Root output: --"
+            : $"Root output: {FormatMathRuntimeValue(SelectedLiveChannel.MathCalculatedRootValue, IsSelectedMathRuntimeRootBoolean(), GetSelectedMathRootUnitSuffix())}";
+
+        public string SelectedMathRuntimeRootStatusText => SelectedLiveChannel is null
+            ? "No live root result yet."
+            : "Root calculation is updating from live telemetry.";
+
+        public IBrush SelectedMathRuntimeRootStatusBrush => SelectedLiveChannel is null
+            ? new SolidColorBrush(Color.Parse("#FF8A7E99"))
+            : new SolidColorBrush(Color.Parse("#FFB7A7D1"));
+
+        public string SelectedMathRuntimeChannelErrorText => BuildMathRuntimeErrorMessage("Channel", SelectedLiveChannel?.MathError ?? 0);
+
+        public IBrush SelectedMathRuntimeChannelStatusBrush => SelectedLiveChannel == null
+            ? new SolidColorBrush(Color.Parse("#FF8A7E99"))
+            : SelectedLiveChannel.MathError == 0
+                ? new SolidColorBrush(Color.Parse("#FF78C29A"))
+                : new SolidColorBrush(Color.Parse("#FFD9899A"));
+
+        public string SelectedMathRuntimeChannelStatusIcon => SelectedLiveChannel == null
+            ? "●"
+            : SelectedLiveChannel.MathError == 0 ? "●" : "▲";
+
+        public string SelectedMathRuntimeRuleValueText
+        {
+            get
+            {
+                if (SelectedLiveMathRule == null)
+                {
+                    return "Rule output: --";
+                }
+
+                OutputChannel.MathOperation operation = (OutputChannel.MathOperation)SelectedLiveMathRule.Operation;
+                bool isBoolean = IsBooleanMathOperation(operation);
+                string unitSuffix = GetSelectedMathRuleUnitSuffix(SelectedLiveMathRule);
+                string formattedValue = FormatMathRuntimeValue(SelectedLiveMathRule.RuntimeValue, isBoolean, unitSuffix);
+                return $"Rule output: {formattedValue}";
+            }
+        }
+
+        public string SelectedMathRuntimeRuleErrorText => BuildMathRuntimeErrorMessage("Rule", SelectedLiveMathRule?.RuntimeError ?? 0);
+
+        public IBrush SelectedMathRuntimeRuleStatusBrush => SelectedLiveMathRule == null
+            ? new SolidColorBrush(Color.Parse("#FF8A7E99"))
+            : SelectedLiveMathRule.RuntimeError == 0
+                ? new SolidColorBrush(Color.Parse("#FF78C29A"))
+                : new SolidColorBrush(Color.Parse("#FFD9899A"));
+
+        public string SelectedMathRuntimeRuleStatusIcon => SelectedLiveMathRule == null
+            ? "●"
+            : SelectedLiveMathRule.RuntimeError == 0 ? "●" : "▲";
+
+        public string SelectedMathRuntimeEvaluatedText => SelectedLiveMathRule is null
+            ? "Evaluated: --"
+            : SelectedLiveMathRule.IsEvaluated
+                ? "Evaluated: Yes"
+                : "Evaluated: No";
+
+        public IBrush SelectedMathRuntimeEvaluatedStatusBrush => SelectedLiveMathRule == null
+            ? new SolidColorBrush(Color.Parse("#FF8A7E99"))
+            : SelectedLiveMathRule.IsEvaluated
+                ? new SolidColorBrush(Color.Parse("#FF78C29A"))
+                : new SolidColorBrush(Color.Parse("#FFD8A56D"));
+
+        public string SelectedMathRuntimeEvaluatedStatusIcon => SelectedLiveMathRule == null
+            ? "●"
+            : SelectedLiveMathRule.IsEvaluated ? "●" : "▲";
+
+        public IEnumerable<int> MathRuleCountOptions => Enumerable.Range(1, Constants.NUM_MATH_RULE_SLOTS);
+
+        public IEnumerable<MathRuleOption> MathRuleSlotOptions => _mathRuleSlotOptions;
+
+        public IEnumerable<MathRuleOption> MathRootRuleOptions => _mathRootRuleOptions;
+
+        public IEnumerable<MathOperandSourceOption> SelectedMathOperandAIndexOptions => _selectedMathOperandAIndexOptions;
+
+        public IEnumerable<MathOperandSourceOption> SelectedMathOperandBIndexOptions => _selectedMathOperandBIndexOptions;
+
+        public bool CanAddMathRule => IsSelectedChannelMath && SelectedMathRuleCount < Constants.NUM_MATH_RULE_SLOTS;
+
+        public bool CanRemoveMathRule => IsSelectedChannelMath && SelectedMathRuleCount > 1;
+
+        public OutputChannel.MathRule? SelectedMathRule =>
+            SelectedChannel?.MathRules is { Count: > 0 } rules &&
+            SelectedMathRuleSlotIndex >= 0 &&
+            SelectedMathRuleSlotIndex < rules.Count
+                ? rules[SelectedMathRuleSlotIndex]
+                : null;
+
+        private IReadOnlyList<MathRuleOption> _mathRuleSlotOptions = [new MathRuleOption(0, "Rule 1")];
+        private IReadOnlyList<MathRuleOption> _mathRootRuleOptions = [new MathRuleOption(0, "Rule 1")];
+        private IReadOnlyList<MathOperandSourceOption> _selectedMathOperandAIndexOptions = Array.Empty<MathOperandSourceOption>();
+        private IReadOnlyList<MathOperandSourceOption> _selectedMathOperandBIndexOptions = Array.Empty<MathOperandSourceOption>();
+
+        public OutputChannel? SelectedLiveChannel =>
+            SelectedChannelIndex >= 0 && SelectedChannelIndex < LiveDataView.ChannelsLiveData.Count
+                ? LiveDataView.ChannelsLiveData[SelectedChannelIndex]
+                : null;
+
+        public OutputChannel.MathRule? SelectedLiveMathRule =>
+            SelectedLiveChannel?.MathRules is { Count: > 0 } rules &&
+            SelectedMathRuleSlotIndex >= 0 &&
+            SelectedMathRuleSlotIndex < rules.Count
+                ? rules[SelectedMathRuleSlotIndex]
+                : null;
+
+        public int SelectedMathRuleCount
+        {
+            get => SelectedChannel?.MathRuleCount ?? 1;
+            set
+            {
+                if (SelectedChannel == null)
+                {
+                    return;
+                }
+
+                SetSelectedMathRuleCount(value);
+            }
+        }
+
+        public int SelectedMathRootRule
+        {
+            get => SelectedChannel?.MathRootRule ?? 0;
+            set
+            {
+                if (SelectedChannel == null)
+                {
+                    return;
+                }
+
+                int clamped = Math.Clamp(value, 0, Math.Max(0, SelectedMathRuleCount - 1));
+                if (SelectedChannel.MathRootRule == clamped)
+                {
+                    return;
+                }
+
+                SelectedChannel.MathRootRule = (byte)clamped;
+                OnPropertyChanged();
+            }
+        }
+
+        public bool SelectedMathRuleUsesOperandB =>
+            SelectedMathOperationIndex != (int)OutputChannel.MathOperation.NOT &&
+            SelectedMathOperationIndex != (int)OutputChannel.MathOperation.ABS;
+
+        public bool SelectedMathRuleSupportsHysteresis =>
+            SelectedMathOperationIndex >= (int)OutputChannel.MathOperation.GREATER_THAN &&
+            SelectedMathOperationIndex <= (int)OutputChannel.MathOperation.LESS_EQUAL;
+
+        public bool SelectedMathRuleHysteresisEnabled => SelectedMathRule?.HysteresisEnabled != 0;
+
+        public string SelectedMathOperationDescription => GetMathOperationDescription(SelectedMathOperationIndex);
+
+        public bool SelectedMathOperandAIsConstant => SelectedMathOperandATypeIndex == (int)OutputChannel.MathOperandType.Constant;
+
+        public bool SelectedMathOperandAUsesIndex => !SelectedMathOperandAIsConstant;
+
+        public bool SelectedMathOperandBIsConstant => SelectedMathOperandBTypeIndex == (int)OutputChannel.MathOperandType.Constant;
+
+        public bool SelectedMathOperandBUsesIndex => !SelectedMathOperandBIsConstant;
+
+        public string SelectedMathOperandAIndexLabel => GetMathOperandIndexLabel(SelectedMathOperandATypeIndex);
+
+        public string SelectedMathOperandBIndexLabel => GetMathOperandIndexLabel(SelectedMathOperandBTypeIndex);
+
+        public int SelectedMathOperationIndex
+        {
+            get => SelectedMathRule?.Operation ?? 0;
+            set
+            {
+                if (SelectedMathRule == null || SelectedMathRule.Operation == value)
+                {
+                    return;
+                }
+
+                SelectedMathRule.Operation = (byte)value;
+                RaiseMathRuleUiPropertiesChanged(includeRuleSelectorOptions: false, includeOperandASelectorOptions: false, includeOperandBSelectorOptions: false);
+                OnPropertyChanged(nameof(SelectedMathOperationDescription));
+            }
+        }
+
+        public int SelectedMathOutputModeIndex
+        {
+            get => SelectedChannel?.MathOutputMode ?? 0;
+            set
+            {
+                if (SelectedChannel == null || SelectedChannel.MathOutputMode == value)
+                {
+                    return;
+                }
+
+                SelectedChannel.MathOutputMode = (byte)value;
+                OnPropertyChanged();
+            }
+        }
+
+        public int SelectedMathOperandATypeIndex
+        {
+            get => SelectedMathRule?.OperandAType ?? 0;
+            set
+            {
+                if (SelectedMathRule == null || SelectedMathRule.OperandAType == value)
+                {
+                    return;
+                }
+
+                SelectedMathRule.OperandAType = (byte)value;
+                NormalizeMathOperandIndex(SelectedMathRule, operandA: true);
+                RaiseMathRuleUiPropertiesChanged(includeRuleSelectorOptions: false, includeOperandASelectorOptions: true, includeOperandBSelectorOptions: false);
+            }
+        }
+
+        public int SelectedMathOperandBTypeIndex
+        {
+            get => SelectedMathRule?.OperandBType ?? 0;
+            set
+            {
+                if (SelectedMathRule == null || SelectedMathRule.OperandBType == value)
+                {
+                    return;
+                }
+
+                SelectedMathRule.OperandBType = (byte)value;
+                NormalizeMathOperandIndex(SelectedMathRule, operandA: false);
+                RaiseMathRuleUiPropertiesChanged(includeRuleSelectorOptions: false, includeOperandASelectorOptions: false, includeOperandBSelectorOptions: true);
+            }
+        }
+
+        public int SelectedMathOperandAIndexValue
+        {
+            get => SelectedMathRule?.OperandAIndex ?? 0;
+            set
+            {
+                if (SelectedMathRule == null || SelectedMathRule.OperandAIndex == value)
+                {
+                    return;
+                }
+
+                SelectedMathRule.OperandAIndex = (byte)value;
+                OnPropertyChanged();
+            }
+        }
+
+        public int SelectedMathOperandBIndexValue
+        {
+            get => SelectedMathRule?.OperandBIndex ?? 0;
+            set
+            {
+                if (SelectedMathRule == null || SelectedMathRule.OperandBIndex == value)
+                {
+                    return;
+                }
+
+                SelectedMathRule.OperandBIndex = (byte)value;
+                OnPropertyChanged();
+            }
+        }
 
         public IEnumerable<AnalogueUnitDisplay> FilteredAnalogueUnits
         {
@@ -519,6 +826,7 @@ namespace Cortex.ViewModels
         private bool _pendingRevertLog;
         private bool _suppressDirtyTracking;
         private bool _suppressTimeZoneSelectionWriteBack;
+        private bool _awaitingInitialMathSettingsHydration;
         private DataStructures? _controllerConfigBaseline;
         private TaskCompletionSource<bool>? _configSaveCompletionTcs;
         private DateTime _nextCellularHealthPollUtc = DateTime.MinValue;
@@ -561,6 +869,16 @@ namespace Cortex.ViewModels
         partial void OnHasPendingConfigChangesChanged(bool value)
         {
             OnPropertyChanged(nameof(CanSendConfig));
+        }
+
+        partial void OnLiveDataViewChanged(DataStructures value)
+        {
+            RebuildConnectorPins();
+        }
+
+        partial void OnSettingsDataViewChanged(DataStructures value)
+        {
+            RebuildConnectorPins();
         }
 
         partial void OnIsInternetAvailableChanged(bool value)
@@ -621,15 +939,28 @@ namespace Cortex.ViewModels
 
             if (SelectedChannel != null)
             {
+                SelectedChannel.EnsureMathRuleSlots();
                 SelectedChannelTypeDisplay = ChannelTypes.FirstOrDefault(ctd => ctd.ChannelType == SelectedChannel.ChanType);
                 SelectedChannelCategoryDisplay = ChannelCategories.FirstOrDefault(category => category.Category == SelectedChannel.Category);
                 RefreshInputDisplayList(SelectedChannel.ChanType);
                 SelectedPinNumber = SelectedChannel.InputControlPin;
                 SelectedChannelName = new string(SelectedChannel.Name).TrimEnd('\0');
 
+                int maxActiveRuleIndex = Math.Max(0, SelectedChannel.MathRuleCount - 1);
+                SelectedChannel.MathRootRule = (byte)Math.Clamp(SelectedChannel.MathRootRule, 0, maxActiveRuleIndex);
+                SelectedMathRuleSlotIndex = 0;
+
+                if (SelectedChannel.MathRuleCount <= 1)
+                {
+                    SelectedChannel.MathRootRule = 0;
+                }
+
                 // Update the IsPWMChannel property when channel changes
                 IsPWMChannel = SelectedChannel.IsPWMChannel;
             }
+
+            RaiseMathRuleUiPropertiesChanged();
+            UpdateMathStatusPollingSelection();
         }
 
         partial void OnSelectedChannelLabelChanged(ChannelLabel value)
@@ -663,6 +994,8 @@ namespace Cortex.ViewModels
                 // Update IsPWMChannel when channel type changes
                 IsPWMChannel = SelectedChannel.IsPWMChannel;
                 NotifyAnalogueChannelUiContextChanged();
+                RaiseMathRuleUiPropertiesChanged();
+                UpdateMathStatusPollingSelection();
             }
         }
 
@@ -677,7 +1010,25 @@ namespace Cortex.ViewModels
         partial void OnSelectedChannelChanged(OutputChannel? value)
         {
             value?.RefreshDelayUiUnitsFromStoredValues();
+            value?.EnsureMathRuleSlots();
             NotifyAnalogueChannelUiContextChanged();
+            RaiseMathRuleUiPropertiesChanged();
+            UpdateMathStatusPollingSelection();
+        }
+
+        partial void OnSelectedMathRuleSlotIndexChanged(int value)
+        {
+            if (SelectedChannel != null)
+            {
+                int clamped = Math.Clamp(value, 0, Math.Max(0, SelectedMathRuleCount - 1));
+                if (clamped != value)
+                {
+                    SelectedMathRuleSlotIndex = clamped;
+                    return;
+                }
+            }
+
+            RaiseMathRuleUiPropertiesChanged(includeRuleSelectorOptions: false, includeOperandASelectorOptions: true, includeOperandBSelectorOptions: true);
         }
 
         partial void OnSelectedAnalogueInputChanged(AnalogueInput? value)
@@ -713,6 +1064,427 @@ namespace Cortex.ViewModels
                 IsPWMChannel = SelectedChannel.IsPWMChannel;
                 NotifyAnalogueChannelUiContextChanged();
             }
+        }
+
+        partial void OnMathValidationErrorMessageChanged(string value)
+        {
+            OnPropertyChanged(nameof(HasMathValidationError));
+            OnPropertyChanged(nameof(MathValidationStatusMessage));
+            OnPropertyChanged(nameof(MathValidationStatusBrush));
+            OnPropertyChanged(nameof(MathValidationStatusIcon));
+        }
+
+        private void RaiseMathRuleUiPropertiesChanged(bool includeRuleSelectorOptions = true, bool includeOperandASelectorOptions = true, bool includeOperandBSelectorOptions = true)
+        {
+            OnPropertyChanged(nameof(IsSelectedChannelMath));
+            OnPropertyChanged(nameof(IsSelectedChannelNonMath));
+            OnPropertyChanged(nameof(SelectedLiveChannel));
+            OnPropertyChanged(nameof(SelectedLiveMathRule));
+            OnPropertyChanged(nameof(SelectedMathRule));
+            OnPropertyChanged(nameof(SelectedMathRuntimeRootValueText));
+            OnPropertyChanged(nameof(SelectedMathRuntimeRootStatusText));
+            OnPropertyChanged(nameof(SelectedMathRuntimeRootStatusBrush));
+            OnPropertyChanged(nameof(SelectedMathRuntimeChannelErrorText));
+            OnPropertyChanged(nameof(SelectedMathRuntimeChannelStatusBrush));
+            OnPropertyChanged(nameof(SelectedMathRuntimeChannelStatusIcon));
+            OnPropertyChanged(nameof(SelectedMathRuntimeRuleValueText));
+            OnPropertyChanged(nameof(SelectedMathRuntimeRuleErrorText));
+            OnPropertyChanged(nameof(SelectedMathRuntimeRuleStatusBrush));
+            OnPropertyChanged(nameof(SelectedMathRuntimeRuleStatusIcon));
+            OnPropertyChanged(nameof(SelectedMathRuntimeEvaluatedText));
+            OnPropertyChanged(nameof(SelectedMathRuntimeEvaluatedStatusBrush));
+            OnPropertyChanged(nameof(SelectedMathRuntimeEvaluatedStatusIcon));
+            OnPropertyChanged(nameof(SelectedMathRuleCount));
+            OnPropertyChanged(nameof(SelectedMathOperationIndex));
+            OnPropertyChanged(nameof(SelectedMathOperationDescription));
+            OnPropertyChanged(nameof(SelectedMathOutputModeIndex));
+            OnPropertyChanged(nameof(SelectedMathOperandATypeIndex));
+            OnPropertyChanged(nameof(SelectedMathOperandBTypeIndex));
+            OnPropertyChanged(nameof(SelectedMathOperandAIndexLabel));
+            OnPropertyChanged(nameof(SelectedMathOperandBIndexLabel));
+            OnPropertyChanged(nameof(SelectedMathOperandAIsConstant));
+            OnPropertyChanged(nameof(SelectedMathOperandAUsesIndex));
+            OnPropertyChanged(nameof(SelectedMathOperandBIsConstant));
+            OnPropertyChanged(nameof(SelectedMathOperandBUsesIndex));
+            OnPropertyChanged(nameof(SelectedMathRuleUsesOperandB));
+            OnPropertyChanged(nameof(SelectedMathRuleSupportsHysteresis));
+            OnPropertyChanged(nameof(SelectedMathRuleHysteresisEnabled));
+            OnPropertyChanged(nameof(SelectedMathOperandAIndexValue));
+            OnPropertyChanged(nameof(SelectedMathOperandBIndexValue));
+            OnPropertyChanged(nameof(CanAddMathRule));
+            OnPropertyChanged(nameof(CanRemoveMathRule));
+
+            if (includeRuleSelectorOptions)
+            {
+                OnPropertyChanged(nameof(SelectedMathRootRule));
+                OnPropertyChanged(nameof(MathRuleCountOptions));
+                RefreshMathRuleSelectorOptions();
+            }
+
+            RefreshMathOperandSourceOptions(includeOperandASelectorOptions, includeOperandBSelectorOptions);
+        }
+
+        private void RefreshMathRuleSelectorOptions()
+        {
+            int optionCount = Math.Max(1, SelectedMathRuleCount);
+            _mathRuleSlotOptions = Enumerable.Range(0, optionCount)
+                .Select(index => new MathRuleOption(index, $"Rule {index + 1}"))
+                .ToList();
+            _mathRootRuleOptions = Enumerable.Range(0, optionCount)
+                .Select(index => new MathRuleOption(index, $"Rule {index + 1}"))
+                .ToList();
+
+            OnPropertyChanged(nameof(MathRuleSlotOptions));
+            OnPropertyChanged(nameof(MathRootRuleOptions));
+
+            if (SelectedChannel == null)
+            {
+                return;
+            }
+
+            int maxRuleIndex = optionCount - 1;
+            if (SelectedMathRuleSlotIndex < 0 || SelectedMathRuleSlotIndex > maxRuleIndex)
+            {
+                SelectedMathRuleSlotIndex = Math.Clamp(SelectedMathRuleSlotIndex, 0, maxRuleIndex);
+            }
+
+            if (SelectedChannel.MathRootRule > maxRuleIndex)
+            {
+                SelectedChannel.MathRootRule = (byte)maxRuleIndex;
+            }
+
+            OnPropertyChanged(nameof(SelectedMathRuleSlotIndex));
+            OnPropertyChanged(nameof(SelectedMathRootRule));
+        }
+
+        private void RefreshMathOperandSourceOptions(bool refreshOperandAOptions = true, bool refreshOperandBOptions = true)
+        {
+            if (refreshOperandAOptions)
+            {
+                _selectedMathOperandAIndexOptions = GetMathOperandSourceOptions((OutputChannel.MathOperandType)SelectedMathOperandATypeIndex).ToList();
+                OnPropertyChanged(nameof(SelectedMathOperandAIndexOptions));
+            }
+
+            if (refreshOperandBOptions)
+            {
+                _selectedMathOperandBIndexOptions = GetMathOperandSourceOptions((OutputChannel.MathOperandType)SelectedMathOperandBTypeIndex).ToList();
+                OnPropertyChanged(nameof(SelectedMathOperandBIndexOptions));
+            }
+        }
+
+        private IEnumerable<MathOperandSourceOption> GetMathOperandSourceOptions(OutputChannel.MathOperandType operandType)
+        {
+            return operandType switch
+            {
+                OutputChannel.MathOperandType.Channel => ChannelDisplayList.Select(channel => new MathOperandSourceOption(channel.Index, channel.Label)),
+                OutputChannel.MathOperandType.AnalogueInput => Enumerable.Range(0, Constants.NUM_ANALOGUE_INPUTS)
+                    .Select(index => new MathOperandSourceOption(index, $"Analogue input {index + 1}")),
+                OutputChannel.MathOperandType.DigitalInput => Enumerable.Range(0, Constants.NUM_DIGITAL_INPUTS)
+                    .Select(index => new MathOperandSourceOption(index, $"Digital input {index + 1}")),
+                OutputChannel.MathOperandType.SystemValue => Enum.GetValues<OutputChannel.MathSystemValue>()
+                    .Select(value => new MathOperandSourceOption((int)value, FormatMathSystemValueLabel(value))),
+                OutputChannel.MathOperandType.Rule => Enumerable.Range(0, Math.Max(1, SelectedMathRuleCount))
+                    .Select(index => new MathOperandSourceOption(index, $"Rule {index + 1}")),
+                _ => []
+            };
+        }
+
+        private void SetSelectedMathRuleCount(int value)
+        {
+            if (SelectedChannel == null)
+            {
+                return;
+            }
+
+            int clamped = Math.Clamp(value, 1, Constants.NUM_MATH_RULE_SLOTS);
+            if (SelectedChannel.MathRuleCount == clamped)
+            {
+                return;
+            }
+
+            SelectedChannel.MathRuleCount = (byte)clamped;
+            if (SelectedChannel.MathRuleCount <= 1)
+            {
+                SelectedChannel.MathRootRule = 0;
+                SelectedMathRuleSlotIndex = 0;
+            }
+            else
+            {
+                if (SelectedChannel.MathRootRule >= SelectedChannel.MathRuleCount)
+                {
+                    SelectedChannel.MathRootRule = (byte)(SelectedChannel.MathRuleCount - 1);
+                }
+
+                if (SelectedMathRuleSlotIndex >= SelectedChannel.MathRuleCount)
+                {
+                    SelectedMathRuleSlotIndex = SelectedChannel.MathRuleCount - 1;
+                }
+            }
+
+            RaiseMathRuleUiPropertiesChanged();
+        }
+
+        private void NormalizeMathOperandIndex(OutputChannel.MathRule rule, bool operandA)
+        {
+            OutputChannel.MathOperandType operandType = (OutputChannel.MathOperandType)(operandA ? rule.OperandAType : rule.OperandBType);
+            List<MathOperandSourceOption> options = GetMathOperandSourceOptions(operandType).ToList();
+            if (options.Count == 0)
+            {
+                return;
+            }
+
+            int currentValue = operandA ? rule.OperandAIndex : rule.OperandBIndex;
+            int normalizedValue = options.Any(option => option.Value == currentValue)
+                ? currentValue
+                : options[0].Value;
+
+            if (operandA)
+            {
+                rule.OperandAIndex = (byte)normalizedValue;
+            }
+            else
+            {
+                rule.OperandBIndex = (byte)normalizedValue;
+            }
+        }
+
+        private static string BuildMathRuntimeErrorMessage(string scope, byte errorCode)
+        {
+            return errorCode == 0
+                ? $"{scope} status: OK"
+                : $"{scope} status: Error code {errorCode}";
+        }
+
+        private static bool IsBooleanMathOperation(OutputChannel.MathOperation operation)
+        {
+            return operation == OutputChannel.MathOperation.GREATER_THAN ||
+                   operation == OutputChannel.MathOperation.GREATER_EQUAL ||
+                   operation == OutputChannel.MathOperation.LESS_THAN ||
+                   operation == OutputChannel.MathOperation.LESS_EQUAL ||
+                   operation == OutputChannel.MathOperation.EQUAL ||
+                   operation == OutputChannel.MathOperation.NOT_EQUAL ||
+                   operation == OutputChannel.MathOperation.AND ||
+                   operation == OutputChannel.MathOperation.OR ||
+                   operation == OutputChannel.MathOperation.XOR ||
+                   operation == OutputChannel.MathOperation.NOT;
+        }
+
+        private string FormatMathRuntimeValue(float value, bool isBoolean, string unitSuffix)
+        {
+            if (isBoolean)
+            {
+                return value != 0f ? "True" : "False";
+            }
+
+            string formattedValue = Math.Abs(value - MathF.Round(value)) < 0.0001f
+                ? MathF.Round(value).ToString("F0", CultureInfo.InvariantCulture)
+                : value.ToString("F3", CultureInfo.InvariantCulture);
+
+            return string.IsNullOrWhiteSpace(unitSuffix)
+                ? formattedValue
+                : $"{formattedValue} {unitSuffix}";
+        }
+
+        private bool IsSelectedMathRuntimeRootBoolean()
+        {
+            if (SelectedLiveChannel == null)
+            {
+                return false;
+            }
+
+            OutputChannel.MathOutputModeType outputMode = (OutputChannel.MathOutputModeType)SelectedLiveChannel.MathOutputMode;
+            if (outputMode == OutputChannel.MathOutputModeType.Digital)
+            {
+                return true;
+            }
+
+            int rootRuleIndex = SelectedLiveChannel.MathRootRule;
+            if (rootRuleIndex < 0 || rootRuleIndex >= SelectedLiveChannel.MathRules.Count)
+            {
+                return false;
+            }
+
+            OutputChannel.MathRule rootRule = SelectedLiveChannel.MathRules[rootRuleIndex];
+            return IsBooleanMathOperation((OutputChannel.MathOperation)rootRule.Operation);
+        }
+
+        private static string GetSystemValueUnit(OutputChannel.MathSystemValue systemValue)
+        {
+            return systemValue switch
+            {
+                OutputChannel.MathSystemValue.SystemTemperature => "°C",
+                OutputChannel.MathSystemValue.SIMModuleTemperature => "°C",
+                OutputChannel.MathSystemValue.IMUTemperature => "°C",
+                OutputChannel.MathSystemValue.BatteryVoltage => "V",
+                OutputChannel.MathSystemValue.SystemCurrent => "A",
+                OutputChannel.MathSystemValue.AccelerationX => "G",
+                OutputChannel.MathSystemValue.AccelerationY => "G",
+                OutputChannel.MathSystemValue.AccelerationZ => "G",
+                OutputChannel.MathSystemValue.GyroscopeX => "°/s",
+                OutputChannel.MathSystemValue.GyroscopeY => "°/s",
+                OutputChannel.MathSystemValue.GyroscopeZ => "°/s",
+                OutputChannel.MathSystemValue.MagneticFieldX => "µT",
+                OutputChannel.MathSystemValue.MagneticFieldY => "µT",
+                OutputChannel.MathSystemValue.MagneticFieldZ => "µT",
+                _ => string.Empty,
+            };
+        }
+
+        private string GetSelectedMathRuleUnitSuffix(OutputChannel.MathRule? rule)
+        {
+            if (rule == null)
+            {
+                return string.Empty;
+            }
+
+            OutputChannel.MathOperation operation = (OutputChannel.MathOperation)rule.Operation;
+            if (IsBooleanMathOperation(operation))
+            {
+                return string.Empty;
+            }
+
+            OutputChannel.MathOperandType operandType = (OutputChannel.MathOperandType)rule.OperandAType;
+            return operandType switch
+            {
+                OutputChannel.MathOperandType.SystemValue => GetSystemValueUnit((OutputChannel.MathSystemValue)rule.OperandAIndex),
+                OutputChannel.MathOperandType.AnalogueInput => GetAnalogueInputUnitSuffix(rule.OperandAIndex),
+                _ => string.Empty,
+            };
+        }
+
+        private string GetAnalogueInputUnitSuffix(int analogueInputIndex)
+        {
+            if (analogueInputIndex < 0 || analogueInputIndex >= SettingsDataView.AnalogueInputsStaticData.Count)
+            {
+                return string.Empty;
+            }
+
+            AnalogueInput input = SettingsDataView.AnalogueInputsStaticData[analogueInputIndex];
+            return input.Units switch
+            {
+                AnalogueInput.AnalogueUnits.Volts => "V",
+                AnalogueInput.AnalogueUnits.Amps => "A",
+                AnalogueInput.AnalogueUnits.Celsius => "°C",
+                AnalogueInput.AnalogueUnits.Fahrenheit => "°F",
+                AnalogueInput.AnalogueUnits.Percent => "%",
+                AnalogueInput.AnalogueUnits.RPM => "RPM",
+                AnalogueInput.AnalogueUnits.KPH => "km/h",
+                AnalogueInput.AnalogueUnits.MPH => "mph",
+                AnalogueInput.AnalogueUnits.Bar => "bar",
+                AnalogueInput.AnalogueUnits.PSI => "psi",
+                _ => string.Empty,
+            };
+        }
+
+        private string GetSelectedMathRootUnitSuffix()
+        {
+            if (SelectedLiveChannel == null)
+            {
+                return string.Empty;
+            }
+
+            OutputChannel.MathOutputModeType outputMode = (OutputChannel.MathOutputModeType)SelectedLiveChannel.MathOutputMode;
+            if (outputMode == OutputChannel.MathOutputModeType.PWM)
+            {
+                return "% duty";
+            }
+
+            int rootRuleIndex = SelectedLiveChannel.MathRootRule;
+            if (rootRuleIndex < 0 || rootRuleIndex >= SelectedLiveChannel.MathRules.Count)
+            {
+                return string.Empty;
+            }
+
+            return GetSelectedMathRuleUnitSuffix(SelectedLiveChannel.MathRules[rootRuleIndex]);
+        }
+
+        private static string FormatEnumLabel(string value)
+        {
+            return value.Replace("_", " ");
+        }
+
+        private static string FormatOperandTypeLabel(OutputChannel.MathOperandType operandType)
+        {
+            return operandType switch
+            {
+                OutputChannel.MathOperandType.AnalogueInput => "Analogue input",
+                OutputChannel.MathOperandType.DigitalInput => "Digital input",
+                _ => FormatEnumLabel(operandType.ToString())
+            };
+        }
+
+        private static string GetMathOperationDescription(int operationIndex)
+        {
+            return (OutputChannel.MathOperation)operationIndex switch
+            {
+                OutputChannel.MathOperation.ADD => "Operand A plus Operand B.",
+                OutputChannel.MathOperation.SUBTRACT => "Operand A minus Operand B.",
+                OutputChannel.MathOperation.MULTIPLY => "Operand A multiplied by Operand B.",
+                OutputChannel.MathOperation.DIVIDE => "Operand A divided by Operand B.",
+                OutputChannel.MathOperation.GREATER_THAN => "True when Operand A is greater than Operand B.",
+                OutputChannel.MathOperation.GREATER_EQUAL => "True when Operand A is greater than or equal to Operand B.",
+                OutputChannel.MathOperation.LESS_THAN => "True when Operand A is less than Operand B.",
+                OutputChannel.MathOperation.LESS_EQUAL => "True when Operand A is less than or equal to Operand B.",
+                OutputChannel.MathOperation.EQUAL => "True when Operand A equals Operand B.",
+                OutputChannel.MathOperation.NOT_EQUAL => "True when Operand A does not equal Operand B.",
+                OutputChannel.MathOperation.AND => "Bitwise/logic AND of Operand A and Operand B.",
+                OutputChannel.MathOperation.OR => "Bitwise/logic OR of Operand A and Operand B.",
+                OutputChannel.MathOperation.XOR => "Bitwise/logic XOR of Operand A and Operand B.",
+                OutputChannel.MathOperation.NOT => "Unary operator. Operand B is not used.",
+                OutputChannel.MathOperation.MIN => "Returns the smaller of Operand A and Operand B.",
+                OutputChannel.MathOperation.MAX => "Returns the larger of Operand A and Operand B.",
+                OutputChannel.MathOperation.ABS => "Absolute value of Operand A. Operand B is not used.",
+                _ => "Select an operator for this rule."
+            };
+        }
+
+        private static string FormatMathSystemValueLabel(OutputChannel.MathSystemValue value)
+        {
+            return value switch
+            {
+                OutputChannel.MathSystemValue.SystemTemperature => "System temperature (°C)",
+                OutputChannel.MathSystemValue.SIMModuleTemperature => "SIM module temperature (°C)",
+                OutputChannel.MathSystemValue.IMUTemperature => "IMU temperature (°C)",
+                OutputChannel.MathSystemValue.BatteryVoltage => "Battery voltage (V)",
+                OutputChannel.MathSystemValue.SystemCurrent => "System current (A)",
+                OutputChannel.MathSystemValue.AccelerationX => "Acceleration X (G)",
+                OutputChannel.MathSystemValue.AccelerationY => "Acceleration Y (G)",
+                OutputChannel.MathSystemValue.AccelerationZ => "Acceleration Z (G)",
+                OutputChannel.MathSystemValue.GyroscopeX => "Gyroscope X (degrees/second)",
+                OutputChannel.MathSystemValue.GyroscopeY => "Gyroscope Y (degrees/second)",
+                OutputChannel.MathSystemValue.GyroscopeZ => "Gyroscope Z (degrees/second)",
+                OutputChannel.MathSystemValue.MagneticFieldX => "Magnetic field X (microtesla)",
+                OutputChannel.MathSystemValue.MagneticFieldY => "Magnetic field Y (microtesla)",
+                OutputChannel.MathSystemValue.MagneticFieldZ => "Magnetic field Z (microtesla)",
+                _ => FormatEnumLabel(value.ToString())
+            };
+        }
+
+        private void UpdateMathStatusPollingSelection()
+        {
+            if (_portService == null)
+            {
+                return;
+            }
+
+            int pollChannelIndex = SelectedChannel != null && SelectedChannel.IsMathChannel
+                ? SelectedChannelIndex
+                : -1;
+
+            _portService.SetMathStatusPollingChannel(pollChannelIndex);
+        }
+
+        private static string GetMathOperandIndexLabel(int operandTypeIndex)
+        {
+            return (OutputChannel.MathOperandType)operandTypeIndex switch
+            {
+                OutputChannel.MathOperandType.Channel => "Channel index",
+                OutputChannel.MathOperandType.AnalogueInput => "Analogue input index",
+                OutputChannel.MathOperandType.DigitalInput => "Digital input index",
+                OutputChannel.MathOperandType.SystemValue => "System value",
+                OutputChannel.MathOperandType.Rule => "Rule index",
+                _ => "Index",
+            };
         }
 
         private static bool IsAnalogueChannelType(OutputChannel.ChannelType channelType)
@@ -1362,7 +2134,23 @@ namespace Cortex.ViewModels
         new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.AnalogueScaled, Label = "Analogue scaled PWM" },
         new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.CAN, Label = "CAN Digital" },
         new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.CAN_PWM, Label = "CAN PWM" },
+        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.MATH, Label = "MATH" },
     };
+
+            MathOutputModes = new ObservableCollection<string>
+            {
+                "Digital",
+                "PWM",
+            };
+
+            MathOperations = new ObservableCollection<string>(
+                Enum.GetValues<OutputChannel.MathOperation>().Select(value => FormatEnumLabel(value.ToString())));
+
+            MathOperandTypes = new ObservableCollection<string>(
+                Enum.GetValues<OutputChannel.MathOperandType>().Select(FormatOperandTypeLabel));
+
+            MathSystemValues = new ObservableCollection<string>(
+                Enum.GetValues<OutputChannel.MathSystemValue>().Select(FormatMathSystemValueLabel));
 
             ChannelCategories = new ObservableCollection<ChannelCategoryDisplay>
             {
@@ -1478,6 +2266,8 @@ namespace Cortex.ViewModels
             _commsTimer.Elapsed += (s, e) => HandleComms();
             _commsTimer.Start();
             AttachSettingsTracking(SettingsDataView);
+            InitializeIoFlowGraph();
+            RebuildConnectorPins();
             SelectedChannel.PropertyChanged += SelectedChannel_PropertyChanged;
 
             // Create a LineSeries for each channel
@@ -1692,6 +2482,17 @@ namespace Cortex.ViewModels
                 (e.PropertyName == nameof(OutputChannel.InputControlPin) || e.PropertyName == nameof(OutputChannel.ChanType)))
             {
                 SyncChannelTypeForAssignedInput(outputChannel);
+                RefreshIoFlowConnections();
+            }
+
+            if (sender is OutputChannel.MathRule)
+            {
+                RefreshIoFlowConnections();
+            }
+
+            if (sender is OutputChannel && e.PropertyName == nameof(OutputChannel.ChanType))
+            {
+                ConnectorLegendItems = BuildConnectorLegendItems(ConnectorPins);
             }
 
             if (!_suppressDirtyTracking && _controllerConfigBaseline != null)
@@ -1728,6 +2529,11 @@ namespace Cortex.ViewModels
             foreach (var channel in data.ChannelsStaticData)
             {
                 channel.PropertyChanged += SettingsModelItem_PropertyChanged;
+                channel.EnsureMathRuleSlots();
+                foreach (var rule in channel.MathRules)
+                {
+                    rule.PropertyChanged += SettingsModelItem_PropertyChanged;
+                }
             }
 
             foreach (var digitalInput in data.DigitalInputsStaticData)
@@ -1751,6 +2557,11 @@ namespace Cortex.ViewModels
             foreach (var channel in data.ChannelsStaticData)
             {
                 channel.PropertyChanged -= SettingsModelItem_PropertyChanged;
+                channel.EnsureMathRuleSlots();
+                foreach (var rule in channel.MathRules)
+                {
+                    rule.PropertyChanged -= SettingsModelItem_PropertyChanged;
+                }
             }
 
             foreach (var digitalInput in data.DigitalInputsStaticData)
@@ -1772,7 +2583,87 @@ namespace Cortex.ViewModels
             DetachSettingsTracking(SettingsDataView);
             SettingsDataView = newData;
             AttachSettingsTracking(SettingsDataView);
+            RefreshIoFlowGraphFromSettings();
             SyncSelectedTimeZoneFromSettings();
+            RebuildConnectorPins();
+        }
+
+        private void RebuildConnectorPins()
+        {
+            foreach (var item in ConnectorPins)
+            {
+                item.Dispose();
+            }
+
+            var items = new ObservableCollection<ConnectorPinDisplayItem>(
+                ConnectorPinCatalog.Pins.Select(definition => CreateConnectorPinDisplayItem(definition)));
+
+            ConnectorPins = items;
+            ConnectorLegendItems = BuildConnectorLegendItems(items);
+        }
+
+        private ObservableCollection<ConnectorLegendItem> BuildConnectorLegendItems(IEnumerable<ConnectorPinDisplayItem> pins)
+        {
+            var legendItems = new List<ConnectorLegendItem>();
+            var outputTypes = pins
+                .Where(pin => pin.Role == ConnectorPinRole.Output && pin.OutputChannelNumber.HasValue)
+                .Select(pin => SettingsDataView.ChannelsStaticData.ElementAtOrDefault(pin.OutputChannelNumber.Value - 1)?.ChanType)
+                .OfType<OutputChannel.ChannelType>()
+                .Distinct()
+                .Select(CreateOutputLegendItem);
+
+            legendItems.AddRange(outputTypes);
+            legendItems.Add(CreateLegendItem("Digital inputs", ConnectorPinPalette.DigitalInput));
+            legendItems.Add(CreateLegendItem("Analogue inputs", ConnectorPinPalette.AnalogueInput));
+            legendItems.Add(CreateLegendItem("Ignition", ConnectorPinPalette.Ignition, ConnectorPinPalette.PinTextLight));
+            legendItems.Add(CreateLegendItem("CAN", ConnectorPinPalette.CanHigh));
+            legendItems.Add(CreateLegendItem("5V ref", ConnectorPinPalette.Reference5V));
+            legendItems.Add(CreateLegendItem("Ground", ConnectorPinPalette.Ground));
+
+            return new ObservableCollection<ConnectorLegendItem>(legendItems);
+        }
+
+        private static ConnectorLegendItem CreateOutputLegendItem(OutputChannel.ChannelType channelType)
+        {
+            return CreateLegendItem(
+                ConnectorPinDisplayItem.FormatOutputChannelType(channelType),
+                ConnectorPinDisplayItem.GetOutputColorHex(channelType),
+                channelType == OutputChannel.ChannelType.MATH ? ConnectorPinPalette.PinTextLight : null);
+        }
+
+        private static ConnectorLegendItem CreateLegendItem(string text, string backgroundHex, string? foregroundHex = null)
+        {
+            return new ConnectorLegendItem
+            {
+                Text = text,
+                Background = new SolidColorBrush(Color.Parse(backgroundHex)),
+                Foreground = new SolidColorBrush(Color.Parse(foregroundHex ?? ConnectorPinPalette.PinTextDark)),
+            };
+        }
+
+        private ConnectorPinDisplayItem CreateConnectorPinDisplayItem(ConnectorPinDefinition definition)
+        {
+            var item = new ConnectorPinDisplayItem(definition);
+            item.AttachSources(
+                settingsChannel: definition.OutputChannelNumber is int outputNumber && outputNumber - 1 < SettingsDataView.ChannelsStaticData.Count
+                    ? SettingsDataView.ChannelsStaticData[outputNumber - 1]
+                    : null,
+                liveChannel: definition.OutputChannelNumber is int liveOutputNumber && liveOutputNumber - 1 < LiveDataView.ChannelsLiveData.Count
+                    ? LiveDataView.ChannelsLiveData[liveOutputNumber - 1]
+                    : null,
+                settingsDigitalInput: definition.DigitalInputNumber is int digitalNumber && digitalNumber - 1 < SettingsDataView.DigitalInputsStaticData.Count
+                    ? SettingsDataView.DigitalInputsStaticData[digitalNumber - 1]
+                    : null,
+                liveDigitalInput: definition.DigitalInputNumber is int liveDigitalNumber && liveDigitalNumber - 1 < LiveDataView.DigitalInputsLiveData.Count
+                    ? LiveDataView.DigitalInputsLiveData[liveDigitalNumber - 1]
+                    : null,
+                settingsAnalogueInput: definition.AnalogueInputNumber is int analogueNumber && analogueNumber - 1 < SettingsDataView.AnalogueInputsStaticData.Count
+                    ? SettingsDataView.AnalogueInputsStaticData[analogueNumber - 1]
+                    : null,
+                liveAnalogueInput: definition.AnalogueInputNumber is int liveAnalogueNumber && liveAnalogueNumber - 1 < LiveDataView.AnalogueInputsLiveData.Count
+                    ? LiveDataView.AnalogueInputsLiveData[liveAnalogueNumber - 1]
+                    : null);
+            return item;
         }
 
         private void RecalculatePendingConfigChanges()
@@ -1948,6 +2839,43 @@ namespace Cortex.ViewModels
 
 
         [RelayCommand]
+        private void AddMathRule()
+        {
+            if (SelectedChannel == null || !SelectedChannel.IsMathChannel)
+            {
+                return;
+            }
+
+            int nextCount = Math.Min(Constants.NUM_MATH_RULE_SLOTS, SelectedChannel.MathRuleCount + 1);
+            if (nextCount == SelectedChannel.MathRuleCount)
+            {
+                return;
+            }
+
+            SetSelectedMathRuleCount(nextCount);
+            SelectedMathRuleSlotIndex = nextCount - 1;
+            RaiseMathRuleUiPropertiesChanged();
+        }
+
+        [RelayCommand]
+        private void RemoveMathRule()
+        {
+            if (SelectedChannel == null || !SelectedChannel.IsMathChannel)
+            {
+                return;
+            }
+
+            int nextCount = Math.Max(1, SelectedChannel.MathRuleCount - 1);
+            if (nextCount == SelectedChannel.MathRuleCount)
+            {
+                return;
+            }
+
+            SetSelectedMathRuleCount(nextCount);
+            RaiseMathRuleUiPropertiesChanged();
+        }
+
+        [RelayCommand]
         private void SendConfig()
         {
             if (IsSendingConfig)
@@ -1957,12 +2885,240 @@ namespace Cortex.ViewModels
 
             if (IsConnected && _portService != null)
             {
+                if (!TryValidateMathConfiguration(out string validationError))
+                {
+                    MathValidationErrorMessage = validationError;
+                    AddLog("Cannot save MATH configuration.", validationError);
+                    return;
+                }
+
+                MathValidationErrorMessage = string.Empty;
                 PrepareCellularSettingsForSave();
                 IsSendingConfig = true;
                 _portService.UpdateSettingsData(SettingsDataView);
                 _controllerConfigBaseline = DeepCopyDataStructures(SettingsDataView);
                 _portService.StartSendConfig();
             }
+        }
+
+        private bool TryValidateMathConfiguration(out string validationError)
+        {
+            for (int channelIndex = 0; channelIndex < SettingsDataView.ChannelsStaticData.Count; channelIndex++)
+            {
+                OutputChannel channel = SettingsDataView.ChannelsStaticData[channelIndex];
+                if (!channel.IsMathChannel)
+                {
+                    continue;
+                }
+
+                channel.EnsureMathRuleSlots();
+
+                if (channel.MathRuleCount < 1 || channel.MathRuleCount > Constants.NUM_MATH_RULE_SLOTS)
+                {
+                    validationError = $"Channel {channelIndex + 1}: Rule count must be between 1 and {Constants.NUM_MATH_RULE_SLOTS}.";
+                    return false;
+                }
+
+                if (channel.MathRootRule >= channel.MathRuleCount)
+                {
+                    validationError = $"Channel {channelIndex + 1}: Root rule must be within active rule slots (0 to {channel.MathRuleCount - 1}).";
+                    return false;
+                }
+
+                if (channel.MathOutputMode > (byte)OutputChannel.MathOutputModeType.PWM)
+                {
+                    validationError = $"Channel {channelIndex + 1}: Output mode is invalid.";
+                    return false;
+                }
+
+                int activeRuleCount = channel.MathRuleCount;
+                for (int ruleIndex = 0; ruleIndex < activeRuleCount; ruleIndex++)
+                {
+                    OutputChannel.MathRule rule = channel.MathRules[ruleIndex];
+                    if (rule.Operation > (byte)OutputChannel.MathOperation.ABS)
+                    {
+                        validationError = $"Channel {channelIndex + 1}, rule {ruleIndex}: Operator is invalid.";
+                        return false;
+                    }
+
+                    bool unary = rule.Operation == (byte)OutputChannel.MathOperation.NOT ||
+                                 rule.Operation == (byte)OutputChannel.MathOperation.ABS;
+
+                    bool supportsHysteresis = rule.Operation >= (byte)OutputChannel.MathOperation.GREATER_THAN &&
+                                              rule.Operation <= (byte)OutputChannel.MathOperation.LESS_EQUAL;
+                    if (rule.HysteresisEnabled != 0 && !supportsHysteresis)
+                    {
+                        validationError = $"Channel {channelIndex + 1}, rule {ruleIndex}: Hysteresis is only supported for comparison operators GREATER/LESS variants.";
+                        return false;
+                    }
+
+                    if (rule.HysteresisEnabled != 0)
+                    {
+                        if (!float.IsFinite(rule.OnThreshold) || !float.IsFinite(rule.OffThreshold))
+                        {
+                            validationError = $"Channel {channelIndex + 1}, rule {ruleIndex}: Hysteresis thresholds must be finite numbers.";
+                            return false;
+                        }
+                    }
+
+                    if (!TryValidateMathOperand(channelIndex, ruleIndex, "A", rule.OperandAType, rule.OperandAIndex, rule.OperandAConstant, activeRuleCount, out validationError))
+                    {
+                        return false;
+                    }
+
+                    if (!unary && !TryValidateMathOperand(channelIndex, ruleIndex, "B", rule.OperandBType, rule.OperandBIndex, rule.OperandBConstant, activeRuleCount, out validationError))
+                    {
+                        return false;
+                    }
+                }
+
+                if (HasMathRuleCycle(channel, activeRuleCount, out int cycleRule))
+                {
+                    validationError = $"Channel {channelIndex + 1}: Rule graph contains a cycle at rule {cycleRule}. Rule references must be acyclic.";
+                    return false;
+                }
+            }
+
+            validationError = string.Empty;
+            return true;
+        }
+
+        private bool TryValidateMathOperand(
+            int channelIndex,
+            int ruleIndex,
+            string operandName,
+            byte operandType,
+            byte operandIndex,
+            float operandConstant,
+            int activeRuleCount,
+            out string validationError)
+        {
+            if (!Enum.IsDefined(typeof(OutputChannel.MathOperandType), operandType))
+            {
+                validationError = $"Channel {channelIndex + 1}, rule {ruleIndex}: Operand {operandName} type is invalid.";
+                return false;
+            }
+
+            switch ((OutputChannel.MathOperandType)operandType)
+            {
+                case OutputChannel.MathOperandType.Constant:
+                    if (!float.IsFinite(operandConstant))
+                    {
+                        validationError = $"Channel {channelIndex + 1}, rule {ruleIndex}: Operand {operandName} constant must be finite.";
+                        return false;
+                    }
+                    break;
+                case OutputChannel.MathOperandType.Channel:
+                    if (operandIndex >= Constants.NUM_OUTPUT_CHANNELS)
+                    {
+                        validationError = $"Channel {channelIndex + 1}, rule {ruleIndex}: Operand {operandName} channel index must be 0..{Constants.NUM_OUTPUT_CHANNELS - 1}.";
+                        return false;
+                    }
+                    break;
+                case OutputChannel.MathOperandType.AnalogueInput:
+                    if (operandIndex >= Constants.NUM_ANALOGUE_INPUTS)
+                    {
+                        validationError = $"Channel {channelIndex + 1}, rule {ruleIndex}: Operand {operandName} analogue-input index must be 0..{Constants.NUM_ANALOGUE_INPUTS - 1}.";
+                        return false;
+                    }
+                    break;
+                case OutputChannel.MathOperandType.DigitalInput:
+                    if (operandIndex >= Constants.NUM_DIGITAL_INPUTS)
+                    {
+                        validationError = $"Channel {channelIndex + 1}, rule {ruleIndex}: Operand {operandName} digital-input index must be 0..{Constants.NUM_DIGITAL_INPUTS - 1}.";
+                        return false;
+                    }
+                    break;
+                case OutputChannel.MathOperandType.SystemValue:
+                    if (operandIndex > (byte)OutputChannel.MathSystemValue.MagneticFieldZ)
+                    {
+                        validationError = $"Channel {channelIndex + 1}, rule {ruleIndex}: Operand {operandName} system-value index must be 0..{(byte)OutputChannel.MathSystemValue.MagneticFieldZ}.";
+                        return false;
+                    }
+                    break;
+                case OutputChannel.MathOperandType.Rule:
+                    if (operandIndex >= activeRuleCount)
+                    {
+                        validationError = $"Channel {channelIndex + 1}, rule {ruleIndex}: Operand {operandName} rule reference must be 0..{activeRuleCount - 1}.";
+                        return false;
+                    }
+                    break;
+            }
+
+            validationError = string.Empty;
+            return true;
+        }
+
+        private static bool HasMathRuleCycle(OutputChannel channel, int activeRuleCount, out int cycleRule)
+        {
+            var visiting = new bool[activeRuleCount];
+            var visited = new bool[activeRuleCount];
+
+            for (int ruleIndex = 0; ruleIndex < activeRuleCount; ruleIndex++)
+            {
+                if (visited[ruleIndex])
+                {
+                    continue;
+                }
+
+                if (VisitMathRule(channel, activeRuleCount, ruleIndex, visiting, visited, out cycleRule))
+                {
+                    return true;
+                }
+            }
+
+            cycleRule = -1;
+            return false;
+        }
+
+        private static bool VisitMathRule(OutputChannel channel, int activeRuleCount, int ruleIndex, bool[] visiting, bool[] visited, out int cycleRule)
+        {
+            if (visiting[ruleIndex])
+            {
+                cycleRule = ruleIndex;
+                return true;
+            }
+
+            if (visited[ruleIndex])
+            {
+                cycleRule = -1;
+                return false;
+            }
+
+            visiting[ruleIndex] = true;
+            OutputChannel.MathRule rule = channel.MathRules[ruleIndex];
+
+            if (TryGetRuleDependency(rule.OperandAType, rule.OperandAIndex, activeRuleCount, out int dependencyA) &&
+                VisitMathRule(channel, activeRuleCount, dependencyA, visiting, visited, out cycleRule))
+            {
+                return true;
+            }
+
+            bool unary = rule.Operation == (byte)OutputChannel.MathOperation.NOT ||
+                         rule.Operation == (byte)OutputChannel.MathOperation.ABS;
+            if (!unary &&
+                TryGetRuleDependency(rule.OperandBType, rule.OperandBIndex, activeRuleCount, out int dependencyB) &&
+                VisitMathRule(channel, activeRuleCount, dependencyB, visiting, visited, out cycleRule))
+            {
+                return true;
+            }
+
+            visiting[ruleIndex] = false;
+            visited[ruleIndex] = true;
+            cycleRule = -1;
+            return false;
+        }
+
+        private static bool TryGetRuleDependency(byte operandType, byte operandIndex, int activeRuleCount, out int dependency)
+        {
+            if ((OutputChannel.MathOperandType)operandType == OutputChannel.MathOperandType.Rule && operandIndex < activeRuleCount)
+            {
+                dependency = operandIndex;
+                return true;
+            }
+
+            dependency = -1;
+            return false;
         }
 
         private void PrepareCellularSettingsForSave()
@@ -2841,6 +3997,7 @@ namespace Cortex.ViewModels
         {
             // Update live data in place
             UpdateLiveDataInPlace(data);
+            HydrateMathSettingsFromLiveDataIfClean();
 
             CaptureLiveChartHistory(LiveDataView);
 
@@ -2852,6 +4009,7 @@ namespace Cortex.ViewModels
 
             // Update error flags
             UpdateErrorFlags();
+            RaiseMathRuleUiPropertiesChanged(includeRuleSelectorOptions: false, includeOperandASelectorOptions: false, includeOperandBSelectorOptions: false);
 
             // Handle static data refresh
             if (refreshStaticData && (_portService == null || !_portService.UpdateStaticData))
@@ -2882,6 +4040,7 @@ namespace Cortex.ViewModels
                     SyncSelectedTimeZoneFromSettings();
                     _controllerConfigBaseline = DeepCopyDataStructures(SettingsDataView);
                     HasPendingConfigChanges = false;
+                    _awaitingInitialMathSettingsHydration = true;
                     _portService?.UpdateSettingsData(SettingsDataView);
                     OnSelectedChannelIndexChanged(SelectedChannelIndex, SelectedChannelIndex);
                     SelectedAnalogueInput = SettingsDataView.AnalogueInputsStaticData.FirstOrDefault();
@@ -2906,6 +4065,178 @@ namespace Cortex.ViewModels
                     AddLog("PDM values restored to UI");
                 }
             }
+        }
+
+        private void HydrateMathSettingsFromLiveDataIfClean()
+        {
+            if (!_awaitingInitialMathSettingsHydration || HasPendingConfigChanges)
+            {
+                return;
+            }
+
+            if (!LiveMathSnapshotLooksReady())
+            {
+                return;
+            }
+
+            int channelCount = Math.Min(LiveDataView.ChannelsLiveData.Count, SettingsDataView.ChannelsStaticData.Count);
+            bool anyUpdated = false;
+
+            _suppressDirtyTracking = true;
+            try
+            {
+                for (int channelIndex = 0; channelIndex < channelCount; channelIndex++)
+                {
+                    OutputChannel liveChannel = LiveDataView.ChannelsLiveData[channelIndex];
+                    OutputChannel staticChannel = SettingsDataView.ChannelsStaticData[channelIndex];
+
+                    if (!liveChannel.IsMathChannel)
+                    {
+                        continue;
+                    }
+
+                    liveChannel.EnsureMathRuleSlots();
+                    staticChannel.EnsureMathRuleSlots();
+
+                    if (staticChannel.MathRuleCount != liveChannel.MathRuleCount)
+                    {
+                        staticChannel.MathRuleCount = liveChannel.MathRuleCount;
+                        anyUpdated = true;
+                    }
+
+                    if (staticChannel.MathRootRule != liveChannel.MathRootRule)
+                    {
+                        staticChannel.MathRootRule = liveChannel.MathRootRule;
+                        anyUpdated = true;
+                    }
+
+                    if (staticChannel.MathOutputMode != liveChannel.MathOutputMode)
+                    {
+                        staticChannel.MathOutputMode = liveChannel.MathOutputMode;
+                        anyUpdated = true;
+                    }
+
+                    for (int ruleIndex = 0; ruleIndex < Constants.NUM_MATH_RULE_SLOTS; ruleIndex++)
+                    {
+                        OutputChannel.MathRule liveRule = liveChannel.MathRules[ruleIndex];
+                        OutputChannel.MathRule staticRule = staticChannel.MathRules[ruleIndex];
+
+                        if (staticRule.Operation != liveRule.Operation)
+                        {
+                            staticRule.Operation = liveRule.Operation;
+                            anyUpdated = true;
+                        }
+
+                        if (staticRule.HysteresisEnabled != liveRule.HysteresisEnabled)
+                        {
+                            staticRule.HysteresisEnabled = liveRule.HysteresisEnabled;
+                            anyUpdated = true;
+                        }
+
+                        if (staticRule.OnThreshold != liveRule.OnThreshold)
+                        {
+                            staticRule.OnThreshold = liveRule.OnThreshold;
+                            anyUpdated = true;
+                        }
+
+                        if (staticRule.OffThreshold != liveRule.OffThreshold)
+                        {
+                            staticRule.OffThreshold = liveRule.OffThreshold;
+                            anyUpdated = true;
+                        }
+
+                        if (staticRule.OperandAType != liveRule.OperandAType)
+                        {
+                            staticRule.OperandAType = liveRule.OperandAType;
+                            anyUpdated = true;
+                        }
+
+                        if (staticRule.OperandAIndex != liveRule.OperandAIndex)
+                        {
+                            staticRule.OperandAIndex = liveRule.OperandAIndex;
+                            anyUpdated = true;
+                        }
+
+                        if (staticRule.OperandAConstant != liveRule.OperandAConstant)
+                        {
+                            staticRule.OperandAConstant = liveRule.OperandAConstant;
+                            anyUpdated = true;
+                        }
+
+                        if (staticRule.OperandBType != liveRule.OperandBType)
+                        {
+                            staticRule.OperandBType = liveRule.OperandBType;
+                            anyUpdated = true;
+                        }
+
+                        if (staticRule.OperandBIndex != liveRule.OperandBIndex)
+                        {
+                            staticRule.OperandBIndex = liveRule.OperandBIndex;
+                            anyUpdated = true;
+                        }
+
+                        if (staticRule.OperandBConstant != liveRule.OperandBConstant)
+                        {
+                            staticRule.OperandBConstant = liveRule.OperandBConstant;
+                            anyUpdated = true;
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                _suppressDirtyTracking = false;
+            }
+
+            _awaitingInitialMathSettingsHydration = false;
+
+            if (!anyUpdated)
+            {
+                return;
+            }
+
+            _portService?.UpdateSettingsData(SettingsDataView);
+            _controllerConfigBaseline = DeepCopyDataStructures(SettingsDataView);
+            HasPendingConfigChanges = false;
+            RaiseMathRuleUiPropertiesChanged();
+        }
+
+        private bool LiveMathSnapshotLooksReady()
+        {
+            foreach (OutputChannel channel in LiveDataView.ChannelsLiveData)
+            {
+                if (!channel.IsMathChannel)
+                {
+                    continue;
+                }
+
+                channel.EnsureMathRuleSlots();
+
+                if (channel.MathRuleCount != 1 || channel.MathRootRule != 0 || channel.MathOutputMode != 0)
+                {
+                    return true;
+                }
+
+                for (int ruleIndex = 0; ruleIndex < Constants.NUM_MATH_RULE_SLOTS; ruleIndex++)
+                {
+                    OutputChannel.MathRule rule = channel.MathRules[ruleIndex];
+                    if (rule.Operation != 0 ||
+                        rule.HysteresisEnabled != 0 ||
+                        rule.OnThreshold != 0f ||
+                        rule.OffThreshold != 0f ||
+                        rule.OperandAType != 0 ||
+                        rule.OperandAIndex != 0 ||
+                        rule.OperandAConstant != 0f ||
+                        rule.OperandBType != 0 ||
+                        rule.OperandBIndex != 0 ||
+                        rule.OperandBConstant != 0f)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         private void UpdateLiveDataInPlace(DataStructures newData)
@@ -3064,6 +4395,104 @@ namespace Cortex.ViewModels
                     target.IntermittentOffTime = source.IntermittentOffTime;
                 }
 
+                if (target.MathRuleCount != source.MathRuleCount)
+                {
+                    target.MathRuleCount = source.MathRuleCount;
+                }
+
+                if (target.MathRootRule != source.MathRootRule)
+                {
+                    target.MathRootRule = source.MathRootRule;
+                }
+
+                if (target.MathOutputMode != source.MathOutputMode)
+                {
+                    target.MathOutputMode = source.MathOutputMode;
+                }
+
+                if (target.MathCalculatedRootValue != source.MathCalculatedRootValue)
+                {
+                    target.MathCalculatedRootValue = source.MathCalculatedRootValue;
+                }
+
+                if (target.MathError != source.MathError)
+                {
+                    target.MathError = source.MathError;
+                }
+
+                target.EnsureMathRuleSlots();
+                source.EnsureMathRuleSlots();
+                for (int ruleIndex = 0; ruleIndex < Constants.NUM_MATH_RULE_SLOTS; ruleIndex++)
+                {
+                    OutputChannel.MathRule targetRule = target.MathRules[ruleIndex];
+                    OutputChannel.MathRule sourceRule = source.MathRules[ruleIndex];
+
+                    if (targetRule.Operation != sourceRule.Operation)
+                    {
+                        targetRule.Operation = sourceRule.Operation;
+                    }
+
+                    if (targetRule.HysteresisEnabled != sourceRule.HysteresisEnabled)
+                    {
+                        targetRule.HysteresisEnabled = sourceRule.HysteresisEnabled;
+                    }
+
+                    if (targetRule.OnThreshold != sourceRule.OnThreshold)
+                    {
+                        targetRule.OnThreshold = sourceRule.OnThreshold;
+                    }
+
+                    if (targetRule.OffThreshold != sourceRule.OffThreshold)
+                    {
+                        targetRule.OffThreshold = sourceRule.OffThreshold;
+                    }
+
+                    if (targetRule.OperandAType != sourceRule.OperandAType)
+                    {
+                        targetRule.OperandAType = sourceRule.OperandAType;
+                    }
+
+                    if (targetRule.OperandAIndex != sourceRule.OperandAIndex)
+                    {
+                        targetRule.OperandAIndex = sourceRule.OperandAIndex;
+                    }
+
+                    if (targetRule.OperandAConstant != sourceRule.OperandAConstant)
+                    {
+                        targetRule.OperandAConstant = sourceRule.OperandAConstant;
+                    }
+
+                    if (targetRule.OperandBType != sourceRule.OperandBType)
+                    {
+                        targetRule.OperandBType = sourceRule.OperandBType;
+                    }
+
+                    if (targetRule.OperandBIndex != sourceRule.OperandBIndex)
+                    {
+                        targetRule.OperandBIndex = sourceRule.OperandBIndex;
+                    }
+
+                    if (targetRule.OperandBConstant != sourceRule.OperandBConstant)
+                    {
+                        targetRule.OperandBConstant = sourceRule.OperandBConstant;
+                    }
+
+                    if (targetRule.RuntimeValue != sourceRule.RuntimeValue)
+                    {
+                        targetRule.RuntimeValue = sourceRule.RuntimeValue;
+                    }
+
+                    if (targetRule.RuntimeError != sourceRule.RuntimeError)
+                    {
+                        targetRule.RuntimeError = sourceRule.RuntimeError;
+                    }
+
+                    if (targetRule.Evaluated != sourceRule.Evaluated)
+                    {
+                        targetRule.Evaluated = sourceRule.Evaluated;
+                    }
+                }
+
                 if (target.DelayedOn != source.DelayedOn)
                 {
                     target.DelayedOn = source.DelayedOn;
@@ -3179,6 +4608,7 @@ namespace Cortex.ViewModels
             }
 
             UpdateChannelAnalogueVoltageDisplayValues();
+            RefreshIoFlowLiveSamples();
             if (liveAnalogueMetadataChanged)
             {
                 _lastLiveChartAxisSignature = string.Empty;
@@ -3196,6 +4626,11 @@ namespace Cortex.ViewModels
                 if (target.IsActiveHigh != source.IsActiveHigh)
                 {
                     target.IsActiveHigh = source.IsActiveHigh;
+                }
+
+                if (target.LiveElectricalState != source.LiveElectricalState)
+                {
+                    target.LiveElectricalState = source.LiveElectricalState;
                 }
             }
 
@@ -6513,6 +7948,32 @@ public sealed class LogMapInspectionRow
     }
 
     public string this[string columnId] => _values.TryGetValue(columnId, out string? value) ? value : string.Empty;
+}
+
+public sealed class MathRuleOption
+{
+    public MathRuleOption(int value, string label)
+    {
+        Value = value;
+        Label = label;
+    }
+
+    public int Value { get; }
+
+    public string Label { get; }
+}
+
+public sealed class MathOperandSourceOption
+{
+    public MathOperandSourceOption(int value, string label)
+    {
+        Value = value;
+        Label = label;
+    }
+
+    public int Value { get; }
+
+    public string Label { get; }
 }
 
 public partial class ChannelLabel : ObservableObject

@@ -5,6 +5,7 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:rs="using:RangeSlider.Avalonia.Controls"
+    xmlns:views="using:Cortex.Views"
     xmlns:vm="using:Cortex.ViewModels"
     x:DataType="vm:MainWindowViewModel"
     mc:Ignorable="d">
@@ -32,7 +33,7 @@
     <Grid RowDefinitions="*, Auto">
         <TabControl Grid.Row="0">
             <TabItem Header="I/O">
-                <Grid ColumnDefinitions="2*,*">
+                <Grid ColumnDefinitions="*,Auto">
                     <Border
                         Grid.Column="0"
                         Margin="5"
@@ -47,7 +48,7 @@
                             </LinearGradientBrush>
                         </Border.Background>
                         <ScrollViewer
-                            HorizontalScrollBarVisibility="Disabled"
+                            HorizontalScrollBarVisibility="Auto"
                             VerticalScrollBarVisibility="Auto">
                             <StackPanel Orientation="Vertical">
                                 <TextBlock
@@ -90,8 +91,8 @@
                                 <Grid
                                     Margin="10"
                                     HorizontalAlignment="Center"
-                                    ColumnDefinitions="Auto,Auto"
-                                    ColumnSpacing="40"
+                                    ColumnDefinitions="Auto,Auto,Auto"
+                                    ColumnSpacing="24"
                                     IsEnabled="{Binding IsChannelGridEnabled}"
                                     RowSpacing="10">
                                     <Border
@@ -289,6 +290,7 @@
                                         Grid.Column="1"
                                         Width="410"
                                         Padding="12"
+                                        IsEnabled="{Binding IsSelectedChannelNonMath}"
                                         BorderBrush="#443553"
                                         BorderThickness="1"
                                         CornerRadius="8">
@@ -751,6 +753,151 @@
                                         </StackPanel>
                                         </StackPanel>
                                     </Border>
+                                    <Border
+                                        Grid.Column="2"
+                                        MinWidth="560"
+                                        Width="560"
+                                        Padding="12"
+                                        IsVisible="{Binding IsSelectedChannelMath}"
+                                        BorderBrush="#443553"
+                                        BorderThickness="1"
+                                        CornerRadius="8">
+                                        <StackPanel Orientation="Vertical" Spacing="12">
+                                            <TextBlock
+                                                Classes="sectionTitle"
+                                                HorizontalAlignment="Center"
+                                                Text="MATH configuration" />
+                                            <Border
+                                                Padding="10"
+                                                BorderBrush="#55446A"
+                                                BorderThickness="1"
+                                                CornerRadius="8">
+                                                <StackPanel Orientation="Vertical" Spacing="10">
+                                                    <Grid ColumnDefinitions="Auto,Auto,Auto" ColumnSpacing="8">
+                                                        <Button Content="Add rule" Command="{Binding AddMathRuleCommand}" IsEnabled="{Binding CanAddMathRule}" ToolTip.Tip="Add another active rule slot to this MATH channel." />
+                                                        <Button Grid.Column="1" Content="Remove rule" Command="{Binding RemoveMathRuleCommand}" IsEnabled="{Binding CanRemoveMathRule}" ToolTip.Tip="Remove the highest-numbered active rule slot from this MATH channel." />
+                                                        <TextBlock Grid.Column="2" VerticalAlignment="Center" Foreground="#FFD0C3E8" Text="{Binding SelectedMathRuleCount, StringFormat='Active rules: {0}'}" />
+                                                    </Grid>
+                                                    <Grid ColumnDefinitions="170,220" ColumnSpacing="10">
+                                                        <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="Root rule" ToolTip.Tip="Choose which active rule provides the final result for this MATH channel." />
+                                                        <ComboBox Grid.Column="1" Width="220" Classes="ioFieldInput" ItemsSource="{Binding MathRootRuleOptions}" DisplayMemberBinding="{Binding Label}" SelectedValueBinding="{Binding Value}" SelectedValue="{Binding SelectedMathRootRule}" ToolTip.Tip="Choose which active rule provides the final result for this MATH channel." />
+                                                    </Grid>
+                                                    <Grid ColumnDefinitions="170,220" ColumnSpacing="10">
+                                                        <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="Output mode" ToolTip.Tip="Select whether the final MATH result drives a digital output or a PWM output." />
+                                                        <ComboBox Grid.Column="1" Width="220" Classes="ioFieldInput" ItemsSource="{Binding MathOutputModes}" SelectedIndex="{Binding SelectedMathOutputModeIndex}" ToolTip.Tip="Select whether the final MATH result drives a digital output or a PWM output." />
+                                                    </Grid>
+                                                    <Grid ColumnDefinitions="170,220" ColumnSpacing="10">
+                                                        <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="Editing rule" ToolTip.Tip="Choose which active rule to edit in the controls below." />
+                                                        <ComboBox Grid.Column="1" Width="220" Classes="ioFieldInput" ItemsSource="{Binding MathRuleSlotOptions}" DisplayMemberBinding="{Binding Label}" SelectedValueBinding="{Binding Value}" SelectedValue="{Binding SelectedMathRuleSlotIndex}" ToolTip.Tip="Choose which active rule to edit in the controls below." />
+                                                    </Grid>
+                                                    <Grid ColumnDefinitions="170,220" ColumnSpacing="10">
+                                                        <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="Operator" ToolTip.Tip="Select the logic or arithmetic operation this rule will perform." />
+                                                        <ComboBox Grid.Column="1" Width="220" Classes="ioFieldInput" ItemsSource="{Binding MathOperations}" SelectedIndex="{Binding SelectedMathOperationIndex}" ToolTip.Tip="Select the logic or arithmetic operation this rule will perform." />
+                                                    </Grid>
+                                                    <TextBlock Text="{Binding SelectedMathOperationDescription}" TextWrapping="Wrap" Foreground="#FFD0C3E8" Margin="180,0,0,0" ToolTip.Tip="Explains how this operator uses Operand A and Operand B." />
+                                                    <Grid ColumnDefinitions="170,220" ColumnSpacing="10">
+                                                        <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="Hysteresis" ToolTip.Tip="Enable separate ON and OFF thresholds for comparison rules to reduce output chatter near the threshold." />
+                                                        <ToggleSwitch Grid.Column="1" Width="220" IsEnabled="{Binding SelectedMathRuleSupportsHysteresis}" IsChecked="{Binding SelectedMathRule.IsHysteresisEnabled, Mode=TwoWay}" OffContent="Disabled" OnContent="Enabled" ToolTip.Tip="Enable separate ON and OFF thresholds for comparison rules to reduce output chatter near the threshold." />
+                                                    </Grid>
+                                                    <Grid ColumnDefinitions="170,107,107" ColumnSpacing="6">
+                                                        <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="Thresholds (ON / OFF)" ToolTip.Tip="Set the hysteresis turn-on and turn-off thresholds used by comparison operators." />
+                                                        <TextBox Grid.Column="1" IsEnabled="{Binding SelectedMathRuleHysteresisEnabled}" Text="{Binding SelectedMathRule.OnThreshold, Mode=TwoWay}" ToolTip.Tip="Turn-on threshold for this rule when hysteresis is enabled." />
+                                                        <TextBox Grid.Column="2" IsEnabled="{Binding SelectedMathRuleHysteresisEnabled}" Text="{Binding SelectedMathRule.OffThreshold, Mode=TwoWay}" ToolTip.Tip="Turn-off threshold for this rule when hysteresis is enabled." />
+                                                    </Grid>
+                                                    <Border Padding="4,10,0,10" BorderBrush="#443553" BorderThickness="1" CornerRadius="8">
+                                                        <StackPanel Orientation="Vertical" Spacing="8">
+                                                            <TextBlock HorizontalAlignment="Center" FontWeight="Bold" Text="Operand A" />
+                                                            <Grid ColumnDefinitions="170,220" ColumnSpacing="10">
+                                                                <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="Type" ToolTip.Tip="Choose whether operand A comes from a constant, output channel, analogue input, system value, or another rule." />
+                                                                <ComboBox Grid.Column="1" Width="220" Classes="ioFieldInput" ItemsSource="{Binding MathOperandTypes}" SelectedIndex="{Binding SelectedMathOperandATypeIndex}" ToolTip.Tip="Choose whether operand A comes from a constant, output channel, analogue input, system value, or another rule." />
+                                                            </Grid>
+                                                            <Grid ColumnDefinitions="170,220" ColumnSpacing="10" IsVisible="{Binding SelectedMathOperandAIsConstant}">
+                                                                <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="Constant" ToolTip.Tip="Numeric constant used for operand A." />
+                                                                <TextBox Grid.Column="1" Width="220" Text="{Binding SelectedMathRule.OperandAConstant, Mode=TwoWay}" ToolTip.Tip="Numeric constant used for operand A." />
+                                                            </Grid>
+                                                            <Grid ColumnDefinitions="170,220" ColumnSpacing="10" IsVisible="{Binding SelectedMathOperandAUsesIndex}">
+                                                                <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="{Binding SelectedMathOperandAIndexLabel}" ToolTip.Tip="Choose the specific source used for operand A." />
+                                                                <ComboBox Grid.Column="1" Width="220" Classes="ioFieldInput" ItemsSource="{Binding SelectedMathOperandAIndexOptions}" DisplayMemberBinding="{Binding Label}" SelectedValueBinding="{Binding Value}" SelectedValue="{Binding SelectedMathOperandAIndexValue}" ToolTip.Tip="Choose the specific source used for operand A." />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Padding="4,10,0,10" BorderBrush="#443553" BorderThickness="1" CornerRadius="8" IsEnabled="{Binding SelectedMathRuleUsesOperandB}">
+                                                        <StackPanel Orientation="Vertical" Spacing="8">
+                                                            <TextBlock HorizontalAlignment="Center" FontWeight="Bold" Text="Operand B" />
+                                                            <Grid ColumnDefinitions="170,220" ColumnSpacing="10">
+                                                                <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="Type" ToolTip.Tip="Choose whether operand B comes from a constant, output channel, analogue input, system value, or another rule." />
+                                                                <ComboBox Grid.Column="1" Width="220" Classes="ioFieldInput" ItemsSource="{Binding MathOperandTypes}" SelectedIndex="{Binding SelectedMathOperandBTypeIndex}" ToolTip.Tip="Choose whether operand B comes from a constant, output channel, analogue input, system value, or another rule." />
+                                                            </Grid>
+                                                            <Grid ColumnDefinitions="170,220" ColumnSpacing="10" IsVisible="{Binding SelectedMathOperandBIsConstant}">
+                                                                <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="Constant" ToolTip.Tip="Numeric constant used for operand B." />
+                                                                <TextBox Grid.Column="1" Width="220" Text="{Binding SelectedMathRule.OperandBConstant, Mode=TwoWay}" ToolTip.Tip="Numeric constant used for operand B." />
+                                                            </Grid>
+                                                            <Grid ColumnDefinitions="170,220" ColumnSpacing="10" IsVisible="{Binding SelectedMathOperandBUsesIndex}">
+                                                                <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="{Binding SelectedMathOperandBIndexLabel}" ToolTip.Tip="Choose the specific source used for operand B." />
+                                                                <ComboBox Grid.Column="1" Width="220" Classes="ioFieldInput" ItemsSource="{Binding SelectedMathOperandBIndexOptions}" DisplayMemberBinding="{Binding Label}" SelectedValueBinding="{Binding Value}" SelectedValue="{Binding SelectedMathOperandBIndexValue}" ToolTip.Tip="Choose the specific source used for operand B." />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Padding="14" Background="#241A33" BorderBrush="#5F4A74" BorderThickness="1" CornerRadius="10">
+                                                        <StackPanel Orientation="Vertical" Spacing="10">
+                                                            <TextBlock FontSize="16" FontWeight="Bold" Text="Validation" />
+                                                            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
+                                                                <TextBlock Grid.Column="0" FontSize="16" FontWeight="Bold" Text="{Binding MathValidationStatusIcon}" Foreground="{Binding MathValidationStatusBrush}" />
+                                                                <TextBlock Grid.Column="1" FontSize="15" Foreground="#FFDAD2E9" TextWrapping="Wrap" Text="{Binding MathValidationStatusMessage}" />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Padding="14" Background="#221C34" BorderBrush="#5A4A78" BorderThickness="1" CornerRadius="10">
+                                                        <StackPanel Orientation="Vertical" Spacing="12">
+                                                            <TextBlock FontSize="16" FontWeight="Bold" Text="Runtime status" />
+                                                            <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto,Auto" RowSpacing="10" ColumnSpacing="10">
+                                                                <Border Grid.Row="0" Grid.Column="0" Background="#2A1F3E" BorderBrush="#5A4A78" BorderThickness="1" CornerRadius="8" Padding="10">
+                                                                    <StackPanel Orientation="Vertical" Spacing="6">
+                                                                        <TextBlock Foreground="#FFAF9FC8" FontSize="13" Text="Root result" />
+                                                                        <TextBlock FontSize="15" Foreground="#FFE9E1F8" Text="{Binding SelectedMathRuntimeRootValueText}" TextWrapping="Wrap" />
+                                                                        <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+                                                                            <TextBlock Grid.Column="0" FontSize="15" FontWeight="Bold" Text="&#9679;" Foreground="{Binding SelectedMathRuntimeRootStatusBrush}" />
+                                                                            <TextBlock Grid.Column="1" Foreground="#FFD0C3E8" FontSize="13" TextWrapping="Wrap" Text="{Binding SelectedMathRuntimeRootStatusText}" />
+                                                                        </Grid>
+                                                                    </StackPanel>
+                                                                </Border>
+                                                                <Border Grid.Row="0" Grid.Column="1" Background="#2A1F3E" BorderBrush="#5A4A78" BorderThickness="1" CornerRadius="8" Padding="10">
+                                                                    <StackPanel Orientation="Vertical" Spacing="6">
+                                                                        <TextBlock Foreground="#FFAF9FC8" FontSize="13" Text="Channel health" />
+                                                                        <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+                                                                            <TextBlock Grid.Column="0" FontSize="15" FontWeight="Bold" Text="{Binding SelectedMathRuntimeChannelStatusIcon}" Foreground="{Binding SelectedMathRuntimeChannelStatusBrush}" />
+                                                                            <TextBlock Grid.Column="1" FontSize="14" Foreground="#FFE9E1F8" Text="{Binding SelectedMathRuntimeChannelErrorText}" TextWrapping="Wrap" />
+                                                                        </Grid>
+                                                                    </StackPanel>
+                                                                </Border>
+                                                                <Border Grid.Row="1" Grid.Column="0" Background="#2A1F3E" BorderBrush="#5A4A78" BorderThickness="1" CornerRadius="8" Padding="10">
+                                                                    <StackPanel Orientation="Vertical" Spacing="6">
+                                                                        <TextBlock Foreground="#FFAF9FC8" FontSize="13" Text="Rule result" />
+                                                                        <TextBlock FontSize="15" Foreground="#FFE9E1F8" Text="{Binding SelectedMathRuntimeRuleValueText}" TextWrapping="Wrap" />
+                                                                    </StackPanel>
+                                                                </Border>
+                                                                <Border Grid.Row="1" Grid.Column="1" Background="#2A1F3E" BorderBrush="#5A4A78" BorderThickness="1" CornerRadius="8" Padding="10">
+                                                                    <StackPanel Orientation="Vertical" Spacing="6">
+                                                                        <TextBlock Foreground="#FFAF9FC8" FontSize="13" Text="Rule health" />
+                                                                        <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+                                                                            <TextBlock Grid.Column="0" FontSize="15" FontWeight="Bold" Text="{Binding SelectedMathRuntimeRuleStatusIcon}" Foreground="{Binding SelectedMathRuntimeRuleStatusBrush}" />
+                                                                            <TextBlock Grid.Column="1" FontSize="14" Foreground="#FFE9E1F8" Text="{Binding SelectedMathRuntimeRuleErrorText}" TextWrapping="Wrap" />
+                                                                        </Grid>
+                                                                    </StackPanel>
+                                                                </Border>
+                                                                <Border Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2" Background="#2A2332" BorderBrush="#5F4D68" BorderThickness="1" CornerRadius="8" Padding="10">
+                                                                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
+                                                                        <TextBlock Grid.Column="0" FontSize="15" FontWeight="Bold" Text="{Binding SelectedMathRuntimeEvaluatedStatusIcon}" Foreground="{Binding SelectedMathRuntimeEvaluatedStatusBrush}" />
+                                                                        <TextBlock Grid.Column="1" FontSize="14" Foreground="#FFE9E1F8" TextWrapping="Wrap" Text="{Binding SelectedMathRuntimeEvaluatedText}" />
+                                                                    </Grid>
+                                                                </Border>
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
+                                                </StackPanel>
+                                            </Border>
+                                        </StackPanel>
+                                    </Border>
                                 </Grid>
                             </StackPanel>
                         </ScrollViewer>
@@ -799,12 +946,12 @@
                                             SelectedItem="{Binding SelectedAnalogueInput, Mode=TwoWay}" />
                                     </Grid>
                                     <StackPanel
-                                        Width="360"
+                                        Width="340"
                                         HorizontalAlignment="Center"
                                         Orientation="Vertical"
                                         Spacing="12">
                                         <Border
-                                            Width="320"
+                                            Width="300"
                                             Padding="12"
                                             HorizontalAlignment="Center"
                                             BorderBrush="#443553"
@@ -871,7 +1018,7 @@
                                             </StackPanel>
                                         </Border>
                                         <Border
-                                            Width="320"
+                                            Width="300"
                                             Margin="0,4,0,0"
                                             Padding="12"
                                             HorizontalAlignment="Center"
@@ -964,6 +1111,12 @@
                         </Border>
                     </Grid>
                 </Grid>
+            </TabItem>
+            <TabItem Header="I/O Flow">
+                <views:IoFlowTabView />
+            </TabItem>
+            <TabItem Header="Connector">
+                <views:ConnectorTabView />
             </TabItem>
             <TabItem Header="System">
                 <Border
@@ -1733,3 +1886,7 @@
         </StackPanel>
     </Grid>
 </UserControl>
+
+
+
+

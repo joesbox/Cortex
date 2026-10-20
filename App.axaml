@@ -109,6 +109,7 @@
             </FluentTheme.Palettes>
         </FluentTheme>
         <StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml" />
+        <StyleInclude Source="avares://Nodify.Avalonia/Themes/Controls.xaml" />
         <themes:RangeSliderTheme />
     </Application.Styles>
 </Application>

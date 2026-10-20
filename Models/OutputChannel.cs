@@ -1,6 +1,7 @@
 ﻿using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using System;
+using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -136,6 +137,65 @@ namespace Cortex.Models
         [ObservableProperty]
         private string _AnalogueInputVoltageDisplay = "-";
 
+        private byte _mathRuleCount = 1;
+
+        private byte _mathRootRule;
+
+        private byte _mathOutputMode;
+
+        private float _mathCalculatedRootValue;
+
+        private byte _mathError;
+
+        private ObservableCollection<MathRule> _mathRules = [];
+
+        public byte MathRuleCount
+        {
+            get => _mathRuleCount;
+            set => SetProperty(ref _mathRuleCount, value);
+        }
+
+        public byte MathRootRule
+        {
+            get => _mathRootRule;
+            set => SetProperty(ref _mathRootRule, value);
+        }
+
+        public byte MathOutputMode
+        {
+            get => _mathOutputMode;
+            set => SetProperty(ref _mathOutputMode, value);
+        }
+
+        public float MathCalculatedRootValue
+        {
+            get => _mathCalculatedRootValue;
+            set => SetProperty(ref _mathCalculatedRootValue, value);
+        }
+
+        public byte MathError
+        {
+            get => _mathError;
+            set
+            {
+                if (SetProperty(ref _mathError, value))
+                {
+                    OnPropertyChanged(nameof(HasMathRuntimeError));
+                }
+            }
+        }
+
+        public ObservableCollection<MathRule> MathRules
+        {
+            get => _mathRules;
+            set
+            {
+                if (SetProperty(ref _mathRules, value))
+                {
+                    EnsureMathRuleSlots();
+                }
+            }
+        }
 
         public IAsyncRelayCommand HoldToggleCommand { get; }
         public IRelayCommand CancelHoldCommand { get; }
@@ -149,6 +209,10 @@ namespace Cortex.Models
         public bool IsAnalogueScaledChannel => ChanType == ChannelType.AnalogueScaled;
 
         public bool IsIntermittentChannel => ChanType == ChannelType.Intermittent;
+
+        public bool IsMathChannel => ChanType == ChannelType.MATH;
+
+        public bool HasMathRuntimeError => MathError != 0;
 
         public bool IsAnalogueChannel => IsAnalogueThresholdChannel || IsAnalogueScaledChannel;
 
@@ -224,6 +288,7 @@ namespace Cortex.Models
         {
             HoldToggleCommand = new AsyncRelayCommand(OnHoldAsync);
             CancelHoldCommand = new RelayCommand(CancelHold);
+            EnsureMathRuleSlots();
         }
 
         private const int DelayUnitMilliseconds = 0;
@@ -310,7 +375,22 @@ namespace Cortex.Models
             OnPropertyChanged(nameof(IsAnalogueThresholdChannel));
             OnPropertyChanged(nameof(IsAnalogueScaledChannel));
             OnPropertyChanged(nameof(IsIntermittentChannel));
+            OnPropertyChanged(nameof(IsMathChannel));
             OnPropertyChanged(nameof(IsAnalogueChannel));
+        }
+
+        public void EnsureMathRuleSlots()
+        {
+            MathRules ??= [];
+            while (MathRules.Count < Constants.NUM_MATH_RULE_SLOTS)
+            {
+                MathRules.Add(new MathRule());
+            }
+
+            while (MathRules.Count > Constants.NUM_MATH_RULE_SLOTS)
+            {
+                MathRules.RemoveAt(MathRules.Count - 1);
+            }
         }
 
         partial void OnCategoryChanged(ChannelCategory value)
@@ -567,7 +647,189 @@ namespace Cortex.Models
             AnalogueScaled,             // Analog input, PWM output
             CAN,                        // CAN bus controlled digital output
             CAN_PWM,                    // CAN bus controlled PWM output
-            Intermittent                // Digital intermittent output
+            Intermittent,               // Digital intermittent output
+            MATH                        // Structured math output
+        }
+
+        public enum MathOutputModeType : byte
+        {
+            Digital = 0,
+            PWM = 1,
+        }
+
+        public enum MathOperation : byte
+        {
+            ADD = 0,
+            SUBTRACT = 1,
+            MULTIPLY = 2,
+            DIVIDE = 3,
+            GREATER_THAN = 4,
+            GREATER_EQUAL = 5,
+            LESS_THAN = 6,
+            LESS_EQUAL = 7,
+            EQUAL = 8,
+            NOT_EQUAL = 9,
+            AND = 10,
+            OR = 11,
+            XOR = 12,
+            NOT = 13,
+            MIN = 14,
+            MAX = 15,
+            ABS = 16,
+        }
+
+        public enum MathOperandType : byte
+        {
+            Constant = 0,
+            Channel = 1,
+            AnalogueInput = 2,
+            SystemValue = 3,
+            Rule = 4,
+            DigitalInput = 5,
+        }
+
+        public enum MathSystemValue : byte
+        {
+            SystemTemperature = 0,
+            SIMModuleTemperature = 1,
+            IMUTemperature = 2,
+            BatteryVoltage = 3,
+            SystemCurrent = 4,
+            AccelerationX = 5,
+            AccelerationY = 6,
+            AccelerationZ = 7,
+            GyroscopeX = 8,
+            GyroscopeY = 9,
+            GyroscopeZ = 10,
+            MagneticFieldX = 11,
+            MagneticFieldY = 12,
+            MagneticFieldZ = 13,
+        }
+
+        public sealed class MathRule : ObservableObject
+        {
+            private byte _operation;
+            private byte _hysteresisEnabled;
+            private float _onThreshold;
+            private float _offThreshold;
+            private byte _operandAType;
+            private byte _operandAIndex;
+            private float _operandAConstant;
+            private byte _operandBType;
+            private byte _operandBIndex;
+            private float _operandBConstant;
+            private float _runtimeValue;
+            private byte _runtimeError;
+            private byte _evaluated;
+
+            public byte Operation
+            {
+                get => _operation;
+                set => SetProperty(ref _operation, value);
+            }
+
+            public byte HysteresisEnabled
+            {
+                get => _hysteresisEnabled;
+                set
+                {
+                    if (SetProperty(ref _hysteresisEnabled, value))
+                    {
+                        OnPropertyChanged(nameof(IsHysteresisEnabled));
+                    }
+                }
+            }
+
+            public float OnThreshold
+            {
+                get => _onThreshold;
+                set => SetProperty(ref _onThreshold, value);
+            }
+
+            public float OffThreshold
+            {
+                get => _offThreshold;
+                set => SetProperty(ref _offThreshold, value);
+            }
+
+            public byte OperandAType
+            {
+                get => _operandAType;
+                set => SetProperty(ref _operandAType, value);
+            }
+
+            public byte OperandAIndex
+            {
+                get => _operandAIndex;
+                set => SetProperty(ref _operandAIndex, value);
+            }
+
+            public float OperandAConstant
+            {
+                get => _operandAConstant;
+                set => SetProperty(ref _operandAConstant, value);
+            }
+
+            public byte OperandBType
+            {
+                get => _operandBType;
+                set => SetProperty(ref _operandBType, value);
+            }
+
+            public byte OperandBIndex
+            {
+                get => _operandBIndex;
+                set => SetProperty(ref _operandBIndex, value);
+            }
+
+            public float OperandBConstant
+            {
+                get => _operandBConstant;
+                set => SetProperty(ref _operandBConstant, value);
+            }
+
+            public float RuntimeValue
+            {
+                get => _runtimeValue;
+                set => SetProperty(ref _runtimeValue, value);
+            }
+
+            public byte RuntimeError
+            {
+                get => _runtimeError;
+                set
+                {
+                    if (SetProperty(ref _runtimeError, value))
+                    {
+                        OnPropertyChanged(nameof(HasRuntimeError));
+                    }
+                }
+            }
+
+            public byte Evaluated
+            {
+                get => _evaluated;
+                set
+                {
+                    if (SetProperty(ref _evaluated, value))
+                    {
+                        OnPropertyChanged(nameof(IsEvaluated));
+                    }
+                }
+            }
+
+            [JsonIgnore]
+            public bool IsHysteresisEnabled
+            {
+                get => HysteresisEnabled != 0;
+                set => HysteresisEnabled = value ? (byte)1 : (byte)0;
+            }
+
+            [JsonIgnore]
+            public bool IsEvaluated => Evaluated != 0;
+
+            [JsonIgnore]
+            public bool HasRuntimeError => RuntimeError != 0;
         }
 
         public enum DelayedOffTriggerMode
