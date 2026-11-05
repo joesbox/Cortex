@@ -676,6 +676,7 @@ namespace Cortex.Models
             MIN = 14,
             MAX = 15,
             ABS = 16,
+            TOGGLE = 17,
         }
 
         public enum MathOperandType : byte
@@ -686,6 +687,7 @@ namespace Cortex.Models
             SystemValue = 3,
             Rule = 4,
             DigitalInput = 5,
+            CanSignal = 6,
         }
 
         public enum MathSystemValue : byte

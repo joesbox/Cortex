@@ -12,6 +12,8 @@ namespace Cortex.Services
 
         Task<string?> BrowseLocalLogFilePathAsync(string initialDirectory);
 
+        Task<string?> BrowseDbcFilePathAsync();
+
         Task<bool> SavePdmFileContentAsync(string content);
 
         Task<bool> ConfirmAsync(string title, string message, string confirmButtonText = "CONFIRM", string cancelButtonText = "CANCEL");
@@ -23,5 +25,11 @@ namespace Cortex.Services
         Task ShowAboutAsync();
 
         Task ShowFirmwareUpdateDialogAsync(FirmwareUpdateWindowViewModel viewModel);
+
+        Task<PinSetupDialogResult?> ShowPinSetupWizardAsync(bool isPinAlreadyEnabled);
+
+        Task<bool> ShowRecoveryCodeAsync(string recoveryCode);
+
+        Task<PinUnlockDialogResult?> ShowPinUnlockDialogAsync(bool allowRecovery, uint retryAfterMs, string? statusMessage);
     }
 }

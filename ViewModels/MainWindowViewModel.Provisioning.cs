@@ -1,4 +1,4 @@
-using Cortex.Models;
+﻿using Cortex.Models;
 using Cortex.Services;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -19,8 +19,8 @@ namespace Cortex.ViewModels
         private const int PdmReconnectSettleMs = 10000;
         private const int PdmReconnectRetryMs = 8000;
 
-        private readonly ProvisioningApiClient _provisioningApiClient = new();
-        private readonly ProvisioningSessionStore _provisioningSessionStore = new();
+        private readonly ProvisioningApiClient _provisioningApiClient;
+        private readonly ProvisioningSessionStore _provisioningSessionStore;
 
         [ObservableProperty]
         private string openRemoteRealmInput = string.Empty;
@@ -125,7 +125,7 @@ namespace Cortex.ViewModels
                 _suppressCellularNeedsAttentionUntilUtc = DateTime.UtcNow.AddMilliseconds(CellularHealthRegistrationWarmupMs);
                 SetCellularConnectionHealthStatus("Checking", shouldLog: true);
                 ScheduleCellularHealthPoll(immediate: true);
-                _ = PollCellularHealthStatusAsync();
+                StartBackgroundTask(PollCellularHealthStatusAsync(), "Cellular health poll");
             }
             else
             {
@@ -331,7 +331,7 @@ namespace Cortex.ViewModels
                 ProvisioningCredentials credentials = await _provisioningApiClient.GetCredentialsAsync(jobId);
                 ApplyProvisioningCredentials(credentials);
 
-                SendConfig();
+                _ = SendConfig();
                 await WaitForConfigSaveAsync();
 
                 registeredName = completed.AssetName ?? pdmName;
@@ -375,7 +375,7 @@ namespace Cortex.ViewModels
                 ConnectedPdmStatusMessage = $"Registered as \"{status.AssetName}\".";
                 SetProvisioningStatus($"PDM renamed to \"{status.AssetName}\".");
 
-                SendConfig();
+                _ = SendConfig();
                 await WaitForConfigSaveAsync();
             }
             catch (Exception ex)
@@ -418,7 +418,7 @@ namespace Cortex.ViewModels
                 ProvisioningUnregisterResult result = await _provisioningApiClient.UnregisterDeviceAsync(clientId);
 
                 ClearOpenRemoteCredentialsOnPdm();
-                SendConfig();
+                _ = SendConfig();
                 await WaitForConfigSaveAsync();
 
                 IsConnectedPdmRegistered = false;

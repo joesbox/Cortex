@@ -36,7 +36,10 @@ using static Cortex.ViewModels.MainWindowViewModel;
 
  * Version history:
     ----              -------       ----------------------------------------------------------------------------------------------------------------------------------------------------
-    2026-10-15        v0.1.8        Added support for new math channel type and functions.
+    2026-10-15        v1.0.0        Added support for new math channel type and functions.
+                                    New CAN message import support
+                                    PIN locking feature
+                                    I/O Flow feature
     2026-08-19        v0.1.7        Firmware update check fix for version parsing (detects v0.10 correctly).
     2026-06-20        v0.1.6        Comms protocol fix - much faster saves
                                     Added delayed ON and OFF functions
@@ -113,7 +116,7 @@ namespace Cortex.ViewModels
         }
     }
 
-    public partial class MainWindowViewModel : ObservableObject
+    public partial class MainWindowViewModel : ObservableObject, IDisposable
     {
         private const byte TimeZoneFixedDateFlag = 0x80;
         private const byte TimeZoneDayMask = 0x1F;
@@ -147,6 +150,11 @@ namespace Cortex.ViewModels
 
         [ObservableProperty]
         private bool commsEstablished;
+
+        [ObservableProperty]
+        private bool isInitialSnapshotLoaded;
+
+        public bool IsControllerUiReady => IsConnected && CommsEstablished && IsInitialSnapshotLoaded;
 
         [ObservableProperty]
         private string firmwareUpdateButtonText = "No firmware available";
@@ -202,6 +210,93 @@ namespace Cortex.ViewModels
         [ObservableProperty]
         private string factoryResetStatusMessage = string.Empty;
 
+        private bool _isPinLockBusy;
+
+        public bool IsPinLockBusy
+        {
+            get => _isPinLockBusy;
+            set
+            {
+                if (!SetProperty(ref _isPinLockBusy, value))
+                {
+                    return;
+                }
+
+                OnPropertyChanged(nameof(CanManagePinLock));
+                OnPropertyChanged(nameof(CanConfigurePinLock));
+                OnPropertyChanged(nameof(CanDisablePinLock));
+                OnPropertyChanged(nameof(DisablePinLockButtonText));
+            }
+        }
+
+        private bool _isPinLockSupported;
+
+        public bool IsPinLockSupported
+        {
+            get => _isPinLockSupported;
+            set
+            {
+                if (!SetProperty(ref _isPinLockSupported, value))
+                {
+                    return;
+                }
+
+                OnPropertyChanged(nameof(CanConfigurePinLock));
+                OnPropertyChanged(nameof(CanDisablePinLock));
+                OnPropertyChanged(nameof(ShowPinLockStatus));
+            }
+        }
+
+        private bool _isPinLockEnabled;
+
+        public bool IsPinLockEnabled
+        {
+            get => _isPinLockEnabled;
+            set
+            {
+                if (!SetProperty(ref _isPinLockEnabled, value))
+                {
+                    return;
+                }
+
+                OnPropertyChanged(nameof(CanDisablePinLock));
+                OnPropertyChanged(nameof(ConfigurePinLockButtonText));
+            }
+        }
+
+        private string _pinLockStatusMessage = "PIN lock unavailable.";
+
+        public string PinLockStatusMessage
+        {
+            get => _pinLockStatusMessage;
+            set
+            {
+                if (!SetProperty(ref _pinLockStatusMessage, value))
+                {
+                    return;
+                }
+
+                OnPropertyChanged(nameof(ShowPinLockStatus));
+            }
+        }
+
+        private uint _pinLockRetryAfterMs;
+
+        public uint PinLockRetryAfterMs
+        {
+            get => _pinLockRetryAfterMs;
+            set
+            {
+                if (!SetProperty(ref _pinLockRetryAfterMs, value))
+                {
+                    return;
+                }
+
+                OnPropertyChanged(nameof(HasPinLockRetryDelay));
+                OnPropertyChanged(nameof(PinLockRetryMessage));
+            }
+        }
+
         [ObservableProperty]
         private bool isTestingCellularConnection;
 
@@ -235,6 +330,24 @@ namespace Cortex.ViewModels
 
         public bool CanFactoryReset => IsConnected && CommsEstablished && !IsLogBusy && !IsFactoryResetInProgress && _portService != null;
 
+        public bool CanManagePinLock => IsConnected && CommsEstablished && !IsLogBusy && !IsPinLockBusy && _portService != null;
+
+        public bool CanConfigurePinLock => CanManagePinLock && IsPinLockSupported;
+
+        public bool CanDisablePinLock => CanManagePinLock && IsPinLockSupported && IsPinLockEnabled;
+
+        public string ConfigurePinLockButtonText => IsPinLockEnabled ? "Change PIN" : "Set PIN Lock";
+
+        public string DisablePinLockButtonText => IsPinLockBusy ? "Disabling..." : "Disable PIN Lock";
+
+        public bool ShowPinLockStatus => IsPinLockSupported || !string.IsNullOrWhiteSpace(PinLockStatusMessage);
+
+        public string PinLockRetryMessage => PinLockRetryAfterMs > 0
+            ? $"Retry after {Math.Ceiling(PinLockRetryAfterMs / 1000d)} seconds."
+            : string.Empty;
+
+        public bool HasPinLockRetryDelay => PinLockRetryAfterMs > 0;
+
         public bool CanTestCellularConnection => IsConnected && CommsEstablished && !IsLogBusy && !IsSendingConfig && !IsTestingCellularConnection && !IsAutomaticCellularTestInProgress && _portService != null;
 
         public bool CanUseOpenRemoteSettings => SettingsDataView.SystemParamsStaticData.AllowData && IsInternetAvailable;
@@ -248,6 +361,8 @@ namespace Cortex.ViewModels
         public bool CanProvisionOpenRemote => IsOpenRemoteSignedIn && HasValidPdmName && CanUseOpenRemoteSettings && IsConnected && CommsEstablished && !IsLogBusy && !IsSendingConfig && !IsOpenRemoteProvisioningInProgress && _portService != null;
 
         public string SetControllerRtcButtonText => IsSettingControllerRtc ? "Setting..." : "Set controller clock";
+
+        public bool IsManualPwmDutyChannel => SelectedChannel?.ChanType == OutputChannel.ChannelType.PWM;
 
         public string FactoryResetButtonText => IsFactoryResetInProgress ? "Resetting..." : "Factory Reset PDM";
 
@@ -363,7 +478,7 @@ namespace Cortex.ViewModels
         private DigitalInput? selectedDigitalInput;
 
         [ObservableProperty]
-        private AnalogueInput? selectedAnalogueInput;
+        private AnalogueInput? selectedAnalogueInput = new(1, false, false, null);
 
         [ObservableProperty]
         private ObservableCollection<ISeries> seriesCollection = [];
@@ -448,6 +563,8 @@ namespace Cortex.ViewModels
         private bool _suppressLiveChartAxisRefresh;
         private string _lastLiveChartAxisSignature = string.Empty;
         private List<ChartPoint> _lastHoveredLiveChartPoints = [];
+        private bool _hasLiveHoverAnchor;
+        private double _liveHoverAnchorTimestampMs;
 
         private InputDisplayItem? _selectedInputItem;
 
@@ -457,9 +574,12 @@ namespace Cortex.ViewModels
 
         private readonly System.Timers.Timer _pollTimer = new(3000); // Every 3 seconds
 
-        private readonly System.Timers.Timer _commsTimer = new(1000); // Every 1000 millis
+        private readonly System.Timers.Timer _commsTimer = new(200); // Every 200 millis
 
         private readonly IAppCloser _appCloser;
+        private bool _isDisposed;
+        private bool _isSecureUnlockWorkflowActive;
+        private bool _isSecureKeepaliveInProgress;
 
         private readonly Dictionary<string, SKColor> _logSeriesColorRegistry = new(StringComparer.OrdinalIgnoreCase);
 
@@ -486,7 +606,7 @@ namespace Cortex.ViewModels
 
         public RelayCommand ExitCommand { get; }
 
-        public bool HasLiveChartSelection => _lastHoveredLiveChartPoints.Count > 0;
+        public bool HasLiveChartSelection => _lastHoveredLiveChartPoints.Count > 0 || _hasLiveHoverAnchor;
 
         public bool CanSendConfig => HasPendingConfigChanges && !IsSendingConfig;
 
@@ -685,7 +805,8 @@ namespace Cortex.ViewModels
 
         public bool SelectedMathRuleUsesOperandB =>
             SelectedMathOperationIndex != (int)OutputChannel.MathOperation.NOT &&
-            SelectedMathOperationIndex != (int)OutputChannel.MathOperation.ABS;
+            SelectedMathOperationIndex != (int)OutputChannel.MathOperation.ABS &&
+            SelectedMathOperationIndex != (int)OutputChannel.MathOperation.TOGGLE;
 
         public bool SelectedMathRuleSupportsHysteresis =>
             SelectedMathOperationIndex >= (int)OutputChannel.MathOperation.GREATER_THAN &&
@@ -874,11 +995,13 @@ namespace Cortex.ViewModels
         partial void OnLiveDataViewChanged(DataStructures value)
         {
             RebuildConnectorPins();
+            RefreshCustomCanBindings();
         }
 
         partial void OnSettingsDataViewChanged(DataStructures value)
         {
             RebuildConnectorPins();
+            RefreshCustomCanBindings();
         }
 
         partial void OnIsInternetAvailableChanged(bool value)
@@ -941,6 +1064,7 @@ namespace Cortex.ViewModels
             {
                 SelectedChannel.EnsureMathRuleSlots();
                 SelectedChannelTypeDisplay = ChannelTypes.FirstOrDefault(ctd => ctd.ChannelType == SelectedChannel.ChanType);
+                OnPropertyChanged(nameof(IsManualPwmDutyChannel));
                 SelectedChannelCategoryDisplay = ChannelCategories.FirstOrDefault(category => category.Category == SelectedChannel.Category);
                 RefreshInputDisplayList(SelectedChannel.ChanType);
                 SelectedPinNumber = SelectedChannel.InputControlPin;
@@ -994,6 +1118,7 @@ namespace Cortex.ViewModels
                 // Update IsPWMChannel when channel type changes
                 IsPWMChannel = SelectedChannel.IsPWMChannel;
                 NotifyAnalogueChannelUiContextChanged();
+                OnPropertyChanged(nameof(IsManualPwmDutyChannel));
                 RaiseMathRuleUiPropertiesChanged();
                 UpdateMathStatusPollingSelection();
             }
@@ -1014,6 +1139,7 @@ namespace Cortex.ViewModels
             NotifyAnalogueChannelUiContextChanged();
             RaiseMathRuleUiPropertiesChanged();
             UpdateMathStatusPollingSelection();
+            NotifySelectedChannelCanTxChanged();
         }
 
         partial void OnSelectedMathRuleSlotIndexChanged(int value)
@@ -1181,6 +1307,17 @@ namespace Cortex.ViewModels
                     .Select(index => new MathOperandSourceOption(index, $"Analogue input {index + 1}")),
                 OutputChannel.MathOperandType.DigitalInput => Enumerable.Range(0, Constants.NUM_DIGITAL_INPUTS)
                     .Select(index => new MathOperandSourceOption(index, $"Digital input {index + 1}")),
+                OutputChannel.MathOperandType.CanSignal => SettingsDataView.CustomCanSignalsStaticData
+                    .Where(signal => signal.IsEnabled)
+                    .OrderBy(signal => signal.Index)
+                    .Select(signal =>
+                    {
+                        int slotIndex = signal.Index;
+                        string name = string.IsNullOrWhiteSpace(signal.Name)
+                            ? $"CAN signal {slotIndex + 1}"
+                            : signal.Name.Trim();
+                        return new MathOperandSourceOption(slotIndex, name);
+                    }),
                 OutputChannel.MathOperandType.SystemValue => Enum.GetValues<OutputChannel.MathSystemValue>()
                     .Select(value => new MathOperandSourceOption((int)value, FormatMathSystemValueLabel(value))),
                 OutputChannel.MathOperandType.Rule => Enumerable.Range(0, Math.Max(1, SelectedMathRuleCount))
@@ -1266,7 +1403,8 @@ namespace Cortex.ViewModels
                    operation == OutputChannel.MathOperation.AND ||
                    operation == OutputChannel.MathOperation.OR ||
                    operation == OutputChannel.MathOperation.XOR ||
-                   operation == OutputChannel.MathOperation.NOT;
+                   operation == OutputChannel.MathOperation.NOT ||
+                   operation == OutputChannel.MathOperation.TOGGLE;
         }
 
         private string FormatMathRuntimeValue(float value, bool isBoolean, string unitSuffix)
@@ -1409,6 +1547,7 @@ namespace Cortex.ViewModels
             {
                 OutputChannel.MathOperandType.AnalogueInput => "Analogue input",
                 OutputChannel.MathOperandType.DigitalInput => "Digital input",
+                OutputChannel.MathOperandType.CanSignal => "CAN signal",
                 _ => FormatEnumLabel(operandType.ToString())
             };
         }
@@ -1434,6 +1573,7 @@ namespace Cortex.ViewModels
                 OutputChannel.MathOperation.MIN => "Returns the smaller of Operand A and Operand B.",
                 OutputChannel.MathOperation.MAX => "Returns the larger of Operand A and Operand B.",
                 OutputChannel.MathOperation.ABS => "Absolute value of Operand A. Operand B is not used.",
+                OutputChannel.MathOperation.TOGGLE => "Unary latch: each rising edge of Operand A flips the output between 0 and 1 (push-on/push-off). Operand B is not used.",
                 _ => "Select an operator for this rule."
             };
         }
@@ -1481,6 +1621,7 @@ namespace Cortex.ViewModels
                 OutputChannel.MathOperandType.Channel => "Channel index",
                 OutputChannel.MathOperandType.AnalogueInput => "Analogue input index",
                 OutputChannel.MathOperandType.DigitalInput => "Digital input index",
+                OutputChannel.MathOperandType.CanSignal => "CAN signal",
                 OutputChannel.MathOperandType.SystemValue => "System value",
                 OutputChannel.MathOperandType.Rule => "Rule index",
                 _ => "Index",
@@ -2103,7 +2244,9 @@ namespace Cortex.ViewModels
             SelectedInputLabel = selectedInput;
         }
 
-        public MainWindowViewModel(IAppCloser appCloser)
+        public MainWindowViewModel(
+            IAppCloser appCloser,
+            MainWindowViewModelDependencies? dependencies = null)
         {
             IsConnected = false;
             SdOK = false;
@@ -2249,7 +2392,14 @@ namespace Cortex.ViewModels
 
             TimeZones = new ObservableCollection<TimeZoneDisplay>(BuildTimeZoneOptions());
 
+            dependencies ??= new MainWindowViewModelDependencies();
+
             _appCloser = appCloser;
+            _appUpdateService = dependencies.AppUpdateService;
+            _firmwareUpdateService = dependencies.FirmwareUpdateService;
+            _provisioningApiClient = dependencies.ProvisioningApiClient;
+            _provisioningSessionStore = dependencies.ProvisioningSessionStore;
+            _ioFlowGraphStore = dependencies.IoFlowGraphStore;
             ExitCommand = new RelayCommand(OnExit);
 
             SystemDateTime = string.Empty;
@@ -2267,6 +2417,7 @@ namespace Cortex.ViewModels
             _commsTimer.Start();
             AttachSettingsTracking(SettingsDataView);
             InitializeIoFlowGraph();
+            InitializeCustomCanFeature();
             RebuildConnectorPins();
             SelectedChannel.PropertyChanged += SelectedChannel_PropertyChanged;
 
@@ -2382,8 +2533,8 @@ namespace Cortex.ViewModels
             UpdateLogCrosshairState();
             UpdateApplicationUpdateButtonPresentation();
             NotifyApplicationUpdateInfoChanged();
-            _ = RefreshApplicationUpdateStateAsync();
-            _ = RefreshAvailableLogFilesAsync();
+            StartBackgroundTask(RefreshApplicationUpdateStateAsync(), "Application update check");
+            StartBackgroundTask(RefreshAvailableLogFilesAsync(), "Log file refresh");
         }
 
         private void ConfigSaved(object? sender, EventArgs e)
@@ -2391,8 +2542,9 @@ namespace Cortex.ViewModels
             IsSendingConfig = false;
             _controllerConfigBaseline = DeepCopyDataStructures(SettingsDataView);
             HasPendingConfigChanges = false;
+            PersistIoFlowGraphSnapshotForController();
             SystemDateTime = $"Last updated: {DateTime.Now:yyyy/MM/dd HH:mm:ss}";
-            _ = FlashLastUpdatedAsync();
+            StartBackgroundTask(FlashLastUpdatedAsync(), "Last-updated highlight");
         }
 
         private void ConfigSaveCompleted(object? sender, ConfigurationSaveCompletedEventArgs e)
@@ -2436,6 +2588,7 @@ namespace Cortex.ViewModels
                     return string.Empty;
                 }
             },
+            ShowSeparatorLines = true,
             SeparatorsPaint = new SolidColorPaint
             {
                 StrokeThickness = 1,
@@ -2443,7 +2596,7 @@ namespace Cortex.ViewModels
             },
             SubseparatorsPaint = new SolidColorPaint
             {
-                Color = new SKColor(34, 34, 34),
+                Color = new SKColor(50, 50, 50),
                 StrokeThickness = 0.5f,
             },
             SubseparatorsCount = 9,
@@ -2459,7 +2612,7 @@ namespace Cortex.ViewModels
             },
             SubticksPaint = new SolidColorPaint
             {
-                Color = new SKColor(34, 34, 34),
+                Color = new SKColor(50, 50, 50),
                 StrokeThickness = 1
             },
         }
@@ -2580,8 +2733,19 @@ namespace Cortex.ViewModels
 
         private void ReplaceSettingsData(DataStructures newData)
         {
+            List<CustomCanSignalMetadata> currentCustomCanMetadata = SettingsDataView.CustomCanSignalsMetadata?
+                .Select(metadata => metadata.Clone())
+                .ToList() ?? [];
+
             DetachSettingsTracking(SettingsDataView);
             SettingsDataView = newData;
+
+            // Custom CAN names/limits are a local store, not controller config; never let a settings
+            // replacement (reconnect, discard, reload) drop entries. Current entries win on conflict.
+            List<CustomCanSignalMetadata> incomingCustomCanMetadata = newData.CustomCanSignalsMetadata?.ToList() ?? [];
+            newData.CustomCanSignalsMetadata ??= [];
+            ReplaceCustomCanSignalMetadata(incomingCustomCanMetadata.Concat(currentCustomCanMetadata));
+
             AttachSettingsTracking(SettingsDataView);
             RefreshIoFlowGraphFromSettings();
             SyncSelectedTimeZoneFromSettings();
@@ -2607,7 +2771,9 @@ namespace Cortex.ViewModels
             var legendItems = new List<ConnectorLegendItem>();
             var outputTypes = pins
                 .Where(pin => pin.Role == ConnectorPinRole.Output && pin.OutputChannelNumber.HasValue)
-                .Select(pin => SettingsDataView.ChannelsStaticData.ElementAtOrDefault(pin.OutputChannelNumber.Value - 1)?.ChanType)
+                .Select(pin => pin.OutputChannelNumber is int outputChannelNumber
+                    ? SettingsDataView.ChannelsStaticData.ElementAtOrDefault(outputChannelNumber - 1)?.ChanType
+                    : null)
                 .OfType<OutputChannel.ChannelType>()
                 .Distinct()
                 .Select(CreateOutputLegendItem);
@@ -2674,8 +2840,8 @@ namespace Cortex.ViewModels
                 return;
             }
 
-            string current = ConfigFileSerializer.SerializeSettings(SettingsDataView);
-            string baseline = ConfigFileSerializer.SerializeSettings(_controllerConfigBaseline);
+            string current = ConfigFileSerializer.SerializeSettings(SettingsDataView, includeCustomCanMetadata: false);
+            string baseline = ConfigFileSerializer.SerializeSettings(_controllerConfigBaseline, includeCustomCanMetadata: false);
             HasPendingConfigChanges = !string.Equals(current, baseline, StringComparison.Ordinal);
         }
 
@@ -2718,10 +2884,59 @@ namespace Cortex.ViewModels
 
         public void OnWindowClosing()
         {
+            Dispose();
+        }
+
+        public void Dispose()
+        {
+            if (_isDisposed)
+            {
+                return;
+            }
+
+            _isDisposed = true;
+
             SaveLiveChartPreferences();
+
             _pollTimer.Stop();
+            _pollTimer.Dispose();
+
             _commsTimer.Stop();
-            Disconnect();
+            _commsTimer.Dispose();
+
+            _uiUpdateTimer.Stop();
+            _uiUpdateTimer.Elapsed -= OnUIUpdateTimerElapsed;
+            _uiUpdateTimer.Dispose();
+
+            _logViewportMonitorTimer.Stop();
+            _liveHoverClearTimer.Stop();
+
+            _logLoadCts?.Cancel();
+            _logLoadCts?.Dispose();
+            _logLoadCts = null;
+
+            _applicationUpdateCheckCts?.Cancel();
+            _applicationUpdateCheckCts?.Dispose();
+            _applicationUpdateCheckCts = null;
+
+            _firmwareCheckCts?.Cancel();
+            _firmwareCheckCts?.Dispose();
+            _firmwareCheckCts = null;
+
+            if (SelectedChannel != null)
+            {
+                SelectedChannel.PropertyChanged -= SelectedChannel_PropertyChanged;
+            }
+
+            Disconnect(disposePortServiceInBackground: true);
+
+            foreach (var connectorPin in ConnectorPins)
+            {
+                connectorPin.Dispose();
+            }
+
+            _provisioningApiClient.Dispose();
+            GC.SuppressFinalize(this);
         }
 
 
@@ -2785,11 +3000,15 @@ namespace Cortex.ViewModels
         {
             if (!TryGetChartPoints(parameter, out List<ChartPoint> points))
             {
-                ScheduleLiveChartSelectionClear();
                 return;
             }
 
             _liveHoverClearTimer.Stop();
+
+            double hoveredX = points[0].Coordinate.SecondaryValue;
+            _liveHoverAnchorTimestampMs = hoveredX;
+            _hasLiveHoverAnchor = true;
+
             UpdateLiveChartSelection(points, pinSelection: false);
         }
 
@@ -2830,8 +3049,11 @@ namespace Cortex.ViewModels
         private void ClearLiveChartSelection()
         {
             _lastHoveredLiveChartPoints.Clear();
+            _hasLiveHoverAnchor = false;
+            _liveHoverAnchorTimestampMs = 0;
             IsLiveChartSelectionPinned = false;
             LiveChartHoverSummary = "Hover the chart to inspect live values. Click a point to pin the readout.";
+            ClearLiveSeriesToggleValues();
             OnPropertyChanged(nameof(HasLiveChartSelection));
             OnPropertyChanged(nameof(LiveChartPinButtonText));
         }
@@ -2876,29 +3098,56 @@ namespace Cortex.ViewModels
         }
 
         [RelayCommand]
-        private void SendConfig()
+        private async Task SendConfig()
         {
             if (IsSendingConfig)
             {
                 return;
             }
 
-            if (IsConnected && _portService != null)
+            if (!IsConnected || _portService == null)
             {
-                if (!TryValidateMathConfiguration(out string validationError))
+                return;
+            }
+
+            if (!TryValidateMathConfiguration(out string validationError))
+            {
+                MathValidationErrorMessage = validationError;
+                AddLog("Cannot save MATH configuration.", validationError);
+                return;
+            }
+
+            MathValidationErrorMessage = string.Empty;
+            PrepareCellularSettingsForSave();
+
+            bool customCanSaved = true;
+            if (HasPendingCustomCanChanges())
+            {
+                customCanSaved = await PersistPendingCustomCanChangesAsync();
+                if (!customCanSaved)
                 {
-                    MathValidationErrorMessage = validationError;
-                    AddLog("Cannot save MATH configuration.", validationError);
                     return;
                 }
 
-                MathValidationErrorMessage = string.Empty;
-                PrepareCellularSettingsForSave();
-                IsSendingConfig = true;
-                _portService.UpdateSettingsData(SettingsDataView);
                 _controllerConfigBaseline = DeepCopyDataStructures(SettingsDataView);
-                _portService.StartSendConfig();
+                RecalculatePendingConfigChanges();
             }
+
+            if (!HasPendingConfigChanges)
+            {
+                if (customCanSaved)
+                {
+                    PersistIoFlowGraphSnapshotForController();
+                    SystemDateTime = $"Last updated: {DateTime.Now:yyyy/MM/dd HH:mm:ss}";
+                    StartBackgroundTask(FlashLastUpdatedAsync(), "Last-updated highlight");
+                }
+
+                return;
+            }
+
+            IsSendingConfig = true;
+            _portService.UpdateSettingsData(SettingsDataView);
+            _portService.StartSendConfig();
         }
 
         private bool TryValidateMathConfiguration(out string validationError)
@@ -2935,14 +3184,15 @@ namespace Cortex.ViewModels
                 for (int ruleIndex = 0; ruleIndex < activeRuleCount; ruleIndex++)
                 {
                     OutputChannel.MathRule rule = channel.MathRules[ruleIndex];
-                    if (rule.Operation > (byte)OutputChannel.MathOperation.ABS)
+                    if (rule.Operation > (byte)OutputChannel.MathOperation.TOGGLE)
                     {
                         validationError = $"Channel {channelIndex + 1}, rule {ruleIndex}: Operator is invalid.";
                         return false;
                     }
 
                     bool unary = rule.Operation == (byte)OutputChannel.MathOperation.NOT ||
-                                 rule.Operation == (byte)OutputChannel.MathOperation.ABS;
+                                 rule.Operation == (byte)OutputChannel.MathOperation.ABS ||
+                                 rule.Operation == (byte)OutputChannel.MathOperation.TOGGLE;
 
                     bool supportsHysteresis = rule.Operation >= (byte)OutputChannel.MathOperation.GREATER_THAN &&
                                               rule.Operation <= (byte)OutputChannel.MathOperation.LESS_EQUAL;
@@ -3036,6 +3286,13 @@ namespace Cortex.ViewModels
                         return false;
                     }
                     break;
+                case OutputChannel.MathOperandType.CanSignal:
+                    if (operandIndex >= Constants.MAX_CUSTOM_CAN_SIGNALS)
+                    {
+                        validationError = $"Channel {channelIndex + 1}, rule {ruleIndex}: Operand {operandName} CAN-signal index must be 0..{Constants.MAX_CUSTOM_CAN_SIGNALS - 1}.";
+                        return false;
+                    }
+                    break;
                 case OutputChannel.MathOperandType.Rule:
                     if (operandIndex >= activeRuleCount)
                     {
@@ -3095,7 +3352,8 @@ namespace Cortex.ViewModels
             }
 
             bool unary = rule.Operation == (byte)OutputChannel.MathOperation.NOT ||
-                         rule.Operation == (byte)OutputChannel.MathOperation.ABS;
+                         rule.Operation == (byte)OutputChannel.MathOperation.ABS ||
+                         rule.Operation == (byte)OutputChannel.MathOperation.TOGGLE;
             if (!unary &&
                 TryGetRuleDependency(rule.OperandBType, rule.OperandBIndex, activeRuleCount, out int dependencyB) &&
                 VisitMathRule(channel, activeRuleCount, dependencyB, visiting, visited, out cycleRule))
@@ -3303,7 +3561,7 @@ namespace Cortex.ViewModels
             bool changed = !string.Equals(CellularConnectionHealthStatus, status, StringComparison.OrdinalIgnoreCase);
             CellularConnectionHealthStatus = status;
 
-            if (!shouldLog)
+            if (!shouldLog || !SettingsDataView.SystemParamsStaticData.AllowData)
             {
                 return;
             }
@@ -3773,6 +4031,179 @@ namespace Cortex.ViewModels
             }
         }
 
+        [RelayCommand]
+        private async Task ConfigurePinLockAsync()
+        {
+            if (!CanConfigurePinLock || _portService == null)
+            {
+                AddLog("PIN lock setup unavailable. Check connection and controller comms.");
+                return;
+            }
+
+            IsPinLockBusy = true;
+            try
+            {
+                bool secureSessionReady = await _portService.EnsureSecureSessionAsync();
+                if (!secureSessionReady && _portService.HasPendingControllerIdentityMismatch)
+                {
+                    bool rePairConfirmed = await _appCloser.ConfirmAsync(
+                        "Controller Identity Changed",
+                        $"Controller identity has changed for {_portService.ControllerPairingPortName}. If this is your controller, replace its saved pairing and retry secure session setup?",
+                        "RE-PAIR",
+                        "CANCEL");
+
+                    if (rePairConfirmed && _portService.ReplacePendingControllerPairing())
+                    {
+                        secureSessionReady = await _portService.EnsureSecureSessionAsync();
+                    }
+                }
+
+                if (!secureSessionReady)
+                {
+                    string secureError = _portService.LastSecureSessionError ?? "Secure session could not be established.";
+                    PinLockStatusMessage = secureError;
+                    AddLog($"PIN lock setup failed: {secureError}");
+                    return;
+                }
+
+                PinSetupDialogResult? dialogResult = await _appCloser.ShowPinSetupWizardAsync(IsPinLockEnabled);
+                if (dialogResult == null || !dialogResult.Confirmed)
+                {
+                    return;
+                }
+
+                PinSetupResult result = await _portService.SecureSetPinAsync(dialogResult.Pin);
+                if (!result.Success || string.IsNullOrWhiteSpace(result.RecoveryKey))
+                {
+                    PinLockRetryAfterMs = result.RetryAfterMs;
+                    PinLockStatusMessage = result.ErrorMessage ?? "PIN setup failed.";
+                    AddLog($"PIN setup failed: {PinLockStatusMessage}");
+                    return;
+                }
+
+                bool acknowledged = await _appCloser.ShowRecoveryCodeAsync(result.RecoveryKey);
+                if (!acknowledged)
+                {
+                    PinLockStatusMessage = "PIN was set but recovery key confirmation was dismissed.";
+                    AddLog("PIN set successfully, but recovery key confirmation was not completed.");
+                }
+                else
+                {
+                    PinLockStatusMessage = "PIN lock enabled. Keep your recovery key in a safe place.";
+                    AddLog("PIN lock enabled.");
+                }
+
+                await RefreshPinLockStateAsync();
+            }
+            catch (Exception ex)
+            {
+                PinLockStatusMessage = "PIN setup failed.";
+                AddLog($"PIN setup failed: {ex.Message}");
+            }
+            finally
+            {
+                IsPinLockBusy = false;
+            }
+        }
+
+        [RelayCommand]
+        private async Task DisablePinLockAsync()
+        {
+            if (!CanDisablePinLock || _portService == null)
+            {
+                return;
+            }
+
+            bool confirmed = await _appCloser.ConfirmAsync(
+                "Disable PIN Lock",
+                "Disable PIN lock for this PDM? This requires an active authorized secure session.",
+                "DISABLE",
+                "CANCEL");
+
+            if (!confirmed)
+            {
+                return;
+            }
+
+            IsPinLockBusy = true;
+            try
+            {
+                SecureManagementResponse? response = await _portService.SecureDisablePinAsync();
+                if (response == null || response.Result != SecureControlResult.Ok)
+                {
+                    PinLockStatusMessage = response == null
+                        ? "Disable PIN failed."
+                        : $"Disable PIN returned {response.Result}.";
+                    PinLockRetryAfterMs = response?.RetryAfterMs ?? 0;
+                    AddLog(PinLockStatusMessage);
+                    return;
+                }
+
+                PinLockStatusMessage = "PIN lock disabled.";
+                PinLockRetryAfterMs = 0;
+                IsPinLockEnabled = false;
+                AddLog("PIN lock disabled.");
+                await RefreshPinLockStateAsync();
+            }
+            catch (Exception ex)
+            {
+                PinLockStatusMessage = "Disable PIN failed.";
+                AddLog($"Disable PIN failed: {ex.Message}");
+            }
+            finally
+            {
+                IsPinLockBusy = false;
+            }
+        }
+
+        private async Task RefreshPinLockStateAsync()
+        {
+            if (_portService == null || !IsConnected)
+            {
+                IsPinLockSupported = false;
+                IsPinLockEnabled = false;
+                PinLockRetryAfterMs = 0;
+                PinLockStatusMessage = "PIN lock unavailable.";
+                return;
+            }
+
+            if (_portService.IsSecureSessionOpen && _portService.IsSecureProtocolEnabled)
+            {
+                SecureManagementResponse? status = await _portService.GetSecureStatusAsync();
+                if (status != null)
+                {
+                    IsPinLockSupported = true;
+                    IsPinLockEnabled = status.PinEnabled;
+                    PinLockRetryAfterMs = status.RetryAfterMs;
+                    PinLockStatusMessage = status.StorageFault
+                        ? "PIN lock storage fault detected on controller."
+                        : status.PinEnabled
+                            ? "PIN lock is enabled on this PDM."
+                            : "PIN lock is not enabled on this PDM.";
+                    return;
+                }
+            }
+
+            SecureInfoResponse? info = await _portService.GetSecureInfoAsync();
+            if (info == null || info.ProtocolVersion != Constants.SECURE_PROTOCOL_VERSION)
+            {
+                IsPinLockSupported = false;
+                IsPinLockEnabled = false;
+                PinLockRetryAfterMs = 0;
+                PinLockStatusMessage = "Controller does not report secure PIN protocol support.";
+                return;
+            }
+
+            IsPinLockSupported = true;
+            IsPinLockEnabled = info.PinEnabled;
+            PinLockRetryAfterMs = info.RetryAfterMs;
+            PinLockStatusMessage = info.StorageFault
+                ? "PIN lock storage fault detected on controller."
+                : info.PinEnabled
+                    ? "PIN lock is enabled on this PDM."
+                    : "PIN lock is not enabled on this PDM.";
+        }
+
         private void RefreshInternetAvailability()
         {
             IsInternetAvailable = NetworkInterface.GetIsNetworkAvailable();
@@ -3784,7 +4215,7 @@ namespace Cortex.ViewModels
             try
             {
                 PrepareCellularSettingsForSave();
-                string content = ConfigFileSerializer.SerializeSettings(SettingsDataView);
+                string content = ConfigFileSerializer.SerializeSettings(SettingsDataView, CreateIoFlowConfigSnapshot());
                 bool saved = await _appCloser.SavePdmFileContentAsync(content);
 
                 if (saved)
@@ -3817,6 +4248,11 @@ namespace Cortex.ViewModels
 
                 ConfigFileSerializer.ApplySnapshot(SettingsDataView, snapshot);
                 ForceRefreshSettingsBindings();
+
+                IoFlowGraphSnapshot? ioFlowSnapshot = snapshot.IoFlowGraph == null
+                    ? null
+                    : ConvertIoFlowConfigSnapshot(snapshot.IoFlowGraph);
+                ApplyIoFlowSnapshotFromConfig(ioFlowSnapshot);
 
                 AddLog("Configuration loaded from .pdm file. Save to controller to apply permanently.");
             }
@@ -3854,7 +4290,7 @@ namespace Cortex.ViewModels
             }
             else
             {
-                SelectedAnalogueInput = null;
+                SelectedAnalogueInput = new AnalogueInput(1, false, false, null);
             }
 
             if (SettingsDataView.ChannelsStaticData.Count > 0)
@@ -3903,7 +4339,7 @@ namespace Cortex.ViewModels
                 }
                 else
                 {
-                    SelectedAnalogueInput = null;
+                    SelectedAnalogueInput = new AnalogueInput(1, false, false, null);
                 }
 
                 if (SettingsDataView.ChannelsStaticData.Count > 0)
@@ -4012,7 +4448,8 @@ namespace Cortex.ViewModels
             RaiseMathRuleUiPropertiesChanged(includeRuleSelectorOptions: false, includeOperandASelectorOptions: false, includeOperandBSelectorOptions: false);
 
             // Handle static data refresh
-            if (refreshStaticData && (_portService == null || !_portService.UpdateStaticData))
+            bool staticSnapshotReady = _portService != null && _portService.HasLoadedStaticSnapshot && !_portService.UpdateStaticData;
+            if (refreshStaticData && staticSnapshotReady)
             {
                 refreshStaticData = false;
                 _suppressDirtyTracking = true;
@@ -4021,6 +4458,9 @@ namespace Cortex.ViewModels
                     string? preservedTimeZoneId = SettingsDataView.SystemParamsStaticData.TimeZoneId;
                     byte[] preservedTimeZoneRule = SettingsDataView.SystemParamsStaticData.TimeZoneRule?.ToArray() ?? Array.Empty<byte>();
                     CellularParameters preservedCellular = DeepCopyDataStructures(SettingsDataView).CellularParamsStaticData;
+                    List<CustomCanSignalMetadata> preservedCustomCanMetadata = SettingsDataView.CustomCanSignalsMetadata
+                        .Select(metadata => metadata.Clone())
+                        .ToList();
 
                     ReplaceSettingsData(DeepCopyDataStructures(data));
                     SettingsDataView.CellularParamsStaticData.PreserveOpenRemoteFieldsFrom(preservedCellular);
@@ -4037,21 +4477,36 @@ namespace Cortex.ViewModels
                         SettingsDataView.SystemParamsStaticData.TimeZoneRule = preservedTimeZoneRule;
                     }
 
+                    if (preservedCustomCanMetadata.Count > 0)
+                    {
+                        SettingsDataView.CustomCanSignalsMetadata.Clear();
+                        foreach (CustomCanSignalMetadata metadata in preservedCustomCanMetadata)
+                        {
+                            SettingsDataView.CustomCanSignalsMetadata.Add(metadata);
+                        }
+
+                        RefreshCustomCanBindings();
+                    }
+
                     SyncSelectedTimeZoneFromSettings();
                     _controllerConfigBaseline = DeepCopyDataStructures(SettingsDataView);
                     HasPendingConfigChanges = false;
                     _awaitingInitialMathSettingsHydration = true;
                     _portService?.UpdateSettingsData(SettingsDataView);
+                    // If the CAN messages tab is already open, kick polling again now
+                    // that static settings hydration is complete.
+                    UpdateCustomCanStatusPollingSelection();
                     OnSelectedChannelIndexChanged(SelectedChannelIndex, SelectedChannelIndex);
                     SelectedAnalogueInput = SettingsDataView.AnalogueInputsStaticData.FirstOrDefault();
                     SelectedDigitalInput = SettingsDataView.DigitalInputsStaticData.FirstOrDefault();
                     RefreshInternetAvailability();
-                    _ = RefreshConnectedPdmStatusAsync();
                 }
                 finally
                 {
                     _suppressDirtyTracking = false;
                 }
+
+                IsInitialSnapshotLoaded = true;
 
                 if (IsFactoryResetInProgress)
                 {
@@ -4064,6 +4519,8 @@ namespace Cortex.ViewModels
                     _pendingRevertLog = false;
                     AddLog("PDM values restored to UI");
                 }
+
+                StartBackgroundTask(RefreshFirmwareUpdateStateAsync(), "Firmware update state refresh");
             }
         }
 
@@ -4738,7 +5195,228 @@ namespace Cortex.ViewModels
                 targetSys.MobileSignalPercent = sourceSys.MobileSignalPercent;
             }
 
+            int customCanLiveMessageCount = Math.Min(newData.CustomCanMessagesLiveData.Count, LiveDataView.CustomCanMessagesLiveData.Count);
+            for (int i = 0; i < customCanLiveMessageCount; i++)
+            {
+                CustomCanMessage source = newData.CustomCanMessagesLiveData[i];
+                CustomCanMessage target = LiveDataView.CustomCanMessagesLiveData[i];
+                target.Index = source.Index;
+                target.Id = source.Id;
+                target.TimeoutMs = source.TimeoutMs;
+                target.Dlc = source.Dlc;
+                target.Flags = source.Flags;
+                target.TxTrigger = source.TxTrigger;
+                target.Status = source.Status;
+            }
+
+            int customCanLiveSignalCount = Math.Min(newData.CustomCanSignalsLiveData.Count, LiveDataView.CustomCanSignalsLiveData.Count);
+            for (int i = 0; i < customCanLiveSignalCount; i++)
+            {
+                CustomCanSignal source = newData.CustomCanSignalsLiveData[i];
+                CustomCanSignal target = LiveDataView.CustomCanSignalsLiveData[i];
+                CustomCanSignal? storedSignal = i < SettingsDataView.CustomCanSignalsStaticData.Count
+                    ? SettingsDataView.CustomCanSignalsStaticData[i]
+                    : null;
+                target.Index = source.Index;
+                // The controller does not store names; prefer the locally tracked name over its placeholder.
+                target.Name = !ShouldApplyMetadataName(source.Name, i) || storedSignal == null
+                    ? source.Name
+                    : storedSignal.Name;
+                target.MessageName = !IsPlaceholderMessageName(source.MessageName) || storedSignal == null
+                    ? source.MessageName
+                    : storedSignal.MessageName;
+                target.MessageIndex = source.MessageIndex;
+                target.StartBit = source.StartBit;
+                target.BitLength = source.BitLength;
+                target.Flags = source.Flags;
+                target.ValueSource = source.ValueSource;
+                target.Factor = source.Factor;
+                target.Offset = source.Offset;
+                target.RuntimeValue = source.RuntimeValue;
+                target.Status = source.Status;
+            }
+
+            bool preserveEditableCustomCan = HasPendingConfigChanges;
+            if (!preserveEditableCustomCan)
+            {
+                string?[] previousSignalIdentities = SettingsDataView.CustomCanSignalsStaticData
+                    .Select(BuildStoredCustomCanSignalIdentityKey)
+                    .ToArray();
+
+                int customCanStaticMessageCount = Math.Min(newData.CustomCanMessagesStaticData.Count, SettingsDataView.CustomCanMessagesStaticData.Count);
+                bool customCanStaticDefinitionsChanged =
+                    newData.CustomCanMessagesStaticData.Count != SettingsDataView.CustomCanMessagesStaticData.Count
+                    || newData.CustomCanSignalsStaticData.Count != SettingsDataView.CustomCanSignalsStaticData.Count;
+
+                for (int i = 0; i < customCanStaticMessageCount; i++)
+                {
+                    CustomCanMessage source = newData.CustomCanMessagesStaticData[i];
+                    CustomCanMessage target = SettingsDataView.CustomCanMessagesStaticData[i];
+
+                    ushort sourceTimeoutMs = source.TimeoutMs;
+                    byte sourceFlags = source.Flags;
+                    byte sourceTxTrigger = source.TxTrigger;
+                    if (TryGetPendingCustomCanMessageWrite(i, out ushort pendingTimeoutMs, out byte pendingFlags, out byte pendingTxTrigger))
+                    {
+                        sourceTimeoutMs = pendingTimeoutMs;
+                        sourceFlags = pendingFlags;
+                        sourceTxTrigger = pendingTxTrigger;
+                    }
+
+                    if (target.Index != source.Index
+                        || target.Id != source.Id
+                        || target.TimeoutMs != sourceTimeoutMs
+                        || target.Dlc != source.Dlc
+                        || target.Flags != sourceFlags
+                        || target.TxTrigger != sourceTxTrigger)
+                    {
+                        customCanStaticDefinitionsChanged = true;
+                    }
+
+                    target.Index = source.Index;
+                    target.Id = source.Id;
+                    target.TimeoutMs = sourceTimeoutMs;
+                    target.Dlc = source.Dlc;
+                    target.Flags = sourceFlags;
+                    target.TxTrigger = sourceTxTrigger;
+                    target.Status = source.Status;
+                }
+
+                int customCanStaticSignalCount = Math.Min(newData.CustomCanSignalsStaticData.Count, SettingsDataView.CustomCanSignalsStaticData.Count);
+                _customCanMetadataUpsertSuppression++;
+                try
+                {
+                    for (int i = 0; i < customCanStaticSignalCount; i++)
+                    {
+                        CustomCanSignal source = newData.CustomCanSignalsStaticData[i];
+                        CustomCanSignal target = SettingsDataView.CustomCanSignalsStaticData[i];
+
+                        byte sourceValueSource = source.ValueSource;
+                        if (TryGetPendingCustomCanSignalValueSourceWrite(i, out byte pendingValueSource))
+                        {
+                            sourceValueSource = pendingValueSource;
+                        }
+
+                        bool sourceLooksEmptyDisabled =
+                            source.Flags == 0 &&
+                            source.StartBit == 0 &&
+                            source.BitLength <= 1 &&
+                            source.MessageIndex == 0 &&
+                            source.Factor == 1.0f &&
+                            source.Offset == 0.0f &&
+                            string.IsNullOrWhiteSpace(source.MessageName);
+                        if (target.IsEnabled && sourceLooksEmptyDisabled)
+                        {
+                            continue;
+                        }
+
+                        bool sourceHasName = !ShouldApplyMetadataName(source.Name, i);
+                        bool sourceHasMessageName = !IsPlaceholderMessageName(source.MessageName);
+
+                        if (target.Index != source.Index
+                            || (sourceHasName && target.Name != source.Name)
+                            || (sourceHasMessageName && target.MessageName != source.MessageName)
+                            || target.MessageIndex != source.MessageIndex
+                            || target.StartBit != source.StartBit
+                            || target.BitLength != source.BitLength
+                            || target.Flags != source.Flags
+                            || target.ValueSource != sourceValueSource
+                            || target.Factor != source.Factor
+                            || target.Offset != source.Offset)
+                        {
+                            customCanStaticDefinitionsChanged = true;
+                        }
+
+                        target.Index = source.Index;
+                        target.MessageIndex = source.MessageIndex;
+                        target.StartBit = source.StartBit;
+                        target.BitLength = source.BitLength;
+                        target.Flags = source.Flags;
+                        target.ValueSource = sourceValueSource;
+                        target.Factor = source.Factor;
+                        target.Offset = source.Offset;
+                        target.RuntimeValue = source.RuntimeValue;
+                        target.Status = source.Status;
+
+                        // Names, limits and units only exist locally. When the slot now holds a different
+                        // signal, drop the stale local details so they are re-resolved from metadata.
+                        string? previousIdentity = i < previousSignalIdentities.Length ? previousSignalIdentities[i] : null;
+                        if (!string.Equals(previousIdentity, BuildStoredCustomCanSignalIdentityKey(target), StringComparison.Ordinal))
+                        {
+                            target.Name = $"Signal {i + 1}";
+                            target.MessageName = string.Empty;
+                            target.MinValue = null;
+                            target.MaxValue = null;
+                            target.Units = string.Empty;
+                            customCanStaticDefinitionsChanged = true;
+                        }
+
+                        if (sourceHasName)
+                        {
+                            target.Name = source.Name;
+                        }
+
+                        if (sourceHasMessageName)
+                        {
+                            target.MessageName = source.MessageName;
+                        }
+                    }
+                }
+                finally
+                {
+                    _customCanMetadataUpsertSuppression--;
+                }
+
+                if (customCanStaticDefinitionsChanged || SettingsDataView.CustomCanSignalsMetadata.Count > 0)
+                {
+                    RefreshCustomCanBindings();
+                }
+
+                SyncCustomCanBaselineSnapshot();
+            }
         }
+
+        private void SyncCustomCanBaselineSnapshot()
+        {
+            if (_controllerConfigBaseline == null)
+            {
+                return;
+            }
+
+            int messageCount = Math.Min(SettingsDataView.CustomCanMessagesStaticData.Count, _controllerConfigBaseline.CustomCanMessagesStaticData.Count);
+            for (int i = 0; i < messageCount; i++)
+            {
+                CustomCanMessage source = SettingsDataView.CustomCanMessagesStaticData[i];
+                CustomCanMessage target = _controllerConfigBaseline.CustomCanMessagesStaticData[i];
+                target.Index = source.Index;
+                target.Id = source.Id;
+                target.TimeoutMs = source.TimeoutMs;
+                target.Dlc = source.Dlc;
+                target.Flags = source.Flags;
+                target.TxTrigger = source.TxTrigger;
+                target.Status = source.Status;
+            }
+
+            int signalCount = Math.Min(SettingsDataView.CustomCanSignalsStaticData.Count, _controllerConfigBaseline.CustomCanSignalsStaticData.Count);
+            for (int i = 0; i < signalCount; i++)
+            {
+                CustomCanSignal source = SettingsDataView.CustomCanSignalsStaticData[i];
+                CustomCanSignal target = _controllerConfigBaseline.CustomCanSignalsStaticData[i];
+                target.Index = source.Index;
+                target.Name = source.Name;
+                target.MessageName = source.MessageName;
+                target.MessageIndex = source.MessageIndex;
+                target.StartBit = source.StartBit;
+                target.BitLength = source.BitLength;
+                target.Flags = source.Flags;
+                target.ValueSource = source.ValueSource;
+                target.Factor = source.Factor;
+                target.Offset = source.Offset;
+                target.RuntimeValue = source.RuntimeValue;
+                target.Status = source.Status;
+            }
+        }
+
         public double LastUpdatedHighlightOpacity
         {
             get => _lastUpdatedHighlightOpacity;
@@ -5006,12 +5684,122 @@ namespace Cortex.ViewModels
                 : $"{timestamp}  |  {string.Join("  |  ", values)}";
         }
 
+        private static bool TryGetNearestSeriesValue(IReadOnlyList<ObservablePoint> points, double targetX, out double value)
+        {
+            value = 0;
+
+            if (points.Count == 0)
+            {
+                return false;
+            }
+
+            double? previousX = null;
+            double? previousY = null;
+
+            foreach (ObservablePoint point in points)
+            {
+                if (!point.X.HasValue || !point.Y.HasValue)
+                {
+                    continue;
+                }
+
+                double currentX = point.X.Value;
+                double currentY = point.Y.Value;
+
+                if (currentX < targetX)
+                {
+                    previousX = currentX;
+                    previousY = currentY;
+                    continue;
+                }
+
+                if (!previousX.HasValue || !previousY.HasValue)
+                {
+                    value = currentY;
+                    return true;
+                }
+
+                if (currentX <= previousX.Value)
+                {
+                    value = currentY;
+                    return true;
+                }
+
+                double ratio = Math.Clamp((targetX - previousX.Value) / (currentX - previousX.Value), 0d, 1d);
+                value = previousY.Value + ((currentY - previousY.Value) * ratio);
+                return true;
+            }
+
+            if (previousY.HasValue)
+            {
+                value = previousY.Value;
+                return true;
+            }
+
+            return false;
+        }
+
+        private void RefreshLiveChartSelectionFromAnchor()
+        {
+            if (IsLiveChartSelectionPinned || !_hasLiveHoverAnchor)
+            {
+                return;
+            }
+
+            double anchorTimestampMs = _liveHoverAnchorTimestampMs;
+
+            for (int i = 0; i < ChannelLiveSeriesToggles.Count; i++)
+            {
+                ChannelLiveSeriesToggles[i].SetCurrentValue(TryGetLiveSeriesValueAtAnchor(i, anchorTimestampMs, requireVisible: true, out double value)
+                    ? value
+                    : null);
+            }
+
+            int analogueOffset = LiveDataView.ChannelsLiveData.Count;
+            for (int i = 0; i < AnalogueLiveSeriesToggles.Count; i++)
+            {
+                AnalogueLiveSeriesToggles[i].SetCurrentValue(TryGetLiveSeriesValueAtAnchor(analogueOffset + i, anchorTimestampMs, requireVisible: true, out double value)
+                    ? value
+                    : null);
+            }
+
+            OnPropertyChanged(nameof(HasLiveChartSelection));
+        }
+
+        public void UpdateLiveHoverAnchorFromRelativeX(double relativeX)
+        {
+            if (IsLiveChartSelectionPinned)
+            {
+                return;
+            }
+
+            if (XAxes is not { Length: > 0 } || !XAxes[0].MaxLimit.HasValue)
+            {
+                return;
+            }
+
+            double maxX = XAxes[0].MaxLimit!.Value;
+            double minX = XAxes[0].MinLimit ?? maxX;
+            double range = Math.Max(1, maxX - minX);
+            double clampedRelativeX = Math.Clamp(relativeX, 0d, 1d);
+            double anchorX = minX + (range * clampedRelativeX);
+
+            _liveHoverAnchorTimestampMs = anchorX;
+            _hasLiveHoverAnchor = true;
+            RefreshLiveChartSelectionFromAnchor();
+            OnPropertyChanged(nameof(HasLiveChartSelection));
+        }
+
         private void UpdateLiveChartSelection(IReadOnlyList<ChartPoint> points, bool pinSelection)
         {
             _lastHoveredLiveChartPoints = points.Where(point => point != null && !point.IsEmpty).ToList();
             if (_lastHoveredLiveChartPoints.Count == 0)
             {
-                ClearLiveChartSelectionState();
+                if (!_hasLiveHoverAnchor)
+                {
+                    ClearLiveChartSelectionState();
+                }
+
                 return;
             }
 
@@ -5036,10 +5824,63 @@ namespace Cortex.ViewModels
             _liveHoverClearTimer.Start();
         }
 
+        private bool TryGetLiveSeriesValueAtAnchor(int seriesIndex, double anchorTimestampMs, bool requireVisible, out double value)
+        {
+            value = 0;
+
+            if (seriesIndex < 0 || seriesIndex >= SeriesCollection.Count)
+            {
+                return false;
+            }
+
+            if (SeriesCollection[seriesIndex] is not LineSeries<ObservablePoint> series)
+            {
+                return false;
+            }
+
+            if (requireVisible && !series.IsVisible)
+            {
+                return false;
+            }
+
+            EnsureLiveSeriesStateCapacity();
+            if (seriesIndex < _liveSeriesHistory.Length)
+            {
+                List<ObservablePoint> history = _liveSeriesHistory[seriesIndex];
+                if (history.Count > 0 && TryGetNearestSeriesValue(history, anchorTimestampMs, out value))
+                {
+                    return true;
+                }
+            }
+
+            if (series.Values is not ObservableCollection<ObservablePoint> points || points.Count == 0)
+            {
+                return false;
+            }
+
+            return TryGetNearestSeriesValue(points, anchorTimestampMs, out value);
+        }
+
+        private void ClearLiveSeriesToggleValues()
+        {
+            foreach (ChartSeriesToggleItem toggle in ChannelLiveSeriesToggles)
+            {
+                toggle.SetCurrentValue(null);
+            }
+
+            foreach (ChartSeriesToggleItem toggle in AnalogueLiveSeriesToggles)
+            {
+                toggle.SetCurrentValue(null);
+            }
+        }
+
         private void ClearLiveChartSelectionState()
         {
             _lastHoveredLiveChartPoints.Clear();
+            _hasLiveHoverAnchor = false;
+            _liveHoverAnchorTimestampMs = 0;
             LiveChartHoverSummary = string.Empty;
+            ClearLiveSeriesToggleValues();
             OnPropertyChanged(nameof(HasLiveChartSelection));
             OnPropertyChanged(nameof(LiveChartPinButtonText));
         }
@@ -5643,6 +6484,7 @@ namespace Cortex.ViewModels
             }
 
             ApplyLiveChartAxisLimits(nowMs, appendNewSamples ? maxVisibleByAxis : null);
+            RefreshLiveChartSelectionFromAnchor();
         }
 
         private void UpdateErrorFlags()
@@ -5688,6 +6530,26 @@ namespace Cortex.ViewModels
             LoggingService.AddLog(message, details, exception, callerMemberName, callerFilePath, callerLineNumber);
         }
 
+        private void StartBackgroundTask(Task task, string operationName)
+        {
+            _ = ObserveBackgroundTaskAsync(task, operationName);
+        }
+
+        private async Task ObserveBackgroundTaskAsync(Task task, string operationName)
+        {
+            try
+            {
+                await task;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                AddLog($"{operationName} failed: {ex.Message}", exception: ex);
+            }
+        }
+
         partial void OnPullUpEnabledChanged(bool value)
         {
             if (value)
@@ -5702,14 +6564,19 @@ namespace Cortex.ViewModels
 
         partial void OnIsConnectedChanged(bool value)
         {
+            OnPropertyChanged(nameof(IsControllerUiReady));
             OnPropertyChanged(nameof(CanResetLogs));
             OnPropertyChanged(nameof(CanAccessOperationalTabs));
             OnPropertyChanged(nameof(CanOpenFirmwareUpdateDialog));
             OnPropertyChanged(nameof(CanOpenLocalFirmwareUpdateDialog));
             OnPropertyChanged(nameof(CanSetControllerRtc));
             OnPropertyChanged(nameof(CanFactoryReset));
+            OnPropertyChanged(nameof(CanManagePinLock));
+            OnPropertyChanged(nameof(CanConfigurePinLock));
+            OnPropertyChanged(nameof(CanDisablePinLock));
             OnPropertyChanged(nameof(CanTestCellularConnection));
             OnPropertyChanged(nameof(CanProvisionOpenRemote));
+            UpdateCustomCanStatusPollingSelection();
 
             if (!value)
             {
@@ -5719,6 +6586,11 @@ namespace Cortex.ViewModels
                 IsAutomaticCellularTestInProgress = false;
                 IsOpenRemoteProvisioningInProgress = false;
                 FactoryResetStatusMessage = string.Empty;
+                IsPinLockBusy = false;
+                IsPinLockSupported = false;
+                IsPinLockEnabled = false;
+                PinLockRetryAfterMs = 0;
+                PinLockStatusMessage = "PIN lock unavailable.";
                 ResetCellularTestStatus();
                 _suppressCellularNeedsAttentionUntilUtc = DateTime.MinValue;
                 SetCellularConnectionHealthStatus("Offline", shouldLog: true);
@@ -5734,22 +6606,28 @@ namespace Cortex.ViewModels
                 }
                 else
                 {
-                    SetCellularConnectionHealthStatus("Offline", shouldLog: true);
+                    SetCellularConnectionHealthStatus("Offline", shouldLog: false);
                     _nextCellularHealthPollUtc = DateTime.MinValue;
                 }
 
                 UpdateFirmwareButtonPresentation();
+                StartBackgroundTask(RefreshPinLockStateAsync(), "PIN lock status refresh");
             }
         }
 
         partial void OnCommsEstablishedChanged(bool value)
         {
+            OnPropertyChanged(nameof(IsControllerUiReady));
             OnPropertyChanged(nameof(CanOpenFirmwareUpdateDialog));
             OnPropertyChanged(nameof(CanOpenLocalFirmwareUpdateDialog));
             OnPropertyChanged(nameof(CanSetControllerRtc));
             OnPropertyChanged(nameof(CanFactoryReset));
+            OnPropertyChanged(nameof(CanManagePinLock));
+            OnPropertyChanged(nameof(CanConfigurePinLock));
+            OnPropertyChanged(nameof(CanDisablePinLock));
             OnPropertyChanged(nameof(CanTestCellularConnection));
             OnPropertyChanged(nameof(CanProvisionOpenRemote));
+            UpdateCustomCanStatusPollingSelection();
 
             if (!value)
             {
@@ -5769,15 +6647,26 @@ namespace Cortex.ViewModels
             {
                 SetCellularConnectionHealthStatus("Checking", shouldLog: true);
                 ScheduleCellularHealthPoll(immediate: true);
-                _ = PollCellularHealthStatusAsync();
+                StartBackgroundTask(PollCellularHealthStatusAsync(), "Cellular health poll");
             }
             else
             {
-                SetCellularConnectionHealthStatus("Offline", shouldLog: true);
+                SetCellularConnectionHealthStatus("Offline", shouldLog: false);
                 _nextCellularHealthPollUtc = DateTime.MinValue;
             }
 
-            _ = RefreshFirmwareUpdateStateAsync();
+
+        }
+
+        partial void OnIsInitialSnapshotLoadedChanged(bool value)
+        {
+            OnPropertyChanged(nameof(IsControllerUiReady));
+            OnPropertyChanged(nameof(CanAccessOperationalTabs));
+
+            if (value && IsConnected && CommsEstablished)
+            {
+                AddLog("PDM connected.");
+            }
         }
 
         partial void OnIsSettingControllerRtcChanged(bool value)
@@ -7230,6 +8119,8 @@ namespace Cortex.ViewModels
         private void RebuildDisplayedLogSeries(double viewportStartMs, double viewportEndMs)
         {
             var newSeries = new ObservableCollection<ISeries>();
+            var newLegendItems = new ObservableCollection<ChartSeriesToggleItem>();
+            var displayedSeriesKeys = new List<string>();
             double filterSpanMs = Math.Max(1.0, _activeLogFilterEndMs - _activeLogFilterStartMs);
             double viewportSpanMs = Math.Max(1.0, viewportEndMs - viewportStartMs);
             double zoomFactor = Math.Max(1.0, filterSpanMs / viewportSpanMs);
@@ -7251,24 +8142,32 @@ namespace Cortex.ViewModels
                     continue;
                 }
 
-                newSeries.Add(new LineSeries<ObservablePoint>
+                string displayName = BuildLogSeriesDisplayName(key, _activeSystemDisplayNames);
+                SKColor seriesColor = GetOrAssignLogSeriesColor(key, _activeLogSeriesKeys);
+                var lineSeries = new LineSeries<ObservablePoint>
                 {
                     Values = renderedPoints,
-                    Name = BuildLogSeriesDisplayName(key, _activeSystemDisplayNames),
+                    Name = displayName,
                     GeometrySize = 0,
                     GeometryStroke = null,
                     GeometryFill = null,
                     Fill = null,
                     LineSmoothness = 0,
                     AnimationsSpeed = TimeSpan.Zero,
-                    Stroke = new SolidColorPaint(GetOrAssignLogSeriesColor(key, _activeLogSeriesKeys))
+                    Stroke = new SolidColorPaint(seriesColor)
                     {
                         StrokeThickness = 1.0f,
                     },
-                });
+                };
+
+                newSeries.Add(lineSeries);
+                newLegendItems.Add(new ChartSeriesToggleItem(displayName, CreateLiveSeriesBrush(seriesColor), lineSeries));
+                displayedSeriesKeys.Add(key);
             }
 
             LogSeriesCollection = newSeries;
+            LogChartLegendItems = newLegendItems;
+            _activeDisplayedLogSeriesKeys = displayedSeriesKeys;
             _lastRenderedLogViewportStartMs = viewportStartMs;
             _lastRenderedLogViewportEndMs = viewportEndMs;
             LogStatusMessage = $"Showing {newSeries.Count} parameter series.";
@@ -7279,17 +8178,85 @@ namespace Cortex.ViewModels
             _activeFilteredLogSeries = new Dictionary<string, List<LogSeriesPoint>>(StringComparer.OrdinalIgnoreCase);
             _activeLogSeriesKeys = [];
             _activeSystemDisplayNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            _activeDisplayedLogSeriesKeys = [];
             _activeLogFilterStartMs = double.NaN;
             _activeLogFilterEndMs = double.NaN;
             _lastRenderedLogViewportStartMs = double.NaN;
             _lastRenderedLogViewportEndMs = double.NaN;
             LogSeriesCollection = new ObservableCollection<ISeries>();
+            LogChartLegendItems = new ObservableCollection<ChartSeriesToggleItem>();
 
             if (resetAxisLimits && LogXAxes is { Length: > 0 })
             {
                 LogXAxes[0].MinLimit = null;
                 LogXAxes[0].MaxLimit = null;
             }
+        }
+
+        public void UpdateLogHoverAnchorFromRelativeX(double relativeX)
+        {
+            if (LogChartLegendItems.Count == 0 || _activeDisplayedLogSeriesKeys.Count == 0)
+            {
+                return;
+            }
+
+            if (!TryGetCurrentLogViewport(out double viewportStartMs, out double viewportEndMs))
+            {
+                return;
+            }
+
+            double span = Math.Max(1.0, viewportEndMs - viewportStartMs);
+            double anchorTimestampMs = viewportStartMs + (span * Math.Clamp(relativeX, 0d, 1d));
+
+            for (int i = 0; i < LogChartLegendItems.Count; i++)
+            {
+                if (i >= _activeDisplayedLogSeriesKeys.Count)
+                {
+                    LogChartLegendItems[i].SetCurrentValue(null);
+                    continue;
+                }
+
+                string key = _activeDisplayedLogSeriesKeys[i];
+                if (!_activeFilteredLogSeries.TryGetValue(key, out List<LogSeriesPoint>? sourcePoints) ||
+                    !TryGetNearestLogSeriesValue(sourcePoints, anchorTimestampMs, out double value))
+                {
+                    LogChartLegendItems[i].SetCurrentValue(null);
+                    continue;
+                }
+
+                LogChartLegendItems[i].SetCurrentValue(value);
+            }
+        }
+
+        public void ClearLogHoverValues()
+        {
+            foreach (ChartSeriesToggleItem legendItem in LogChartLegendItems)
+            {
+                legendItem.SetCurrentValue(null);
+            }
+        }
+
+        private static bool TryGetNearestLogSeriesValue(IReadOnlyList<LogSeriesPoint> points, double targetX, out double value)
+        {
+            value = 0;
+            double bestDistance = double.MaxValue;
+            bool found = false;
+
+            for (int i = 0; i < points.Count; i++)
+            {
+                LogSeriesPoint point = points[i];
+                double distance = Math.Abs(point.TimestampMs - targetX);
+                if (distance >= bestDistance)
+                {
+                    continue;
+                }
+
+                bestDistance = distance;
+                value = point.Value;
+                found = true;
+            }
+
+            return found;
         }
 
         private void UpdateLogCrosshairState()
@@ -7304,13 +8271,13 @@ namespace Cortex.ViewModels
             foreach (var axis in LogXAxes.OfType<Axis>())
             {
                 axis.CrosshairPaint = crosshairPaint;
-                axis.CrosshairSnapEnabled = IsLogCrosshairEnabled;
+                axis.CrosshairSnapEnabled = false;
             }
 
             foreach (var axis in LogYAxes.OfType<Axis>())
             {
-                axis.CrosshairPaint = crosshairPaint;
-                axis.CrosshairSnapEnabled = IsLogCrosshairEnabled;
+                axis.CrosshairPaint = null;
+                axis.CrosshairSnapEnabled = false;
             }
         }
 
@@ -7326,13 +8293,13 @@ namespace Cortex.ViewModels
             foreach (var axis in XAxes.OfType<Axis>())
             {
                 axis.CrosshairPaint = crosshairPaint;
-                axis.CrosshairSnapEnabled = IsLiveCrosshairEnabled;
+                axis.CrosshairSnapEnabled = false;
             }
 
             foreach (var axis in YAxes.OfType<Axis>())
             {
-                axis.CrosshairPaint = crosshairPaint;
-                axis.CrosshairSnapEnabled = IsLiveCrosshairEnabled;
+                axis.CrosshairPaint = null;
+                axis.CrosshairSnapEnabled = false;
             }
         }
 

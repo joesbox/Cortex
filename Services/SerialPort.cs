@@ -1,14 +1,20 @@
-﻿using Cortex.Models;
+using Cortex.Models;
 using Cortex.Services;
+using Microsoft.Win32;
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Ports;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Org.BouncyCastle.Math.EC.Rfc7748;
+using Org.BouncyCastle.Security;
 using static Cortex.Models.OutputChannel;
 
 
@@ -22,13 +28,81 @@ public sealed class ConfigurationSaveCompletedEventArgs : EventArgs
     public bool Succeeded { get; }
 }
 
-public class SerialPortService
+public class SerialPortService : IDisposable
 {
+    private bool _isDisposed;
     private enum DigitalInputStatusSupportState
     {
         Unknown,
         Supported,
         Unsupported,
+    }
+
+    private enum CustomCanStatusSupportState
+    {
+        Unknown,
+        Supported,
+        Unsupported,
+    }
+
+    private sealed class SecureSessionState
+    {
+        public bool ProtocolSupported { get; set; }
+
+        public bool PinEnabled { get; set; }
+
+        public bool IsProvisioned { get; set; }
+
+        public bool StorageFault { get; set; }
+
+        public bool SupportsPlaintextLogBulk { get; set; }
+
+        public bool IsSessionOpen { get; set; }
+
+        public bool IsAuthorized { get; set; }
+
+        public uint RetryAfterMs { get; set; }
+
+        public uint Pbkdf2Iterations { get; set; }
+
+        public byte[] DevicePublicKey { get; set; } = new byte[Constants.SECURE_DEVICE_PUBLIC_KEY_BYTES];
+
+        public byte[] SessionId { get; set; } = new byte[Constants.SECURE_SESSION_ID_BYTES];
+
+        public byte[] ClientToDeviceKey { get; set; } = new byte[32];
+
+        public byte[] DeviceToClientKey { get; set; } = new byte[32];
+
+        public uint TxSequence { get; set; }
+
+        public uint RxSequence { get; set; }
+
+        public void ResetSession()
+        {
+            IsSessionOpen = false;
+            IsAuthorized = false;
+            RetryAfterMs = 0;
+            TxSequence = 0;
+            RxSequence = 0;
+            SessionId = new byte[Constants.SECURE_SESSION_ID_BYTES];
+            ClientToDeviceKey = new byte[32];
+            DeviceToClientKey = new byte[32];
+        }
+    }
+
+    private sealed class X25519KeyMaterial : IDisposable
+    {
+        public X25519KeyMaterial(byte[] privateKey)
+        {
+            PrivateKey = privateKey;
+        }
+
+        public byte[] PrivateKey { get; }
+
+        public void Dispose()
+        {
+            CryptographicOperations.ZeroMemory(PrivateKey);
+        }
     }
 
     private static readonly bool EnableLogTransferDebug = false;
@@ -39,7 +113,8 @@ public class SerialPortService
     private const int StaticSnapshotRetryIntervalMs = 1500;
     private const int DigitalInputStatusProbeTimeoutMs = 2500;
     private const int StandaloneCommandDrainDelayMs = 25;
-    private const int OpenRemoteProvisioningMaxRequestBytes = 8191;
+    private const int OpenRemoteProvisioningMaxRequestBytes = 6143;
+    private const int SecureControlResponseMaxPlaintextBytes = 128;
 
     public event Action<DataStructures>? DataUpdated;
 
@@ -59,6 +134,11 @@ public class SerialPortService
     private char lastCommandSent;
     private bool sendingConfig;
     private bool saveToEEPROM;
+    private readonly object _configurationSaveLock = new();
+    private bool _configurationSaveActive;
+    private bool _configurationPreviousPollingSuspended;
+    private char _pendingConfigurationCommand;
+    private long _configurationCommandSentTick;
     public bool foundECU;
     private int totalBytesSent;
     private int checkSumSend;
@@ -88,18 +168,21 @@ public class SerialPortService
 
     private TaskCompletionSource<IReadOnlyList<ControllerLogFileInfo>>? _logFileListTcs;
     private TaskCompletionSource<bool>? _logOpenTcs;
-    private TaskCompletionSource<bool>? _logResetTcs;
     private TaskCompletionSource<LogChunkResponse>? _logChunkTcs;
     private TaskCompletionSource<string>? _firmwareVersionTcs;
     private TaskCompletionSource<string>? _buildDateTcs;
     private TaskCompletionSource<string>? _firmwareDiagnosticTcs;
     private TaskCompletionSource<string>? _cellularTestTcs;
     private TaskCompletionSource<string>? _openRemoteProvisioningTcs;
+    private TaskCompletionSource<bool>? _customCanSnapshotTcs;
     private TaskCompletionSource<bool>? _standaloneCommandAckTcs;
     private char _standaloneCommandAckId;
     private readonly Queue<LogChunkResponse> _pendingLogChunks = new Queue<LogChunkResponse>();
     private readonly object _logChunkLock = new object();
     private readonly SemaphoreSlim _logChunkRequestLock = new SemaphoreSlim(1, 1);
+    private readonly SemaphoreSlim _standaloneRequestLock = new SemaphoreSlim(1, 1);
+    private readonly List<byte> _secureIncomingBuffer = new List<byte>();
+    private readonly object _serialReceiveLock = new();
     private volatile bool _suspendLiveRequestPolling;
     private volatile bool _logTransferSessionActive;
     private long _lastLiveRequestSentTick;
@@ -108,9 +191,14 @@ public class SerialPortService
     private long _lastDigitalInputStatusFrameTick;
     private long _lastMathStatusRequestSentTick;
     private long _lastMathStatusFrameTick;
+    private long _lastCustomCanStatusRequestSentTick;
+    private long _lastCustomCanStatusFrameTick;
     private long _lastStaticRequestSentTick;
     private long _lastHandshakeAttemptTick;
+    private long _lastSecureStatusRequestTick;
+    private long _lastSecureStatusResponseTick;
     private DigitalInputStatusSupportState _digitalInputStatusSupportState = DigitalInputStatusSupportState.Unknown;
+    private CustomCanStatusSupportState _customCanStatusSupportState = CustomCanStatusSupportState.Unknown;
     private int _lastChunkProgressLogged = -1;
     private int _txLogChunkCounter = 0;
     private long _lastPendingFrameLogTick = 0;
@@ -120,24 +208,72 @@ public class SerialPortService
     private bool _repeatAnalogueSettingsAfterChannelsPending;
     private bool _finalAnalogueResendActive;
     private int _mathStatusPollingChannelIndex = -1;
+    private bool _customCanStatusPollingEnabled;
     private ControllerProtocolCapabilities _controllerCapabilities = ControllerProtocolCapabilities.V09;
+    private readonly SecureSessionState _secureSession = new SecureSessionState();
+    private readonly Dictionary<string, string> _pinnedDeviceKeys = new(StringComparer.OrdinalIgnoreCase);
+    private readonly string _secureDeviceIdentityPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Cortex",
+        "secure-device-identities.json");
+    private string? _pendingIdentityMismatchPairingKey;
+    private string? _pendingIdentityMismatchExpectedIdentity;
+    private string? _pendingIdentityMismatchPresentedIdentity;
 
 
     public bool UpdateStaticData = false;
+
+    public bool HasLoadedStaticSnapshot { get; private set; }
+
+    public bool IsSecureProtocolEnabled => _secureSession.ProtocolSupported;
+
+    public bool IsPinLockEnabled => _secureSession.PinEnabled;
+
+    public bool IsSecureSessionAuthorized => _secureSession.IsSessionOpen && _secureSession.IsAuthorized;
+
+    public bool IsSecureSessionOpen => _secureSession.IsSessionOpen;
+
+    public bool CanUsePlaintextLogBulk => IsSecureSessionAuthorized && _secureSession.SupportsPlaintextLogBulk;
+
+    public uint PinRetryAfterMs => _secureSession.RetryAfterMs;
 
     private List<byte> _sendBuffer = new List<byte>();
 
     // Timer to process received packets off the serial thread at a 10ms interval
     private readonly System.Timers.Timer _processTimer;
     private readonly object _bufferLock = new object();
+    private readonly object _serialLifecycleLock = new object();
+    private readonly AutoResetEvent _parseSignal = new AutoResetEvent(false);
+    private readonly CancellationTokenSource _parseLoopCts = new CancellationTokenSource();
+    private Task _parseLoopTask;
+    private int _parseLoopBusy;
     private volatile bool _packetReady = false;
     private volatile bool _bulkLogTransferActive = false;
+    private volatile bool _bulkLogCancelRequested;
+    private bool _bulkLogCancellationDrained;
+    private bool _bulkLogTransferStopped;
+    private volatile bool _isShuttingDown;
+    private volatile bool _suspendDataReceivedReads;
+    private readonly object _secureManagementResponseLock = new();
+    private TaskCompletionSource<byte[]?>? _secureManagementResponseTcs;
+    private byte _secureManagementExpectedOperation;
+    private bool _dataReceivedSubscribed;
 
     private byte[] dataBytes = new byte[4096];
     private byte[] checkSumArray = new byte[4];
     private int dataLength;
 
     public string? LastError { get; private set; }
+
+    public string? LastCustomCanWriteError { get; internal set; }
+
+    public string? LastSecureSessionError { get; private set; }
+
+    public bool HasPendingControllerIdentityMismatch =>
+        !string.IsNullOrWhiteSpace(_pendingIdentityMismatchPairingKey) &&
+        !string.IsNullOrWhiteSpace(_pendingIdentityMismatchPresentedIdentity);
+
+    public string ControllerPairingPortName => _serialPort.PortName;
 
     private static void LogProtocolDebug(string message)
     {
@@ -150,19 +286,1409 @@ public class SerialPortService
         Debug.WriteLine(fullMessage);
     }
 
-    private void SetBulkTransferReaderActive(bool active)
+    private static string SecureResultToString(SecureControlResult result)
+        => $"{result}({(byte)result})";
+
+    private static byte[] GenerateSecureProvisionSeed()
     {
-        _bulkLogTransferActive = active;
-        if (active)
+        byte[] seed = new byte[Constants.SECURE_PROVISION_SEED_BYTES];
+        RandomNumberGenerator.Fill(seed);
+        return seed;
+    }
+
+    private static byte[] BuildSecureControlRequest(SecureControlOperation operation, byte[]? payload)
+    {
+        payload ??= Array.Empty<byte>();
+        byte[] frame = new byte[4 + payload.Length];
+        frame[0] = (byte)Constants.SECURE_CONTROL_FRAME_PREFIX;
+        frame[1] = (byte)operation;
+        BinaryPrimitives.WriteUInt16LittleEndian(frame.AsSpan(2, 2), (ushort)payload.Length);
+
+        if (payload.Length > 0)
         {
-            _processTimer.Stop();
-            _serialPort.DataReceived -= OnDataReceived;
+            Buffer.BlockCopy(payload, 0, frame, 4, payload.Length);
+        }
+
+        return frame;
+    }
+
+    private static byte[] BuildSecureEncryptedControlRequest(SecureControlOperation operation, byte[]? payload)
+    {
+        payload ??= Array.Empty<byte>();
+        byte[] frame = new byte[2 + payload.Length];
+        frame[0] = (byte)Constants.SECURE_CONTROL_FRAME_PREFIX;
+        frame[1] = (byte)operation;
+        if (payload.Length > 0)
+        {
+            Buffer.BlockCopy(payload, 0, frame, 2, payload.Length);
+        }
+
+        return frame;
+    }
+
+    private static byte[] BuildSecureEnvelopeHeader(ushort plaintextLength, uint sequence)
+    {
+        byte[] header = new byte[Constants.SECURE_ENVELOPE_HEADER_LENGTH];
+        header[0] = (byte)Constants.SECURE_ENVELOPE_FRAME_PREFIX;
+        BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(1, 2), plaintextLength);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(3, 4), sequence);
+        return header;
+    }
+
+    private static byte[] BuildSecureNonce(byte[] sessionId, uint sequence)
+    {
+        byte[] nonce = new byte[12];
+        Buffer.BlockCopy(sessionId, 0, nonce, 0, Math.Min(8, sessionId.Length));
+        BinaryPrimitives.WriteUInt32LittleEndian(nonce.AsSpan(8, 4), sequence);
+        return nonce;
+    }
+
+    private static byte[] HkdfSha256(ReadOnlySpan<byte> ikm, ReadOnlySpan<byte> salt, ReadOnlySpan<byte> info, int length)
+    {
+        byte[] prk;
+        using (var hmac = new HMACSHA256(salt.ToArray()))
+        {
+            prk = hmac.ComputeHash(ikm.ToArray());
+        }
+
+        byte[] output = new byte[length];
+        byte[] t = [];
+        int offset = 0;
+        byte counter = 1;
+
+        while (offset < length)
+        {
+            using var hmac = new HMACSHA256(prk);
+            byte[] input = new byte[t.Length + info.Length + 1];
+            if (t.Length > 0)
+            {
+                t.CopyTo(input, 0);
+            }
+
+            info.CopyTo(input.AsSpan(t.Length, info.Length));
+            input[^1] = counter;
+            t = hmac.ComputeHash(input);
+            int copy = Math.Min(t.Length, length - offset);
+            Buffer.BlockCopy(t, 0, output, offset, copy);
+            offset += copy;
+            counter++;
+        }
+
+        CryptographicOperations.ZeroMemory(prk);
+        CryptographicOperations.ZeroMemory(t);
+        return output;
+    }
+
+    private static byte[] EncryptSecureEnvelope(byte[] plaintext, byte[] key, byte[] sessionId, uint sequence)
+    {
+        byte[] header = BuildSecureEnvelopeHeader((ushort)plaintext.Length, sequence);
+        byte[] nonce = BuildSecureNonce(sessionId, sequence);
+        byte[] ciphertext = new byte[plaintext.Length];
+        byte[] tag = new byte[Constants.SECURE_TAG_LENGTH];
+
+        using (var cipher = new ChaCha20Poly1305(key))
+        {
+            cipher.Encrypt(nonce, plaintext, ciphertext, tag, header);
+        }
+
+        byte[] frame = new byte[header.Length + ciphertext.Length + tag.Length];
+        Buffer.BlockCopy(header, 0, frame, 0, header.Length);
+        if (ciphertext.Length > 0)
+        {
+            Buffer.BlockCopy(ciphertext, 0, frame, header.Length, ciphertext.Length);
+        }
+
+        Buffer.BlockCopy(tag, 0, frame, header.Length + ciphertext.Length, tag.Length);
+        return frame;
+    }
+
+    private static bool TryDecryptSecureEnvelope(byte[] frame, byte[] key, byte[] expectedSessionId, uint expectedSequence, out byte[] plaintext)
+    {
+        plaintext = Array.Empty<byte>();
+        if (frame.Length < Constants.SECURE_ENVELOPE_HEADER_LENGTH + Constants.SECURE_TAG_LENGTH)
+        {
+            return false;
+        }
+
+        if (frame[0] != (byte)Constants.SECURE_ENVELOPE_FRAME_PREFIX)
+        {
+            return false;
+        }
+
+        ushort plaintextLength = BinaryPrimitives.ReadUInt16LittleEndian(frame.AsSpan(1, 2));
+        uint sequence = BinaryPrimitives.ReadUInt32LittleEndian(frame.AsSpan(3, 4));
+        if (sequence != expectedSequence)
+        {
+            return false;
+        }
+
+        int expectedLength = Constants.SECURE_ENVELOPE_HEADER_LENGTH + plaintextLength + Constants.SECURE_TAG_LENGTH;
+        if (frame.Length != expectedLength)
+        {
+            return false;
+        }
+
+        byte[] header = new byte[Constants.SECURE_ENVELOPE_HEADER_LENGTH];
+        byte[] ciphertext = new byte[plaintextLength];
+        byte[] tag = new byte[Constants.SECURE_TAG_LENGTH];
+        Buffer.BlockCopy(frame, 0, header, 0, header.Length);
+        if (ciphertext.Length > 0)
+        {
+            Buffer.BlockCopy(frame, Constants.SECURE_ENVELOPE_HEADER_LENGTH, ciphertext, 0, ciphertext.Length);
+        }
+
+        Buffer.BlockCopy(frame, Constants.SECURE_ENVELOPE_HEADER_LENGTH + ciphertext.Length, tag, 0, tag.Length);
+        byte[] nonce = BuildSecureNonce(expectedSessionId, sequence);
+        plaintext = new byte[plaintextLength];
+
+        try
+        {
+            using var cipher = new ChaCha20Poly1305(key);
+            cipher.Decrypt(nonce, ciphertext, tag, plaintext, header);
+            return true;
+        }
+        catch (CryptographicException)
+        {
+            plaintext = Array.Empty<byte>();
+            return false;
+        }
+    }
+
+    private static void DeriveSecureSessionKeys(
+        byte[] sharedSecret,
+        byte[] sessionId,
+        byte[] clientPublicKey,
+        byte[] devicePublicKey,
+        out byte[] clientToDeviceKey,
+        out byte[] deviceToClientKey)
+    {
+        byte[] clientLabel = Encoding.ASCII.GetBytes("SynapsePDM client v1");
+        byte[] deviceLabel = Encoding.ASCII.GetBytes("SynapsePDM device v1");
+
+        byte[] clientInfo = new byte[clientLabel.Length + clientPublicKey.Length + devicePublicKey.Length];
+        Buffer.BlockCopy(clientLabel, 0, clientInfo, 0, clientLabel.Length);
+        Buffer.BlockCopy(clientPublicKey, 0, clientInfo, clientLabel.Length, clientPublicKey.Length);
+        Buffer.BlockCopy(devicePublicKey, 0, clientInfo, clientLabel.Length + clientPublicKey.Length, devicePublicKey.Length);
+
+        byte[] deviceInfo = new byte[deviceLabel.Length + clientPublicKey.Length + devicePublicKey.Length];
+        Buffer.BlockCopy(deviceLabel, 0, deviceInfo, 0, deviceLabel.Length);
+        Buffer.BlockCopy(clientPublicKey, 0, deviceInfo, deviceLabel.Length, clientPublicKey.Length);
+        Buffer.BlockCopy(devicePublicKey, 0, deviceInfo, deviceLabel.Length + clientPublicKey.Length, devicePublicKey.Length);
+
+        clientToDeviceKey = HkdfSha256(sharedSecret, sessionId, clientInfo, 32);
+        deviceToClientKey = HkdfSha256(sharedSecret, sessionId, deviceInfo, 32);
+    }
+
+    private static bool TryGenerateX25519KeyPair(out X25519KeyMaterial? keyAgreement, out byte[] publicKey)
+    {
+        keyAgreement = null;
+        publicKey = Array.Empty<byte>();
+
+        try
+        {
+            byte[] privateBytes = new byte[Constants.SECURE_DEVICE_PUBLIC_KEY_BYTES];
+            byte[] generatedPublicKey = new byte[Constants.SECURE_DEVICE_PUBLIC_KEY_BYTES];
+            X25519.GeneratePrivateKey(new SecureRandom(), privateBytes);
+            X25519.GeneratePublicKey(privateBytes, 0, generatedPublicKey, 0);
+
+            keyAgreement = new X25519KeyMaterial(privateBytes);
+            publicKey = generatedPublicKey;
+            return true;
+        }
+        catch
+        {
+            keyAgreement?.Dispose();
+            keyAgreement = null;
+            publicKey = Array.Empty<byte>();
+            return false;
+        }
+    }
+
+    private static bool TryDeriveX25519SharedSecret(X25519KeyMaterial privateKey, byte[] peerPublicKey, out byte[] sharedSecret)
+    {
+        sharedSecret = Array.Empty<byte>();
+        if (peerPublicKey.Length != Constants.SECURE_DEVICE_PUBLIC_KEY_BYTES)
+        {
+            return false;
+        }
+
+        try
+        {
+            byte[] secret = new byte[Constants.SECURE_DEVICE_PUBLIC_KEY_BYTES];
+            bool success = X25519.CalculateAgreement(privateKey.PrivateKey, 0, peerPublicKey, 0, secret, 0);
+            if (!success)
+            {
+                CryptographicOperations.ZeroMemory(secret);
+                return false;
+            }
+
+            sharedSecret = secret;
+            return true;
+        }
+        catch
+        {
+            sharedSecret = Array.Empty<byte>();
+            return false;
+        }
+    }
+
+    private void ResetSecureSession()
+    {
+        _secureSession.ResetSession();
+        lock (_secureManagementResponseLock)
+        {
+            _secureManagementResponseTcs?.TrySetResult(null);
+            _secureManagementResponseTcs = null;
+        }
+    }
+
+    private void ResetSecureSessionAfterDeviceReset()
+    {
+        ResetSecureSession();
+        lock (_bufferLock)
+        {
+            _secureIncomingBuffer.Clear();
+        }
+    }
+
+    private bool TryCompleteSecureManagementResponse(byte[] payload)
+    {
+        if (payload.Length != Constants.SECURE_MANAGEMENT_RESPONSE_BASE_LENGTH &&
+            payload.Length != Constants.SECURE_MANAGEMENT_RESPONSE_WITH_RECOVERY_LENGTH)
+        {
+            return false;
+        }
+
+        if (payload[0] != (byte)Constants.SECURE_CONTROL_FRAME_PREFIX)
+        {
+            return false;
+        }
+
+        lock (_secureManagementResponseLock)
+        {
+            if (_secureManagementResponseTcs == null || payload[1] != _secureManagementExpectedOperation)
+            {
+                return false;
+            }
+
+            _secureManagementResponseTcs.TrySetResult(payload);
+            _secureManagementResponseTcs = null;
+            return true;
+        }
+    }
+
+    // Management replies share the encrypted stream with live polling replies, so they must be
+    // demultiplexed by the normal secure receiver rather than read directly from the port.
+    private async Task<byte[]?> ExecuteStreamedSecureManagementRequestAsync(SecureControlOperation operation, byte[]? payload, int timeoutMs)
+    {
+        TaskCompletionSource<byte[]?> responseTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_secureManagementResponseLock)
+        {
+            _secureManagementResponseTcs?.TrySetResult(null);
+            _secureManagementResponseTcs = responseTcs;
+            _secureManagementExpectedOperation = (byte)operation;
+        }
+
+        try
+        {
+            lock (_configurationSaveLock)
+            {
+                if (_configurationSaveActive || !_secureSession.IsSessionOpen || !_serialPort.IsOpen)
+                {
+                    return null;
+                }
+
+                byte[] requestBytes = EncryptSecureEnvelope(
+                    BuildSecureEncryptedControlRequest(operation, payload),
+                    _secureSession.ClientToDeviceKey,
+                    _secureSession.SessionId,
+                    _secureSession.TxSequence++);
+                _serialPort.Write(requestBytes, 0, requestBytes.Length);
+            }
+
+            Task completed = await Task.WhenAny(responseTcs.Task, Task.Delay(timeoutMs));
+            return completed == responseTcs.Task ? await responseTcs.Task : null;
+        }
+        finally
+        {
+            lock (_secureManagementResponseLock)
+            {
+                if (ReferenceEquals(_secureManagementResponseTcs, responseTcs))
+                {
+                    _secureManagementResponseTcs = null;
+                }
+            }
+        }
+    }
+
+    private void LoadPinnedDeviceIdentities()
+    {
+        _pinnedDeviceKeys.Clear();
+
+        try
+        {
+            if (!File.Exists(_secureDeviceIdentityPath))
+            {
+                return;
+            }
+
+            string json = File.ReadAllText(_secureDeviceIdentityPath);
+            Dictionary<string, string>? persisted = JsonSerializer.Deserialize<Dictionary<string, string>>(json);
+            if (persisted == null)
+            {
+                return;
+            }
+
+            foreach ((string key, string value) in persisted)
+            {
+                if (!string.IsNullOrWhiteSpace(key) && !string.IsNullOrWhiteSpace(value))
+                {
+                    _pinnedDeviceKeys[key] = value;
+                }
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private void SavePinnedDeviceIdentities()
+    {
+        try
+        {
+            string? directory = Path.GetDirectoryName(_secureDeviceIdentityPath);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            string json = JsonSerializer.Serialize(_pinnedDeviceKeys);
+            File.WriteAllText(_secureDeviceIdentityPath, json);
+        }
+        catch
+        {
+        }
+    }
+
+    private static string NormalizeRegistryKeyName(string keyName)
+    {
+        const string localMachinePrefix = "HKEY_LOCAL_MACHINE\\";
+        return keyName.StartsWith(localMachinePrefix, StringComparison.OrdinalIgnoreCase)
+            ? keyName[localMachinePrefix.Length..]
+            : keyName;
+    }
+
+    private static string? TryGetWindowsDeviceIdentifierForPort(string portName)
+    {
+        try
+        {
+            using RegistryKey? enumRoot = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum");
+            if (enumRoot == null)
+            {
+                return null;
+            }
+
+            foreach (string busName in enumRoot.GetSubKeyNames())
+            {
+                using RegistryKey? busKey = enumRoot.OpenSubKey(busName);
+                if (busKey == null)
+                {
+                    continue;
+                }
+
+                foreach (string deviceName in busKey.GetSubKeyNames())
+                {
+                    using RegistryKey? deviceKey = busKey.OpenSubKey(deviceName);
+                    if (deviceKey == null)
+                    {
+                        continue;
+                    }
+
+                    foreach (string instanceName in deviceKey.GetSubKeyNames())
+                    {
+                        using RegistryKey? instanceKey = deviceKey.OpenSubKey(instanceName);
+                        if (instanceKey == null)
+                        {
+                            continue;
+                        }
+
+                        using RegistryKey? deviceParameters = instanceKey.OpenSubKey("Device Parameters");
+                        if (deviceParameters?.GetValue("PortName") is not string mappedPort ||
+                            !string.Equals(mappedPort, portName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
+                        return NormalizeRegistryKeyName(instanceKey.Name);
+                    }
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
+    }
+
+    private string GetDevicePairingKey()
+    {
+        string portName = _serialPort.PortName;
+        if (!OperatingSystem.IsWindows())
+        {
+            return $"port:{portName}";
+        }
+
+        string? windowsDeviceIdentifier = TryGetWindowsDeviceIdentifierForPort(portName);
+        return string.IsNullOrWhiteSpace(windowsDeviceIdentifier)
+            ? $"port:{portName}"
+            : $"win:{windowsDeviceIdentifier}";
+    }
+
+    private static bool IsSameIdentity(string left, string right)
+        => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+
+    private bool TryGetPinnedIdentity(string pairingKey, string legacyPortKey, out string matchedKey, out string pinnedIdentity)
+    {
+        if (_pinnedDeviceKeys.TryGetValue(pairingKey, out string? keyIdentity) && !string.IsNullOrWhiteSpace(keyIdentity))
+        {
+            matchedKey = pairingKey;
+            pinnedIdentity = keyIdentity;
+            return true;
+        }
+
+        if (_pinnedDeviceKeys.TryGetValue(legacyPortKey, out string? legacyIdentity) && !string.IsNullOrWhiteSpace(legacyIdentity))
+        {
+            matchedKey = legacyPortKey;
+            pinnedIdentity = legacyIdentity;
+            return true;
+        }
+
+        matchedKey = string.Empty;
+        pinnedIdentity = string.Empty;
+        return false;
+    }
+
+    private void ClearPendingIdentityMismatch()
+    {
+        _pendingIdentityMismatchPairingKey = null;
+        _pendingIdentityMismatchExpectedIdentity = null;
+        _pendingIdentityMismatchPresentedIdentity = null;
+    }
+
+    private bool FailSecureSession(string message)
+    {
+        LastSecureSessionError ??= message;
+        return false;
+    }
+
+    private bool IsDeviceIdentityTrusted(byte[] devicePublicKey)
+    {
+        if (devicePublicKey.Length != Constants.SECURE_DEVICE_PUBLIC_KEY_BYTES)
+        {
+            LastSecureSessionError = "Secure session could not be established.";
+            return false;
+        }
+
+        string presentedIdentity = Convert.ToHexString(devicePublicKey);
+        string pairingKey = GetDevicePairingKey();
+        string legacyPortKey = _serialPort.PortName;
+
+        if (!TryGetPinnedIdentity(pairingKey, legacyPortKey, out string matchedKey, out string pinnedIdentity))
+        {
+            _pinnedDeviceKeys[pairingKey] = presentedIdentity;
+            SavePinnedDeviceIdentities();
+            ClearPendingIdentityMismatch();
+            return true;
+        }
+
+        if (IsSameIdentity(pinnedIdentity, presentedIdentity))
+        {
+            if (!IsSameIdentity(matchedKey, pairingKey))
+            {
+                _pinnedDeviceKeys[pairingKey] = presentedIdentity;
+                SavePinnedDeviceIdentities();
+            }
+
+            ClearPendingIdentityMismatch();
+            return true;
+        }
+
+        _pendingIdentityMismatchPairingKey = matchedKey;
+        _pendingIdentityMismatchExpectedIdentity = pinnedIdentity;
+        _pendingIdentityMismatchPresentedIdentity = presentedIdentity;
+        LastSecureSessionError = "Controller identity has changed.";
+        return false;
+    }
+
+    public bool ReplacePendingControllerPairing()
+    {
+        if (string.IsNullOrWhiteSpace(_pendingIdentityMismatchPairingKey) ||
+            string.IsNullOrWhiteSpace(_pendingIdentityMismatchPresentedIdentity))
+        {
+            return false;
+        }
+
+        _pinnedDeviceKeys[_pendingIdentityMismatchPairingKey] = _pendingIdentityMismatchPresentedIdentity;
+        SavePinnedDeviceIdentities();
+        LastSecureSessionError = null;
+        ClearPendingIdentityMismatch();
+        return true;
+    }
+
+    private void RemoveCurrentControllerPairing()
+    {
+        if (_secureSession.DevicePublicKey.Length != Constants.SECURE_DEVICE_PUBLIC_KEY_BYTES)
+        {
             return;
         }
 
-        _serialPort.DataReceived -= OnDataReceived;
+        string identity = Convert.ToHexString(_secureSession.DevicePublicKey);
+        List<string> matchingKeys = _pinnedDeviceKeys
+            .Where(entry => IsSameIdentity(entry.Value, identity))
+            .Select(entry => entry.Key)
+            .ToList();
+
+        if (matchingKeys.Count == 0)
+        {
+            return;
+        }
+
+        foreach (string key in matchingKeys)
+        {
+            _pinnedDeviceKeys.Remove(key);
+        }
+
+        SavePinnedDeviceIdentities();
+    }
+
+    private static bool TryParseSecureControlResponse(byte[] responseBytes, SecureControlOperation expectedOperation, out SecureControlResult result, out byte[] payload)
+    {
+        result = SecureControlResult.Invalid;
+        payload = Array.Empty<byte>();
+
+        if (responseBytes.Length < 5 || responseBytes[0] != (byte)Constants.SECURE_CONTROL_FRAME_PREFIX)
+        {
+            return false;
+        }
+
+        if (responseBytes[1] != (byte)expectedOperation)
+        {
+            return false;
+        }
+
+        ushort payloadLength = BinaryPrimitives.ReadUInt16LittleEndian(responseBytes.AsSpan(3, 2));
+        int expectedLength = 5 + payloadLength;
+        if (responseBytes.Length != expectedLength)
+        {
+            return false;
+        }
+
+        result = (SecureControlResult)responseBytes[2];
+        payload = new byte[payloadLength];
+        if (payloadLength > 0)
+        {
+            Buffer.BlockCopy(responseBytes, 5, payload, 0, payloadLength);
+        }
+
+        return true;
+    }
+
+    private static bool TryParseSecureInfoResponse(byte[] responseBytes, out SecureInfoResponse? info)
+    {
+        info = null;
+        if (responseBytes.Length < 5 || responseBytes[0] != (byte)Constants.SECURE_CONTROL_FRAME_PREFIX)
+        {
+            return false;
+        }
+
+        if (!TryParseSecureControlResponse(responseBytes, SecureControlOperation.Info, out SecureControlResult result, out byte[] payload))
+        {
+            return false;
+        }
+
+        if (payload.Length != 42)
+        {
+            return false;
+        }
+
+        byte protocolVersion = payload[0];
+        byte flags = payload[1];
+        uint iterations = BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(2, 4));
+        uint retryAfterMs = BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(6, 4));
+        byte[] devicePublicKey = new byte[32];
+        Buffer.BlockCopy(payload, 10, devicePublicKey, 0, devicePublicKey.Length);
+
+        info = new SecureInfoResponse(
+            protocolVersion,
+            (flags & 0x01) != 0,
+            (flags & 0x02) != 0,
+            (flags & 0x04) != 0,
+            iterations,
+            retryAfterMs,
+            devicePublicKey,
+            result)
+        {
+            SupportsPlaintextLogBulk = (flags & 0x08) != 0,
+        };
+
+        return true;
+    }
+
+    private static bool TryParseSecureManagementResponse(byte[] plaintext, SecureControlOperation expectedOperation, out SecureManagementResponse? response)
+    {
+        response = null;
+        if (plaintext.Length != Constants.SECURE_MANAGEMENT_RESPONSE_BASE_LENGTH &&
+            plaintext.Length != Constants.SECURE_MANAGEMENT_RESPONSE_WITH_RECOVERY_LENGTH)
+        {
+            return false;
+        }
+
+        if (plaintext[0] != (byte)Constants.SECURE_CONTROL_FRAME_PREFIX || plaintext[1] != (byte)expectedOperation)
+        {
+            return false;
+        }
+
+        SecureControlResult result = (SecureControlResult)plaintext[2];
+        uint retryAfterMs = BinaryPrimitives.ReadUInt32LittleEndian(plaintext.AsSpan(3, 4));
+        byte flags = plaintext[7];
+
+        string? recoveryKey = null;
+        if (plaintext.Length == Constants.SECURE_MANAGEMENT_RESPONSE_WITH_RECOVERY_LENGTH)
+        {
+            recoveryKey = Encoding.ASCII.GetString(plaintext, Constants.SECURE_MANAGEMENT_RESPONSE_BASE_LENGTH, Constants.SECURE_RECOVERY_KEY_LENGTH);
+        }
+
+        response = new SecureManagementResponse(
+            expectedOperation,
+            result,
+            retryAfterMs,
+            (flags & 0x01) != 0,
+            (flags & 0x02) != 0,
+            (flags & 0x04) != 0,
+            recoveryKey);
+
+        return true;
+    }
+
+    // Polling is already suspended, but a reply to an earlier request may still be arriving.
+    // Drain it so its bytes cannot be mistaken for a plain control frame.
+    private async Task WaitForQuietSerialInputAsync(int quietMs = 30, int maxWaitMs = 300)
+    {
+        Stopwatch wait = Stopwatch.StartNew();
+        while (_serialPort.IsOpen && wait.ElapsedMilliseconds < maxWaitMs)
+        {
+            await Task.Delay(quietMs);
+            if (_serialPort.BytesToRead == 0)
+            {
+                return;
+            }
+
+            try
+            {
+                _serialPort.DiscardInBuffer();
+            }
+            catch
+            {
+                return;
+            }
+        }
+    }
+
+    private byte[]? ReadSecureFrameBlocking(int timeoutMs, bool allowEnvelope, byte? expectedControlOperation = null)
+    {
+        Stopwatch stopwatch = Stopwatch.StartNew();
+
+        while (_serialPort.IsOpen && stopwatch.ElapsedMilliseconds <= timeoutMs)
+        {
+            if (_serialPort.BytesToRead <= 0)
+            {
+                Thread.Sleep(2);
+                continue;
+            }
+
+            int first = _serialPort.ReadByte();
+            if (first < 0)
+            {
+                continue;
+            }
+
+            if ((byte)first == (byte)Constants.SECURE_CONTROL_FRAME_PREFIX)
+            {
+                byte[] headerTail = new byte[4];
+                if (!TryReadExactBlocking(headerTail, timeoutMs, stopwatch))
+                {
+                    return null;
+                }
+
+                if (expectedControlOperation.HasValue &&
+                    headerTail[0] != expectedControlOperation.Value &&
+                    headerTail[0] != 0xFF)
+                {
+                    continue;
+                }
+
+                ushort payloadLength = BinaryPrimitives.ReadUInt16LittleEndian(headerTail.AsSpan(2, 2));
+                if (payloadLength > SecureControlResponseMaxPlaintextBytes)
+                {
+                    continue;
+                }
+
+                byte[] payload = new byte[payloadLength];
+                if (payloadLength > 0 && !TryReadExactBlocking(payload, timeoutMs, stopwatch))
+                {
+                    return null;
+                }
+
+                byte[] controlFrame = new byte[5 + payloadLength];
+                controlFrame[0] = (byte)first;
+                Buffer.BlockCopy(headerTail, 0, controlFrame, 1, headerTail.Length);
+                if (payloadLength > 0)
+                {
+                    Buffer.BlockCopy(payload, 0, controlFrame, 5, payload.Length);
+                }
+
+                return controlFrame;
+            }
+
+            if (!allowEnvelope || (byte)first != (byte)Constants.SECURE_ENVELOPE_FRAME_PREFIX)
+            {
+                continue;
+            }
+
+            byte[] envelopeHeaderTail = new byte[6];
+            if (!TryReadExactBlocking(envelopeHeaderTail, timeoutMs, stopwatch))
+            {
+                return null;
+            }
+
+            ushort plaintextLength = BinaryPrimitives.ReadUInt16LittleEndian(envelopeHeaderTail.AsSpan(0, 2));
+            if (plaintextLength < 5 || plaintextLength > SecureControlResponseMaxPlaintextBytes)
+            {
+                continue;
+            }
+
+            int remainingBytes = plaintextLength + Constants.SECURE_TAG_LENGTH;
+            byte[] payloadAndTag = new byte[remainingBytes];
+            if (!TryReadExactBlocking(payloadAndTag, timeoutMs, stopwatch))
+            {
+                return null;
+            }
+
+            byte[] envelopeFrame = new byte[1 + envelopeHeaderTail.Length + payloadAndTag.Length];
+            envelopeFrame[0] = (byte)first;
+            Buffer.BlockCopy(envelopeHeaderTail, 0, envelopeFrame, 1, envelopeHeaderTail.Length);
+            Buffer.BlockCopy(payloadAndTag, 0, envelopeFrame, 1 + envelopeHeaderTail.Length, payloadAndTag.Length);
+            return envelopeFrame;
+        }
+
+        return null;
+    }
+
+    private bool TryReadExactBlocking(byte[] buffer, int timeoutMs, Stopwatch stopwatch)
+    {
+        int offset = 0;
+        while (offset < buffer.Length && _serialPort.IsOpen)
+        {
+            if (stopwatch.ElapsedMilliseconds > timeoutMs)
+            {
+                return false;
+            }
+
+            if (_serialPort.BytesToRead <= 0)
+            {
+                Thread.Sleep(1);
+                continue;
+            }
+
+            int read = _serialPort.Read(buffer, offset, buffer.Length - offset);
+            if (read <= 0)
+            {
+                Thread.Sleep(1);
+                continue;
+            }
+
+            offset += read;
+        }
+
+        return offset == buffer.Length;
+    }
+
+    private async Task<byte[]?> ExecuteSecureControlRequestAsync(SecureControlOperation operation, byte[]? payload, bool encryptedRequest, int timeoutMs)
+    {
+        if (!_serialPort.IsOpen)
+        {
+            return null;
+        }
+
+        await _standaloneRequestLock.WaitAsync();
+        try
+        {
+            bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
+            _suspendLiveRequestPolling = true;
+
+            if (encryptedRequest && _secureSession.IsSessionOpen && _dataReceivedSubscribed && !_bulkLogTransferActive)
+            {
+                try
+                {
+                    return await ExecuteStreamedSecureManagementRequestAsync(operation, payload, timeoutMs);
+                }
+                finally
+                {
+                    _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
+                }
+            }
+
+            _suspendDataReceivedReads = true;
+
+            bool preserveSecureSequence = encryptedRequest && _secureSession.IsSessionOpen;
+            if (!preserveSecureSequence)
+            {
+                ResetLogReceiveState(discardSerialInput: true);
+                await WaitForQuietSerialInputAsync();
+            }
+
+            try
+            {
+                byte[] requestBytes = encryptedRequest
+                    ? EncryptSecureEnvelope(
+                        BuildSecureEncryptedControlRequest(operation, payload),
+                        _secureSession.ClientToDeviceKey,
+                        _secureSession.SessionId,
+                        _secureSession.TxSequence++)
+                    : BuildSecureControlRequest(operation, payload);
+
+                await _serialPort.BaseStream.WriteAsync(requestBytes, 0, requestBytes.Length);
+                await _serialPort.BaseStream.FlushAsync();
+
+                byte[]? frame = ReadSecureFrameBlocking(timeoutMs, allowEnvelope: encryptedRequest, expectedControlOperation: (byte)operation);
+                if (frame == null)
+                {
+                    return null;
+                }
+
+                if (frame.Length > 0 && frame[0] == (byte)Constants.SECURE_CONTROL_FRAME_PREFIX)
+                {
+                    return frame;
+                }
+
+                if (frame.Length > 0 && frame[0] == (byte)Constants.SECURE_ENVELOPE_FRAME_PREFIX)
+                {
+                    if (!TryDecryptSecureEnvelope(frame, _secureSession.DeviceToClientKey, _secureSession.SessionId, _secureSession.RxSequence, out byte[] plaintext))
+                    {
+                        ResetSecureSession();
+                        return null;
+                    }
+
+                    _secureSession.RxSequence++;
+                    return plaintext;
+                }
+
+                return null;
+            }
+            finally
+            {
+                _suspendDataReceivedReads = false;
+                _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
+            }
+        }
+        finally
+        {
+            _standaloneRequestLock.Release();
+        }
+    }
+
+    public async Task<SecureInfoResponse?> GetSecureInfoAsync(int timeoutMs = 2000)
+    {
+        byte[]? response = await ExecuteSecureControlRequestAsync(SecureControlOperation.Info, Array.Empty<byte>(), encryptedRequest: false, timeoutMs);
+        if (response == null || !TryParseSecureInfoResponse(response, out SecureInfoResponse? info) || info == null)
+        {
+            return null;
+        }
+
+        _secureSession.ProtocolSupported = info.ProtocolVersion == Constants.SECURE_PROTOCOL_VERSION;
+        _secureSession.PinEnabled = info.PinEnabled;
+        _secureSession.IsProvisioned = info.IsProvisioned;
+        _secureSession.StorageFault = info.StorageFault;
+        _secureSession.SupportsPlaintextLogBulk = info.SupportsPlaintextLogBulk;
+        _secureSession.RetryAfterMs = info.RetryAfterMs;
+        _secureSession.Pbkdf2Iterations = info.Pbkdf2Iterations;
+        _secureSession.DevicePublicKey = info.DevicePublicKey;
+
+        return info;
+    }
+
+    public async Task<SecureManagementResponse?> GetSecureStatusAsync(int timeoutMs = 2000)
+    {
+        if (!_secureSession.IsSessionOpen)
+        {
+            return null;
+        }
+
+        _lastSecureStatusRequestTick = Environment.TickCount64;
+        byte[]? response = await ExecuteSecureControlRequestAsync(SecureControlOperation.Status, Array.Empty<byte>(), encryptedRequest: true, timeoutMs);
+        if (response == null || !TryParseSecureManagementResponse(response, SecureControlOperation.Status, out SecureManagementResponse? status) || status == null)
+        {
+            return null;
+        }
+
+        _lastSecureStatusResponseTick = Environment.TickCount64;
+        _secureSession.PinEnabled = status.PinEnabled;
+        _secureSession.IsAuthorized = status.IsAuthorized;
+        _secureSession.StorageFault = status.StorageFault;
+        _secureSession.RetryAfterMs = status.RetryAfterMs;
+        return status;
+    }
+
+    public async Task<bool> EnsureSecureSessionAsync(int timeoutMs = 2500)
+    {
+        LastSecureSessionError = null;
+
+        if (_secureSession.IsSessionOpen)
+        {
+            ClearPendingIdentityMismatch();
+            return true;
+        }
+
+        SecureInfoResponse? info = await GetSecureInfoAsync(timeoutMs);
+        if (info == null || info.ProtocolVersion != Constants.SECURE_PROTOCOL_VERSION)
+        {
+            LastSecureSessionError = "Secure session could not be established.";
+            return false;
+        }
+
+        if (!info.IsProvisioned)
+        {
+            byte[] seed = GenerateSecureProvisionSeed();
+            byte[]? provisionResponse = await ExecuteSecureControlRequestAsync(SecureControlOperation.Provision, seed, encryptedRequest: false, timeoutMs);
+            if (provisionResponse == null || !TryParseSecureControlResponse(provisionResponse, SecureControlOperation.Provision, out SecureControlResult provisionResult, out byte[] provisionPayload))
+            {
+                return FailSecureSession("Secure session could not be established.");
+            }
+
+            if (provisionResult != SecureControlResult.Ok && provisionResult != SecureControlResult.Locked)
+            {
+                return FailSecureSession("Secure session could not be established.");
+            }
+
+            if (provisionPayload.Length == Constants.SECURE_DEVICE_PUBLIC_KEY_BYTES)
+            {
+                _secureSession.DevicePublicKey = provisionPayload;
+            }
+
+            info = await GetSecureInfoAsync(timeoutMs);
+            if (info == null || !info.IsProvisioned)
+            {
+                return FailSecureSession("Secure session could not be established.");
+            }
+        }
+
+        if (!TryGenerateX25519KeyPair(out X25519KeyMaterial? clientKey, out byte[] clientPublicKey) || clientKey == null)
+        {
+            return FailSecureSession("Secure session could not be established.");
+        }
+
+        try
+        {
+            byte[]? helloResponse = await ExecuteSecureControlRequestAsync(SecureControlOperation.Hello, clientPublicKey, encryptedRequest: false, timeoutMs);
+            if (helloResponse != null && helloResponse.Length == 5 + 4 &&
+                (SecureControlResult)helloResponse[2] == SecureControlResult.Throttled)
+            {
+                uint retryAfterMs = BinaryPrimitives.ReadUInt32LittleEndian(helloResponse.AsSpan(5, 4));
+                await Task.Delay((int)Math.Min(retryAfterMs + 50, 1500));
+                helloResponse = await ExecuteSecureControlRequestAsync(SecureControlOperation.Hello, clientPublicKey, encryptedRequest: false, timeoutMs);
+            }
+
+            if (helloResponse == null || helloResponse.Length != 5 + 40 || helloResponse[0] != (byte)Constants.SECURE_CONTROL_FRAME_PREFIX)
+            {
+                return FailSecureSession("Secure session could not be established.");
+            }
+
+            if ((SecureControlResult)helloResponse[2] != SecureControlResult.Ok)
+            {
+                return FailSecureSession("Secure session could not be established.");
+            }
+
+            byte[] devicePublicKey = new byte[32];
+            byte[] sessionId = new byte[8];
+            Buffer.BlockCopy(helloResponse, 5, devicePublicKey, 0, devicePublicKey.Length);
+            Buffer.BlockCopy(helloResponse, 5 + devicePublicKey.Length, sessionId, 0, sessionId.Length);
+
+            if (!IsDeviceIdentityTrusted(devicePublicKey))
+            {
+                return FailSecureSession("Secure session could not be established.");
+            }
+
+            if (!TryDeriveX25519SharedSecret(clientKey, devicePublicKey, out byte[] sharedSecret))
+            {
+                return FailSecureSession("Secure session could not be established.");
+            }
+
+            DeriveSecureSessionKeys(sharedSecret, sessionId, clientPublicKey, devicePublicKey, out byte[] clientToDeviceKey, out byte[] deviceToClientKey);
+            _secureSession.SessionId = sessionId;
+            _secureSession.DevicePublicKey = devicePublicKey;
+            _secureSession.ClientToDeviceKey = clientToDeviceKey;
+            _secureSession.DeviceToClientKey = deviceToClientKey;
+            _secureSession.TxSequence = 0;
+            _secureSession.RxSequence = 0;
+            _secureSession.IsSessionOpen = true;
+            _secureSession.IsAuthorized = !_secureSession.PinEnabled;
+            _lastSecureStatusRequestTick = 0;
+            _lastSecureStatusResponseTick = Environment.TickCount64;
+            return true;
+        }
+        finally
+        {
+            clientKey.Dispose();
+        }
+    }
+
+    private static bool IsOperationPending(SecureControlResult result)
+        => result == SecureControlResult.Pending || result == SecureControlResult.Busy;
+
+    private async Task<SecureManagementResponse?> AwaitSecureOperationCompletionAsync(
+        SecureControlOperation operation,
+        SecureManagementResponse initialResponse,
+        int timeoutMs)
+    {
+        if (!IsOperationPending(initialResponse.Result))
+        {
+            return initialResponse;
+        }
+
+        Stopwatch wait = Stopwatch.StartNew();
+        SecureManagementResponse latest = initialResponse;
+        while (wait.ElapsedMilliseconds < timeoutMs)
+        {
+            await Task.Delay(25);
+            SecureManagementResponse? status = await GetSecureStatusAsync(timeoutMs: 2000);
+            if (status == null)
+            {
+                continue;
+            }
+
+            latest = new SecureManagementResponse(
+                operation,
+                status.Result,
+                status.RetryAfterMs,
+                status.PinEnabled,
+                status.IsAuthorized,
+                status.StorageFault,
+                status.NewRecoveryKey);
+
+            if (!IsOperationPending(latest.Result))
+            {
+                return latest;
+            }
+        }
+
+        return latest;
+    }
+
+    private static bool IsValidPin(string pin)
+    {
+        if (pin.Length != Constants.SECURE_PIN_LENGTH)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < pin.Length; i++)
+        {
+            if (pin[i] < '0' || pin[i] > '9')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public async Task<SecureManagementResponse?> SecureUnlockAsync(string pin, int timeoutMs = 12000)
+    {
+        if (!_secureSession.IsSessionOpen || !IsValidPin(pin))
+        {
+            return null;
+        }
+
+        byte[] payload = Encoding.ASCII.GetBytes(pin);
+        LogProtocolDebug($"UNLOCK start timeoutMs={timeoutMs} txSeq={_secureSession.TxSequence} rxSeq={_secureSession.RxSequence} sessionOpen={_secureSession.IsSessionOpen} auth={_secureSession.IsAuthorized}");
+        byte[]? response = await ExecuteSecureControlRequestAsync(SecureControlOperation.Unlock, payload, encryptedRequest: true, timeoutMs);
+        if (response == null || !TryParseSecureManagementResponse(response, SecureControlOperation.Unlock, out SecureManagementResponse? managementResponse) || managementResponse == null)
+        {
+            LogProtocolDebug($"UNLOCK parse-fail responseLen={(response == null ? -1 : response.Length)}");
+            return null;
+        }
+
+        LogProtocolDebug($"UNLOCK initial result={SecureResultToString(managementResponse.Result)} retryAfter={managementResponse.RetryAfterMs} authorized={managementResponse.IsAuthorized}");
+
+        SecureManagementResponse? finalResponse = await AwaitSecureOperationCompletionAsync(SecureControlOperation.Unlock, managementResponse, timeoutMs);
+        if (finalResponse == null)
+        {
+            return null;
+        }
+
+        _secureSession.IsAuthorized = finalResponse.IsAuthorized;
+        _secureSession.PinEnabled = finalResponse.PinEnabled;
+        _secureSession.RetryAfterMs = finalResponse.RetryAfterMs;
+        _secureSession.StorageFault = finalResponse.StorageFault;
+        LogProtocolDebug($"UNLOCK final result={SecureResultToString(finalResponse.Result)} retryAfter={finalResponse.RetryAfterMs} authorized={finalResponse.IsAuthorized} txSeq={_secureSession.TxSequence} rxSeq={_secureSession.RxSequence}");
+        return finalResponse;
+    }
+
+    public async Task<PinSetupResult> SecureSetPinAsync(string pin, int timeoutMs = 12000)
+    {
+        if (!_secureSession.IsSessionOpen)
+        {
+            return new PinSetupResult(false, null, "Secure session is not open.", 0, SecureControlResult.Invalid);
+        }
+
+        if (!IsValidPin(pin))
+        {
+            return new PinSetupResult(false, null, "PIN must be exactly four digits.", 0, SecureControlResult.Invalid);
+        }
+
+        byte[] payload = Encoding.ASCII.GetBytes(pin);
+        byte[]? response = await ExecuteSecureControlRequestAsync(SecureControlOperation.SetPin, payload, encryptedRequest: true, timeoutMs);
+        if (response == null || !TryParseSecureManagementResponse(response, SecureControlOperation.SetPin, out SecureManagementResponse? managementResponse) || managementResponse == null)
+        {
+            return new PinSetupResult(false, null, "Controller did not return a valid PIN setup response.", 0, SecureControlResult.Invalid);
+        }
+
+        SecureManagementResponse? finalResponse = await AwaitSecureOperationCompletionAsync(SecureControlOperation.SetPin, managementResponse, timeoutMs);
+        if (finalResponse == null)
+        {
+            return new PinSetupResult(false, null, "Controller did not return a valid PIN setup response.", 0, SecureControlResult.Invalid);
+        }
+
+        string? recoveryKey = finalResponse.NewRecoveryKey;
+        if (finalResponse.Result == SecureControlResult.Ok && string.IsNullOrWhiteSpace(recoveryKey))
+        {
+            SecureManagementResponse? rotateRecovery = await SecureRotateRecoveryAsync(timeoutMs);
+            if (rotateRecovery != null && rotateRecovery.Result == SecureControlResult.Ok)
+            {
+                recoveryKey = rotateRecovery.NewRecoveryKey;
+            }
+        }
+
+        _secureSession.PinEnabled = finalResponse.PinEnabled;
+        _secureSession.IsAuthorized = finalResponse.IsAuthorized;
+        _secureSession.RetryAfterMs = finalResponse.RetryAfterMs;
+        _secureSession.StorageFault = finalResponse.StorageFault;
+
+        bool success = finalResponse.Result == SecureControlResult.Ok && !string.IsNullOrWhiteSpace(recoveryKey);
+        string? error = success ? null : $"Controller returned {finalResponse.Result}.";
+        return new PinSetupResult(success, recoveryKey, error, finalResponse.RetryAfterMs, finalResponse.Result);
+    }
+
+    public async Task<PinSetupResult> SecureRecoverAsync(string recoveryKey, string newPin, int timeoutMs = 12000)
+    {
+        if (!_secureSession.IsSessionOpen)
+        {
+            return new PinSetupResult(false, null, "Secure session is not open.", 0, SecureControlResult.Invalid);
+        }
+
+        string normalizedRecovery = (recoveryKey ?? string.Empty).Trim().ToUpperInvariant();
+        if (normalizedRecovery.Length != Constants.SECURE_RECOVERY_KEY_LENGTH || !IsValidPin(newPin))
+        {
+            return new PinSetupResult(false, null, "Recovery key or PIN format is invalid.", 0, SecureControlResult.Invalid);
+        }
+
+        byte[] recoveryBytes = Encoding.ASCII.GetBytes(normalizedRecovery);
+        byte[] pinBytes = Encoding.ASCII.GetBytes(newPin);
+        byte[] payload = new byte[recoveryBytes.Length + pinBytes.Length];
+        Buffer.BlockCopy(recoveryBytes, 0, payload, 0, recoveryBytes.Length);
+        Buffer.BlockCopy(pinBytes, 0, payload, recoveryBytes.Length, pinBytes.Length);
+
+        byte[]? response = await ExecuteSecureControlRequestAsync(SecureControlOperation.Recover, payload, encryptedRequest: true, timeoutMs);
+        if (response == null || !TryParseSecureManagementResponse(response, SecureControlOperation.Recover, out SecureManagementResponse? managementResponse) || managementResponse == null)
+        {
+            return new PinSetupResult(false, null, "Controller did not return a valid recovery response.", 0, SecureControlResult.Invalid);
+        }
+
+        SecureManagementResponse? finalResponse = await AwaitSecureOperationCompletionAsync(SecureControlOperation.Recover, managementResponse, timeoutMs);
+        if (finalResponse == null)
+        {
+            return new PinSetupResult(false, null, "Controller did not return a valid recovery response.", 0, SecureControlResult.Invalid);
+        }
+
+        _secureSession.PinEnabled = finalResponse.PinEnabled;
+        _secureSession.IsAuthorized = finalResponse.IsAuthorized;
+        _secureSession.RetryAfterMs = finalResponse.RetryAfterMs;
+        _secureSession.StorageFault = finalResponse.StorageFault;
+
+        bool success = finalResponse.Result == SecureControlResult.Ok && !string.IsNullOrWhiteSpace(finalResponse.NewRecoveryKey);
+        string? error = success ? null : $"Controller returned {finalResponse.Result}.";
+        return new PinSetupResult(success, finalResponse.NewRecoveryKey, error, finalResponse.RetryAfterMs, finalResponse.Result);
+    }
+
+    public async Task<SecureManagementResponse?> SecureDisablePinAsync(int timeoutMs = 12000)
+    {
+        if (!_secureSession.IsSessionOpen)
+        {
+            return null;
+        }
+
+        byte[]? response = await ExecuteSecureControlRequestAsync(SecureControlOperation.Disable, Array.Empty<byte>(), encryptedRequest: true, timeoutMs);
+        if (response == null || !TryParseSecureManagementResponse(response, SecureControlOperation.Disable, out SecureManagementResponse? managementResponse) || managementResponse == null)
+        {
+            return null;
+        }
+
+        _secureSession.PinEnabled = managementResponse.PinEnabled;
+        _secureSession.RetryAfterMs = managementResponse.RetryAfterMs;
+        _secureSession.StorageFault = managementResponse.StorageFault;
+        if (managementResponse.Result == SecureControlResult.Ok)
+        {
+            RemoveCurrentControllerPairing();
+            // Firmware closes the session after a successful disable; failures keep it open.
+            ResetSecureSessionAfterDeviceReset();
+        }
+        else
+        {
+            _secureSession.IsAuthorized = managementResponse.IsAuthorized;
+        }
+
+        return managementResponse;
+    }
+
+    public async Task<SecureManagementResponse?> SecureRotateRecoveryAsync(int timeoutMs = 12000)
+    {
+        if (!_secureSession.IsSessionOpen)
+        {
+            return null;
+        }
+
+        byte[]? response = await ExecuteSecureControlRequestAsync(SecureControlOperation.RotateRecovery, Array.Empty<byte>(), encryptedRequest: true, timeoutMs);
+        if (response == null || !TryParseSecureManagementResponse(response, SecureControlOperation.RotateRecovery, out SecureManagementResponse? managementResponse) || managementResponse == null)
+        {
+            return null;
+        }
+
+        _secureSession.PinEnabled = managementResponse.PinEnabled;
+        _secureSession.IsAuthorized = managementResponse.IsAuthorized;
+        _secureSession.RetryAfterMs = managementResponse.RetryAfterMs;
+        _secureSession.StorageFault = managementResponse.StorageFault;
+        return managementResponse;
+    }
+
+    public async Task<bool> SecureLockAsync(int timeoutMs = 3000)
+    {
+        if (!_secureSession.IsSessionOpen)
+        {
+            return false;
+        }
+
+        byte[]? response = await ExecuteSecureControlRequestAsync(SecureControlOperation.Lock, Array.Empty<byte>(), encryptedRequest: true, timeoutMs);
+        if (response == null || !TryParseSecureManagementResponse(response, SecureControlOperation.Lock, out SecureManagementResponse? managementResponse) || managementResponse == null)
+        {
+            return false;
+        }
+
+        if (managementResponse.Result != SecureControlResult.Ok)
+        {
+            return false;
+        }
+
+        ResetSecureSessionAfterDeviceReset();
+        return true;
+    }
+
+    public bool ShouldSendSecureKeepalive(int intervalMs = 4000)
+    {
+        if (!_secureSession.IsSessionOpen)
+        {
+            return false;
+        }
+
+        // Once authorized, live/static polling is the primary transport for operational
+        // data. Avoid periodic secure status requests that can contend with stream reads.
+        if (!_secureSession.PinEnabled || _secureSession.IsAuthorized)
+        {
+            return false;
+        }
+
+        long now = Environment.TickCount64;
+        if (_lastSecureStatusRequestTick == 0)
+        {
+            return true;
+        }
+
+        return (now - _lastSecureStatusRequestTick) >= intervalMs;
+    }
+
+    private void SubscribeDataReceived_NoLock()
+    {
+        if (_dataReceivedSubscribed || _isShuttingDown || _isDisposed)
+        {
+            return;
+        }
+
         _serialPort.DataReceived += OnDataReceived;
-        _processTimer.Start();
+        _dataReceivedSubscribed = true;
+    }
+
+    private void UnsubscribeDataReceived_NoLock()
+    {
+        if (!_dataReceivedSubscribed)
+        {
+            return;
+        }
+
+        // Keep the handler subscribed for the lifetime of the SerialPort instance.
+        // Unsubscribing during close/dispose can race with framework receive-event dispatch
+        // (SerialStream.EventLoopRunner.CallReceiveEvents), which may throw NullReferenceException.
+        // Shutdown behavior is controlled by _isShuttingDown/_isDisposed guards in OnDataReceived.
+    }
+
+    private void SetBulkTransferReaderActive(bool active)
+    {
+        lock (_serialReceiveLock)
+        {
+            _bulkLogTransferActive = active;
+        }
+        if (!active)
+        {
+            _parseSignal.Set();
+        }
+    }
+
+    private void RunParseLoop(CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            _parseSignal.WaitOne(20);
+
+            if (_isDisposed || _isShuttingDown || _bulkLogTransferActive)
+            {
+                continue;
+            }
+
+            if (Interlocked.Exchange(ref _parseLoopBusy, 1) == 1)
+            {
+                continue;
+            }
+
+            try
+            {
+                DrainPendingSerialInput();
+                CheckConfigurationSaveTimeout();
+                for (int i = 0; i < 256; i++)
+                {
+                    if (!processData())
+                    {
+                        break;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Error in parse loop: {ex.Message}");
+            }
+            finally
+            {
+                Volatile.Write(ref _parseLoopBusy, 0);
+            }
+        }
     }
 
     private static async Task ReadExactlyAsync(Stream stream, byte[] buffer, int offset, int count, CancellationToken token)
@@ -251,7 +1777,8 @@ public class SerialPortService
                commandId == Constants.COMMAND_ID_BUILD_DATE ||
                commandId == Constants.COMMAND_ID_FW_DIAGNOSTIC ||
                commandId == Constants.COMMAND_ID_CELLULAR_TEST ||
-               commandId == Constants.COMMAND_ID_OPENREMOTE_PROVISION;
+               commandId == Constants.COMMAND_ID_OPENREMOTE_PROVISION ||
+               commandId == Constants.COMMAND_ID_CUSTOM_CAN_STATUS;
     }
 
     private void TrackFramedResponseByte(byte readByte)
@@ -298,6 +1825,7 @@ public class SerialPortService
         lock (_bufferLock)
         {
             receivedDataBuffer.Clear();
+            _secureIncomingBuffer.Clear();
         }
 
         foundTrailer1 = false;
@@ -307,8 +1835,13 @@ public class SerialPortService
         _lastLiveStatusFrameTick = 0;
         _lastMathStatusRequestSentTick = 0;
         _lastMathStatusFrameTick = 0;
+        _lastCustomCanStatusRequestSentTick = 0;
+        _lastCustomCanStatusFrameTick = 0;
         _lastStaticRequestSentTick = 0;
         _lastHandshakeAttemptTick = 0;
+        _lastSecureStatusRequestTick = 0;
+        _lastSecureStatusResponseTick = 0;
+        HasLoadedStaticSnapshot = false;
 
         lock (_logChunkLock)
         {
@@ -320,14 +1853,21 @@ public class SerialPortService
     {
         foundECU = false;
         _controllerCapabilities = ControllerProtocolCapabilities.V09;
+        ResetSecureSession();
         _lastLiveRequestSentTick = 0;
         _lastLiveStatusFrameTick = 0;
         _lastDigitalInputStatusRequestSentTick = 0;
         _lastDigitalInputStatusFrameTick = 0;
         _lastMathStatusRequestSentTick = 0;
         _lastMathStatusFrameTick = 0;
+        _lastCustomCanStatusRequestSentTick = 0;
+        _lastCustomCanStatusFrameTick = 0;
         _lastStaticRequestSentTick = 0;
+        _lastSecureStatusRequestTick = 0;
+        HasLoadedStaticSnapshot = false;
+        _lastSecureStatusResponseTick = 0;
         _digitalInputStatusSupportState = DigitalInputStatusSupportState.Unknown;
+        _customCanStatusSupportState = CustomCanStatusSupportState.Unknown;
         ClearDigitalInputLiveStates();
 
         if (requestStaticSnapshot)
@@ -369,6 +1909,48 @@ public class SerialPortService
         if ((now - _lastDigitalInputStatusRequestSentTick) >= timeoutMs)
         {
             MarkDigitalInputStatusUnsupported();
+        }
+    }
+
+    private void ClearCustomCanLiveStates()
+    {
+        foreach (CustomCanMessage message in dataStructures.CustomCanMessagesLiveData)
+        {
+            message.Status = (byte)CustomCanStatus.InvalidConfig;
+        }
+
+        foreach (CustomCanSignal signal in dataStructures.CustomCanSignalsLiveData)
+        {
+            signal.RuntimeValue = 0;
+            signal.Status = (byte)CustomCanStatus.InvalidConfig;
+        }
+    }
+
+    private void MarkCustomCanStatusUnsupported()
+    {
+        _customCanStatusSupportState = CustomCanStatusSupportState.Unsupported;
+        _lastCustomCanStatusFrameTick = 0;
+        ClearCustomCanLiveStates();
+    }
+
+    private void UpdateCustomCanStatusSupport(long now, int idleThresholdMs)
+    {
+        if (_customCanStatusSupportState != CustomCanStatusSupportState.Unknown ||
+            _lastCustomCanStatusRequestSentTick == 0)
+        {
+            return;
+        }
+
+        if (_lastCustomCanStatusFrameTick >= _lastCustomCanStatusRequestSentTick)
+        {
+            _customCanStatusSupportState = CustomCanStatusSupportState.Supported;
+            return;
+        }
+
+        int timeoutMs = Math.Max(idleThresholdMs * 2, DigitalInputStatusProbeTimeoutMs);
+        if ((now - _lastCustomCanStatusRequestSentTick) >= timeoutMs)
+        {
+            MarkCustomCanStatusUnsupported();
         }
     }
 
@@ -566,7 +2148,21 @@ public class SerialPortService
             return;
         }
 
-        ResetLogReceiveState(discardSerialInput: true);
+        bool preserveSecureSession = _secureSession.IsSessionOpen;
+        if (!preserveSecureSession)
+        {
+            ResetLogReceiveState(discardSerialInput: true);
+        }
+        else
+        {
+            lock (_bufferLock)
+            {
+                receivedDataBuffer.Clear();
+            }
+
+            foundTrailer1 = false;
+            _packetReady = false;
+        }
 
         _logTransferSessionActive = true;
         _suspendLiveRequestPolling = true;
@@ -582,9 +2178,24 @@ public class SerialPortService
             return;
         }
 
+        bool preserveSecureSession = _secureSession.IsSessionOpen;
+
         _logTransferSessionActive = false;
         _suspendLiveRequestPolling = false;
-        ResetLogReceiveState(discardSerialInput: false);
+        if (!preserveSecureSession)
+        {
+            ResetLogReceiveState(discardSerialInput: false);
+        }
+        else
+        {
+            lock (_bufferLock)
+            {
+                receivedDataBuffer.Clear();
+            }
+
+            foundTrailer1 = false;
+            _packetReady = false;
+        }
 
         if (_serialPort.IsOpen && !sendingConfig)
         {
@@ -600,7 +2211,10 @@ public class SerialPortService
         _serialPort.DataBits = 8;
         _serialPort.RtsEnable = true;
         _serialPort.DtrEnable = true;
-        _serialPort.DataReceived += OnDataReceived;
+        lock (_serialLifecycleLock)
+        {
+            SubscribeDataReceived_NoLock();
+        }
         receivedDataBuffer = new List<byte>();
         dataStructures = new DataStructures();
         settingsData = new DataStructures();
@@ -610,48 +2224,11 @@ public class SerialPortService
         _processTimer.AutoReset = true;
         _processTimer.Elapsed += (s, e) =>
         {
-            bool shouldProcess = _packetReady;
-
-            // During log transfer, opportunistically parse buffered framed data
-            // even if trailer-edge detection missed flipping _packetReady.
-            if (!shouldProcess && _logTransferSessionActive)
-            {
-                lock (_bufferLock)
-                {
-                    shouldProcess = receivedDataBuffer.Count >= 8;
-                }
-            }
-
-            if (!shouldProcess)
-            {
-                return;
-            }
-
-            // ensure only one thread processes the buffer
-            lock (_bufferLock)
-            {
-                // clear flag before processing to avoid re-entrancy
-                _packetReady = false;
-
-                // Drain several packets per tick to avoid backlog on fast transfers.
-                try
-                {
-                    for (int i = 0; i < 32; i++)
-                    {
-                        if (!processData())
-                        {
-                            break;
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"Error in processData: {ex.Message}");
-                }
-            }
-
+            // Legacy timer retained for compatibility; parsing is handled by RunParseLoop.
         };
-        _processTimer.Start();
+
+        _parseLoopTask = Task.Run(() => RunParseLoop(_parseLoopCts.Token));
+        LoadPinnedDeviceIdentities();
     }
 
     public void UpdateSettingsData(DataStructures newSettingsData)
@@ -984,6 +2561,42 @@ public class SerialPortService
             target.RefreshDelayUiUnitsFromStoredValues();
         }
 
+        int customCanMessageCount = Math.Min(dataStructures.CustomCanMessagesLiveData.Count, dataStructures.CustomCanMessagesStaticData.Count);
+        for (int i = 0; i < customCanMessageCount; i++)
+        {
+            CustomCanMessage sourceMessage = dataStructures.CustomCanMessagesLiveData[i];
+            CustomCanMessage targetMessage = dataStructures.CustomCanMessagesStaticData[i];
+            targetMessage.Index = sourceMessage.Index;
+            targetMessage.Id = sourceMessage.Id;
+            targetMessage.TimeoutMs = sourceMessage.TimeoutMs;
+            targetMessage.Dlc = sourceMessage.Dlc;
+            targetMessage.Flags = sourceMessage.Flags;
+            targetMessage.TxTrigger = sourceMessage.TxTrigger;
+            targetMessage.Status = sourceMessage.Status;
+        }
+
+        int customCanSignalCount = Math.Min(dataStructures.CustomCanSignalsLiveData.Count, dataStructures.CustomCanSignalsStaticData.Count);
+        for (int i = 0; i < customCanSignalCount; i++)
+        {
+            CustomCanSignal sourceSignal = dataStructures.CustomCanSignalsLiveData[i];
+            CustomCanSignal targetSignal = dataStructures.CustomCanSignalsStaticData[i];
+            targetSignal.Index = sourceSignal.Index;
+            targetSignal.Name = sourceSignal.Name;
+            targetSignal.MessageName = sourceSignal.MessageName;
+            targetSignal.MessageIndex = sourceSignal.MessageIndex;
+            targetSignal.StartBit = sourceSignal.StartBit;
+            targetSignal.BitLength = sourceSignal.BitLength;
+            targetSignal.Flags = sourceSignal.Flags;
+            targetSignal.ValueSource = sourceSignal.ValueSource;
+            targetSignal.Factor = sourceSignal.Factor;
+            targetSignal.Offset = sourceSignal.Offset;
+            targetSignal.RuntimeValue = sourceSignal.RuntimeValue;
+            targetSignal.Status = sourceSignal.Status;
+            targetSignal.OwnerMessage = targetSignal.MessageIndex < dataStructures.CustomCanMessagesStaticData.Count
+                ? dataStructures.CustomCanMessagesStaticData[targetSignal.MessageIndex]
+                : null;
+        }
+
         int analogueCount = Math.Min(dataStructures.AnalogueInputsLiveData.Count, dataStructures.AnalogueInputsStaticData.Count);
         for (int i = 0; i < analogueCount; i++)
         {
@@ -1252,6 +2865,188 @@ public class SerialPortService
         return true;
     }
 
+    private void CopyCustomCanLiveToStaticSnapshot()
+    {
+        int customCanMessageCount = Math.Min(dataStructures.CustomCanMessagesLiveData.Count, dataStructures.CustomCanMessagesStaticData.Count);
+        for (int i = 0; i < customCanMessageCount; i++)
+        {
+            CustomCanMessage sourceMessage = dataStructures.CustomCanMessagesLiveData[i];
+            CustomCanMessage targetMessage = dataStructures.CustomCanMessagesStaticData[i];
+            targetMessage.Index = sourceMessage.Index;
+            targetMessage.Id = sourceMessage.Id;
+            targetMessage.TimeoutMs = sourceMessage.TimeoutMs;
+            targetMessage.Dlc = sourceMessage.Dlc;
+            targetMessage.Flags = sourceMessage.Flags;
+            targetMessage.TxTrigger = sourceMessage.TxTrigger;
+            targetMessage.Status = sourceMessage.Status;
+        }
+
+        int customCanSignalCount = Math.Min(dataStructures.CustomCanSignalsLiveData.Count, dataStructures.CustomCanSignalsStaticData.Count);
+        for (int i = 0; i < customCanSignalCount; i++)
+        {
+            CustomCanSignal sourceSignal = dataStructures.CustomCanSignalsLiveData[i];
+            CustomCanSignal targetSignal = dataStructures.CustomCanSignalsStaticData[i];
+            targetSignal.Index = sourceSignal.Index;
+            targetSignal.Name = sourceSignal.Name;
+            targetSignal.MessageName = sourceSignal.MessageName;
+            targetSignal.MessageIndex = sourceSignal.MessageIndex;
+            targetSignal.StartBit = sourceSignal.StartBit;
+            targetSignal.BitLength = sourceSignal.BitLength;
+            targetSignal.Flags = sourceSignal.Flags;
+            targetSignal.ValueSource = sourceSignal.ValueSource;
+            targetSignal.Factor = sourceSignal.Factor;
+            targetSignal.Offset = sourceSignal.Offset;
+            targetSignal.RuntimeValue = sourceSignal.RuntimeValue;
+            targetSignal.Status = sourceSignal.Status;
+            targetSignal.OwnerMessage = targetSignal.MessageIndex < dataStructures.CustomCanMessagesStaticData.Count
+                ? dataStructures.CustomCanMessagesStaticData[targetSignal.MessageIndex]
+                : null;
+        }
+    }
+
+    private bool ParseCustomCanStatusPacket()
+    {
+        int packetEndIndex = dataLength - 4;
+        var reader = new ByteReader(dataBytes, 3);
+        if ((packetEndIndex - reader.Position) < 4)
+        {
+            return false;
+        }
+
+        byte version = reader.ReadByte();
+        if (version != Constants.CUSTOM_CAN_STATUS_VERSION_LEGACY &&
+            version != Constants.CUSTOM_CAN_STATUS_VERSION_TX)
+        {
+            return false;
+        }
+
+        bool hasTxFields = version >= Constants.CUSTOM_CAN_STATUS_VERSION_TX;
+        byte crcValid = reader.ReadByte();
+        byte messageCount = reader.ReadByte();
+        byte signalCount = reader.ReadByte();
+
+        if (messageCount > Constants.MAX_CUSTOM_CAN_MESSAGES || signalCount > Constants.MAX_CUSTOM_CAN_SIGNALS)
+        {
+            return false;
+        }
+
+        int bytesPerMessage = hasTxFields ? 10 : 9;
+        int bytesPerSignal = hasTxFields ? 18 : 17;
+        int expectedBytes = (messageCount * bytesPerMessage) + (signalCount * bytesPerSignal);
+        if ((packetEndIndex - reader.Position) < expectedBytes)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < messageCount; i++)
+        {
+            uint id = reader.ReadUInt32();
+            ushort timeout = reader.ReadUInt16();
+            byte dlc = reader.ReadByte();
+            byte flags = reader.ReadByte();
+            byte txTrigger = hasTxFields ? reader.ReadByte() : Constants.CUSTOM_CAN_TX_TRIGGER_ALWAYS;
+            byte status = reader.ReadByte();
+            bool enabled = status != (byte)CustomCanStatus.Disabled;
+            // TX messages always report Disabled; keep their configured enabled flag.
+            byte normalizedFlags = (flags & 0x04) != 0
+                ? flags
+                : enabled
+                    ? (byte)(flags | 0x01)
+                    : (byte)(flags & ~0x01);
+
+            if (i < dataStructures.CustomCanMessagesLiveData.Count)
+            {
+                CustomCanMessage message = dataStructures.CustomCanMessagesLiveData[i];
+                message.Index = i;
+                message.Id = id;
+                message.TimeoutMs = timeout;
+                message.Dlc = dlc;
+                message.Flags = normalizedFlags;
+                message.TxTrigger = txTrigger;
+                message.Status = status;
+            }
+        }
+
+        for (int i = messageCount; i < dataStructures.CustomCanMessagesLiveData.Count; i++)
+        {
+            CustomCanMessage message = dataStructures.CustomCanMessagesLiveData[i];
+            message.Index = i;
+            message.Id = 0;
+            message.TimeoutMs = 1000;
+            message.Dlc = 8;
+            message.Flags = 0;
+            message.TxTrigger = Constants.CUSTOM_CAN_TX_TRIGGER_ALWAYS;
+            message.Status = (byte)CustomCanStatus.Disabled;
+        }
+
+        for (int i = 0; i < signalCount; i++)
+        {
+            byte messageIndex = reader.ReadByte();
+            byte startBit = reader.ReadByte();
+            byte bitLength = reader.ReadByte();
+            byte flags = reader.ReadByte();
+            float factor = reader.ReadSingle();
+            float offset = reader.ReadSingle();
+            byte valueSource = hasTxFields ? reader.ReadByte() : (byte)0;
+            float runtimeValue = reader.ReadSingle();
+            byte status = reader.ReadByte();
+            bool enabled = status != (byte)CustomCanStatus.Disabled;
+            // Signals on TX messages always report Disabled; keep their configured enabled flag.
+            bool onTxMessage = messageIndex < dataStructures.CustomCanMessagesLiveData.Count &&
+                               dataStructures.CustomCanMessagesLiveData[messageIndex].IsTx;
+            byte normalizedFlags = onTxMessage
+                ? flags
+                : enabled
+                    ? (byte)(flags | 0x01)
+                    : (byte)(flags & ~0x01);
+
+            if (i < dataStructures.CustomCanSignalsLiveData.Count)
+            {
+                CustomCanSignal signal = dataStructures.CustomCanSignalsLiveData[i];
+                signal.Index = i;
+                signal.MessageIndex = messageIndex;
+                signal.StartBit = startBit;
+                signal.BitLength = bitLength;
+                signal.Flags = normalizedFlags;
+                signal.ValueSource = valueSource;
+                signal.Factor = factor;
+                signal.Offset = offset;
+                signal.RuntimeValue = runtimeValue;
+                signal.Status = status;
+                signal.MessageName = $"Message {messageIndex + 1}";
+            }
+        }
+
+        for (int i = signalCount; i < dataStructures.CustomCanSignalsLiveData.Count; i++)
+        {
+            CustomCanSignal signal = dataStructures.CustomCanSignalsLiveData[i];
+            signal.Index = i;
+            signal.Name = string.Empty;
+            signal.MessageName = string.Empty;
+            signal.MessageIndex = 0;
+            signal.StartBit = 0;
+            signal.BitLength = 1;
+            signal.Flags = 0;
+            signal.ValueSource = 0;
+            signal.Factor = 1.0f;
+            signal.Offset = 0.0f;
+            signal.RuntimeValue = 0.0f;
+            signal.Status = (byte)CustomCanStatus.Disabled;
+            signal.IsMarkedForDeletion = false;
+        }
+
+        if (crcValid == 0)
+        {
+            foreach (CustomCanSignal signal in dataStructures.CustomCanSignalsLiveData)
+            {
+                signal.Status = (byte)CustomCanStatus.InvalidConfig;
+            }
+        }
+
+        CopyCustomCanLiveToStaticSnapshot();
+        return true;
+    }
+
     private bool ParseStaticStatusPacket()
     {
         if (dataBytes[3] != Constants.NUM_OUTPUT_CHANNELS)
@@ -1422,6 +3217,7 @@ public class SerialPortService
         CopyLiveDataToStaticSnapshot();
         _controllerCapabilities = packetCapabilities;
         _lastStaticRequestSentTick = 0;
+        HasLoadedStaticSnapshot = true;
         UpdateStaticData = false;
         return true;
     }
@@ -1487,6 +3283,19 @@ public class SerialPortService
                     case (byte)Constants.COMMAND_ID_MATH_STATUS:
                         _lastMathStatusFrameTick = Environment.TickCount64;
                         ParseMathStatusPacket();
+                        break;
+
+                    case (byte)Constants.COMMAND_ID_CUSTOM_CAN_STATUS:
+                        _lastCustomCanStatusFrameTick = Environment.TickCount64;
+                        if (ParseCustomCanStatusPacket())
+                        {
+                            _customCanStatusSupportState = CustomCanStatusSupportState.Supported;
+                            _customCanSnapshotTcs?.TrySetResult(true);
+                        }
+                        else
+                        {
+                            _customCanSnapshotTcs?.TrySetResult(false);
+                        }
                         break;
 
                     case (byte)Constants.COMMAND_ID_LOG_LIST:
@@ -1880,7 +3689,8 @@ public class SerialPortService
                         }
                         break;
                     case 4: // Enabled
-                        if (dataStructures.ChannelsLiveData[channelIndex].Enabled != settingsData.ChannelsStaticData[channelIndex].Enabled)
+                        // Live Enabled is the effective output state, not the persisted enable setting.
+                        if (dataStructures.ChannelsStaticData[channelIndex].Enabled != settingsData.ChannelsStaticData[channelIndex].Enabled)
                         {
                             configChanged = true;
                             AddData((byte)settingIndex, true);
@@ -2977,8 +4787,9 @@ public class SerialPortService
                     commandAndPacket[0] = (byte)Constants.COMMAND_ID_NEWCONFIG;
                     Array.Copy(packet, 0, commandAndPacket, 1, packet.Length);
                     Debug.WriteLine($"CFG TX s={settingIndex} p={parameterIndex} ch={channelIndex} a={analogueIndex} d={digitalIndex} len={commandAndPacket.Length} cksum=0x{(uint)checkSumSend:X8} bytes={BitConverter.ToString(commandAndPacket)}");
-                    _serialPort.Write(commandAndPacket, 0, commandAndPacket.Length);
-                    lastCommandSent = Constants.COMMAND_ID_NEWCONFIG;
+                    _pendingConfigurationCommand = Constants.COMMAND_ID_NEWCONFIG;
+                    _configurationCommandSentTick = Environment.TickCount64;
+                    SendCommandWithRawPayload(Constants.COMMAND_ID_NEWCONFIG, packet);
                     _configPacketsSent++;
 
                     Debug.Write("Wrote ");
@@ -3101,20 +4912,421 @@ public class SerialPortService
         return true;
     }
 
+    private bool HandleConfigurationAcknowledgement(byte response)
+    {
+        lock (_configurationSaveLock)
+        {
+            return HandleConfigurationAcknowledgementCore(response);
+        }
+    }
+
+    private bool HandleConfigurationAcknowledgementCore(byte response)
+    {
+        if (response != Constants.COMMAND_ID_CONFIM && response != Constants.COMMAND_ID_CHECKSUM_FAIL)
+            return false;
+        char command = _configurationSaveActive ? _pendingConfigurationCommand : lastCommandSent;
+        if (command != Constants.COMMAND_ID_NEWCONFIG &&
+            command != Constants.COMMAND_ID_SKIP &&
+            command != Constants.COMMAND_ID_SAVECHANGES)
+            return false;
+        if (TryHandleStandaloneAckByte(response))
+            return true;
+
+        bool success = response == Constants.COMMAND_ID_CONFIM;
+        if (command == Constants.COMMAND_ID_SAVECHANGES)
+        {
+            if (!success)
+            {
+                if (_saveRetryCount++ < 1)
+                {
+                    LoggingService.AddLog("There was a problem saving settings. Trying again...");
+                    SendCommand(Constants.COMMAND_ID_SAVECHANGES);
+                }
+                else
+                {
+                    FailConfigurationSave();
+                }
+                return true;
+            }
+
+            _saveRetryCount = 0;
+            CompleteConfigurationSave();
+            lock (_bufferLock)
+            {
+                receivedDataBuffer.Clear();
+            }
+            RequestStaticSnapshot();
+            _configSendStopwatch.Stop();
+            LoggingService.AddLog("PDM settings saved.");
+            ConfigurationSaved?.Invoke(this, EventArgs.Empty);
+            ConfigurationSaveCompleted?.Invoke(this, new ConfigurationSaveCompletedEventArgs(true));
+            return true;
+        }
+
+        if (!sendingConfig)
+        {
+            if (success && command == Constants.COMMAND_ID_SKIP)
+            {
+                SendCommand(Constants.COMMAND_ID_REQUEST);
+                return true;
+            }
+            return false;
+        }
+        if (!success)
+        {
+            if (_configRetryCount++ < 1)
+            {
+                LoggingService.AddLog("There was a problem saving settings. Trying again...");
+                SendConfig();
+            }
+            else
+            {
+                FailConfigurationSave();
+            }
+            return true;
+        }
+
+        _configRetryCount = 0;
+        if (AdvanceConfigCursor())
+        {
+            SendConfig();
+        }
+        if (saveToEEPROM)
+        {
+            saveToEEPROM = false;
+            SendCommand(Constants.COMMAND_ID_SAVECHANGES);
+        }
+        return true;
+    }
+
+    private void FailConfigurationSave()
+    {
+        LoggingService.AddLog("Settings could not be saved. Please try again.");
+        sendingConfig = false;
+        saveToEEPROM = false;
+        parameterIndex = channelIndex = analogueIndex = settingIndex = digitalIndex = mathRuleIndex = 0;
+        _configRetryCount = _saveRetryCount = 0;
+        _configSendStopwatch.Stop();
+        CompleteConfigurationSave();
+        ConfigurationSaveCompleted?.Invoke(this, new ConfigurationSaveCompletedEventArgs(false));
+    }
+
+    private void CompleteConfigurationSave()
+    {
+        if (!_configurationSaveActive) return;
+        _configurationSaveActive = false;
+        _pendingConfigurationCommand = '\0';
+        _suspendLiveRequestPolling = _configurationPreviousPollingSuspended;
+    }
+
+    private void CheckConfigurationSaveTimeout()
+    {
+        lock (_configurationSaveLock)
+        {
+            if (_configurationSaveActive &&
+                Environment.TickCount64 - _configurationCommandSentTick >= 10000)
+            {
+                LoggingService.AddLog("Controller settings acknowledgement timed out; settings may be partially applied. Read back the controller before retrying.");
+                FailConfigurationSave();
+            }
+        }
+    }
+
+    private bool IsStandaloneAckExpectedForLastCommand()
+    {
+        return lastCommandSent == Constants.COMMAND_ID_BEGIN ||
+               lastCommandSent == Constants.COMMAND_ID_NEWCONFIG ||
+               lastCommandSent == Constants.COMMAND_ID_SKIP ||
+               lastCommandSent == Constants.COMMAND_ID_SAVECHANGES ||
+               lastCommandSent == Constants.COMMAND_ID_SET_RTC ||
+               lastCommandSent == Constants.COMMAND_ID_FACTORY_RESET ||
+               lastCommandSent == Constants.COMMAND_ID_LOG_OPEN ||
+               lastCommandSent == Constants.COMMAND_ID_LOG_RESET ||
+               lastCommandSent == Constants.COMMAND_ID_LOG_CANCEL ||
+               lastCommandSent == Constants.COMMAND_ID_FW_UPLOAD_BEGIN ||
+               lastCommandSent == Constants.COMMAND_ID_FW_UPLOAD_CHUNK ||
+               lastCommandSent == Constants.COMMAND_ID_FW_UPLOAD_END ||
+               lastCommandSent == Constants.COMMAND_ID_FW_UPLOAD_CANCEL ||
+               lastCommandSent == Constants.COMMAND_ID_FW_INSTALL;
+    }
+
+    private bool TryHandleStandaloneAckByte(byte readByte)
+    {
+        if (_standaloneCommandAckTcs == null || sendingConfig || _standaloneCommandAckId == '\0')
+        {
+            return false;
+        }
+
+        if (readByte != Constants.COMMAND_ID_CONFIM && readByte != Constants.COMMAND_ID_CHECKSUM_FAIL)
+        {
+            return false;
+        }
+
+        // Guard against stale/foreign ACK bytes being misattributed to the current
+        // standalone command, while still tolerating live-poll commands that can
+        // overwrite lastCommandSent during an active standalone request.
+        bool lastCommandIsLivePoll = lastCommandSent == Constants.COMMAND_ID_REQUEST ||
+                                     lastCommandSent == Constants.COMMAND_ID_DIGITAL_INPUT_STATUS ||
+                                     lastCommandSent == Constants.COMMAND_ID_MATH_STATUS ||
+                                     lastCommandSent == Constants.COMMAND_ID_CUSTOM_CAN_STATUS;
+        bool allowLivePollAckOverride = _standaloneCommandAckId == Constants.COMMAND_ID_LOG_RESET ||
+                                        _standaloneCommandAckId == Constants.COMMAND_ID_LOG_OPEN ||
+                                        _standaloneCommandAckId == Constants.COMMAND_ID_LOG_CANCEL;
+        if (lastCommandSent != _standaloneCommandAckId &&
+            !(allowLivePollAckOverride && lastCommandIsLivePoll))
+        {
+            return false;
+        }
+
+        _standaloneCommandAckTcs.TrySetResult(readByte == Constants.COMMAND_ID_CONFIM);
+
+        lock (_bufferLock)
+        {
+            if (receivedDataBuffer.Count > 0 && receivedDataBuffer[^1] == readByte)
+            {
+                receivedDataBuffer.RemoveAt(receivedDataBuffer.Count - 1);
+            }
+        }
+
+        return true;
+    }
+
+    private bool UseSecureStreamingTransport()
+        => _secureSession.IsSessionOpen;
+
+    private bool TryReadNextSecureIncomingPayload(out byte[] payload)
+    {
+        payload = Array.Empty<byte>();
+        byte[]? secureFrame = null;
+
+        lock (_bufferLock)
+        {
+            if (_secureIncomingBuffer.Count == 0)
+            {
+                return false;
+            }
+
+            if (_secureIncomingBuffer[0] != (byte)Constants.SECURE_ENVELOPE_FRAME_PREFIX)
+            {
+                payload = [ _secureIncomingBuffer[0] ];
+                _secureIncomingBuffer.RemoveAt(0);
+                return true;
+            }
+
+            if (_secureIncomingBuffer.Count < Constants.SECURE_ENVELOPE_HEADER_LENGTH)
+            {
+                return false;
+            }
+
+            ushort plaintextLength = BinaryPrimitives.ReadUInt16LittleEndian(_secureIncomingBuffer.ToArray().AsSpan(1, 2));
+            if (plaintextLength == 0 || plaintextLength > Constants.SECURE_ENVELOPE_MAX_PLAINTEXT_BYTES)
+            {
+                _secureIncomingBuffer.RemoveAt(0);
+                return true;
+            }
+
+            int fullLength = Constants.SECURE_ENVELOPE_HEADER_LENGTH + plaintextLength + Constants.SECURE_TAG_LENGTH;
+            if (_secureIncomingBuffer.Count < fullLength)
+            {
+                return false;
+            }
+
+            secureFrame = _secureIncomingBuffer.GetRange(0, fullLength).ToArray();
+            _secureIncomingBuffer.RemoveRange(0, fullLength);
+        }
+
+        if (secureFrame == null)
+        {
+            return false;
+        }
+
+        if (!TryDecryptSecureEnvelope(secureFrame, _secureSession.DeviceToClientKey, _secureSession.SessionId, _secureSession.RxSequence, out payload))
+        {
+            LogProtocolDebug($"SEC RX decrypt-fail seq={_secureSession.RxSequence} frameLen={secureFrame.Length} sessionOpen={_secureSession.IsSessionOpen}");
+            ResetSecureSession();
+            payload = Array.Empty<byte>();
+            return true;
+        }
+
+        LogProtocolDebug($"SEC RX decrypt-ok seq={_secureSession.RxSequence} payloadLen={payload.Length}");
+        _secureSession.RxSequence++;
+        return true;
+    }
+
     private void OnDataReceived(object sender, SerialDataReceivedEventArgs e)
     {
-        if (_bulkLogTransferActive)
+        try
+        {
+            lock (_serialReceiveLock)
+            {
+                if (_isDisposed || _isShuttingDown || _suspendDataReceivedReads)
+                {
+                    return;
+                }
+
+                OnDataReceivedCore(sender, e);
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+            // Port is being torn down; ignore callback during shutdown.
+        }
+        catch (InvalidOperationException)
+        {
+            // Port state changed during teardown; ignore callback during shutdown.
+        }
+        catch (IOException)
+        {
+            // Transport closed while callback was in flight.
+        }
+        catch (NullReferenceException) when (_isShuttingDown || _isDisposed)
+        {
+            // Defensive guard for rare framework callback races during shutdown.
+        }
+    }
+
+    private void OnDataReceivedCore(object sender, SerialDataReceivedEventArgs e)
+    {
+        // EOF callbacks can be raised during teardown and do not carry payload bytes.
+        // Avoid spending time in the receive loop for EOF notifications.
+        if (e.EventType == SerialData.Eof)
         {
             return;
         }
+
+        DrainSerialInput();
+    }
+
+    // Reads are capped per pass; the parse loop calls back in while bytes remain so large frames
+    // (e.g. the ~2.8 KB Custom CAN snapshot) are not stranded waiting for another DataReceived event.
+    private void DrainPendingSerialInput()
+    {
+        if (_isDisposed || _isShuttingDown || _bulkLogTransferActive || _suspendDataReceivedReads)
+        {
+            return;
+        }
+
+        try
+        {
+            if (!_serialPort.IsOpen || _serialPort.BytesToRead == 0)
+            {
+                return;
+            }
+
+            lock (_serialReceiveLock)
+            {
+                DrainSerialInput();
+            }
+        }
+        catch (Exception) when (_isDisposed || _isShuttingDown || !_serialPort.IsOpen)
+        {
+        }
+        catch (InvalidOperationException)
+        {
+        }
+        catch (IOException)
+        {
+        }
+    }
+
+    private void DrainSerialInput()
+    {
+        if (_isDisposed || _isShuttingDown || _bulkLogTransferActive || _suspendDataReceivedReads)
+        {
+            return;
+        }
+
+        bool sawFramedPacketBoundary = false;
 
         if (_serialPort.IsOpen)
         {
             try
             {
-                while (_serialPort.BytesToRead > 0 && _serialPort.IsOpen)
+                bool secureStreamingTransport = UseSecureStreamingTransport();
+                int processedBytes = 0;
+                const int maxBytesPerCallback = 2048;
+                while (_serialPort.BytesToRead > 0 && _serialPort.IsOpen && processedBytes < maxBytesPerCallback)
                 {
                     byte readByte = (byte)_serialPort.ReadByte();
+                    processedBytes++;
+
+                    if (secureStreamingTransport)
+                    {
+                        lock (_bufferLock)
+                        {
+                            _secureIncomingBuffer.Add(readByte);
+                        }
+
+                        while (TryReadNextSecureIncomingPayload(out byte[] payload))
+                        {
+                            if (payload.Length == 0)
+                            {
+                                continue;
+                            }
+
+                            if (TryCompleteSecureManagementResponse(payload))
+                            {
+                                continue;
+                            }
+
+                            if (payload.Length == 1 && HandleConfigurationAcknowledgement(payload[0]))
+                            {
+                                continue;
+                            }
+
+                            for (int i = 0; i < payload.Length; i++)
+                            {
+                                byte decryptedByte = payload[i];
+                                lock (_bufferLock)
+                                {
+                                    receivedDataBuffer.Add(decryptedByte);
+
+                                    // In secure streaming mode, framed telemetry/status packets may
+                                    // arrive interleaved with other secure control traffic. Detect
+                                    // framed packet boundaries regardless of lastCommandSent.
+                                    TrackFramedResponseByte(decryptedByte);
+                                    if (_packetReady)
+                                    {
+                                        sawFramedPacketBoundary = true;
+                                    }
+                                }
+
+                                if (payload.Length == 1 && TryHandleStandaloneAckByte(decryptedByte))
+                                {
+                                    continue;
+                                }
+
+                                // In secure streaming mode, standalone command responses can be
+                                // delivered inside an encrypted payload. Handle LOG_OPEN ACK/NAK
+                                // here because the raw-byte standalone response path is skipped.
+                                if (lastCommandSent == Constants.COMMAND_ID_LOG_OPEN)
+                                {
+                                    if (decryptedByte == Constants.COMMAND_ID_CONFIM)
+                                    {
+                                        _logOpenTcs?.TrySetResult(true);
+                                        continue;
+                                    }
+
+                                    if (decryptedByte == Constants.COMMAND_ID_CHECKSUM_FAIL)
+                                    {
+                                        _logOpenTcs?.TrySetResult(false);
+                                        continue;
+                                    }
+                                }
+
+                                if (lastCommandSent == Constants.COMMAND_ID_LOG_CHUNK)
+                                {
+                                    if (decryptedByte == Constants.COMMAND_ID_CHECKSUM_FAIL)
+                                    {
+                                        _logChunkTcs?.TrySetCanceled();
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+
+                        continue;
+                    }
 
                     lock (_bufferLock)
                     {
@@ -3123,38 +5335,19 @@ public class SerialPortService
                         if (ExpectsFramedResponse(lastCommandSent))
                         {
                             TrackFramedResponseByte(readByte);
-                        }
-                    }
-
-                    bool expectsStandaloneAck =
-                        lastCommandSent == Constants.COMMAND_ID_BEGIN ||
-                        lastCommandSent == Constants.COMMAND_ID_NEWCONFIG ||
-                        lastCommandSent == Constants.COMMAND_ID_SKIP ||
-                        lastCommandSent == Constants.COMMAND_ID_SAVECHANGES ||
-                        lastCommandSent == Constants.COMMAND_ID_SET_RTC ||
-                        lastCommandSent == Constants.COMMAND_ID_FACTORY_RESET ||
-                        lastCommandSent == Constants.COMMAND_ID_LOG_OPEN ||
-                        lastCommandSent == Constants.COMMAND_ID_LOG_RESET ||
-                        lastCommandSent == Constants.COMMAND_ID_LOG_CANCEL ||
-                        lastCommandSent == Constants.COMMAND_ID_FW_UPLOAD_BEGIN ||
-                        lastCommandSent == Constants.COMMAND_ID_FW_UPLOAD_CHUNK ||
-                        lastCommandSent == Constants.COMMAND_ID_FW_UPLOAD_END ||
-                        lastCommandSent == Constants.COMMAND_ID_FW_UPLOAD_CANCEL ||
-                        lastCommandSent == Constants.COMMAND_ID_FW_INSTALL;
-
-                    if (expectsStandaloneAck &&
-                        (readByte == Constants.COMMAND_ID_CONFIM || readByte == Constants.COMMAND_ID_CHECKSUM_FAIL) &&
-                        _serialPort.BytesToRead == 0)
-                    {
-                        lock (_bufferLock)
-                        {
-                            if (receivedDataBuffer.Count == 1)
+                            if (_packetReady)
                             {
-                                receivedDataBuffer.RemoveAt(receivedDataBuffer.Count - 1);
+                                sawFramedPacketBoundary = true;
                             }
                         }
                     }
 
+                    if (TryHandleStandaloneAckByte(readByte))
+                    {
+                        continue;
+                    }
+
+                    bool expectsStandaloneAck = IsStandaloneAckExpectedForLastCommand();
                     bool standaloneCommandResponse = expectsStandaloneAck && (_serialPort.BytesToRead == 0);
 
                     if (lastCommandSent == Constants.COMMAND_ID_LOG_CHUNK &&
@@ -3200,6 +5393,11 @@ public class SerialPortService
                         }
                     }
 
+                    if (standaloneCommandResponse && HandleConfigurationAcknowledgement(readByte))
+                    {
+                        continue;
+                    }
+
                     if (readByte == Constants.COMMAND_ID_CONFIM && (lastCommandSent == Constants.COMMAND_ID_REQUEST || standaloneCommandResponse))
                     {
                         switch (lastCommandSent)
@@ -3212,7 +5410,6 @@ public class SerialPortService
                                     {
                                         receivedDataBuffer.Clear();
                                     }
-                                    RequestStaticSnapshot();
                                 }
                                 break;
 
@@ -3230,63 +5427,12 @@ public class SerialPortService
                                 }
                                 break;
 
-                            case Constants.COMMAND_ID_NEWCONFIG:
-                            case Constants.COMMAND_ID_SKIP:
-                                if (lastCommandSent == Constants.COMMAND_ID_NEWCONFIG && !sendingConfig && _standaloneCommandAckId == lastCommandSent)
-                                {
-                                    _standaloneCommandAckTcs?.TrySetResult(true);
-                                    break;
-                                }
-
-                                _configRetryCount = 0;
-                                if (sendingConfig)
-                                {
-                                    if (AdvanceConfigCursor())
-                                    {
-                                        SendConfig();
-                                    }
-
-                                    if (saveToEEPROM)
-                                    {
-                                        saveToEEPROM = false;
-                                        SendCommand(Constants.COMMAND_ID_SAVECHANGES);
-                                    }
-                                }
-                                else
-                                {
-                                    SendCommand(Constants.COMMAND_ID_REQUEST);
-                                }
-                                break;
-
-                            case Constants.COMMAND_ID_SAVECHANGES:
-                                if (!sendingConfig && _standaloneCommandAckId == lastCommandSent)
-                                {
-                                    _standaloneCommandAckTcs?.TrySetResult(true);
-                                }
-
-                                _saveRetryCount = 0;
-                                lock (_bufferLock)
-                                {
-                                    receivedDataBuffer.Clear();
-                                }
-                                RequestStaticSnapshot();
-                                _configSendStopwatch.Stop();
-                                Debug.WriteLine($"Configuration saved to EEPROM. packets={_configPacketsSent}, localSkips={_configSlotsSkippedLocally}, elapsedMs={_configSendStopwatch.ElapsedMilliseconds}");
-                                LoggingService.AddLog("PDM settings saved.");
-                                ConfigurationSaved?.Invoke(this, EventArgs.Empty);
-                                ConfigurationSaveCompleted?.Invoke(this, new ConfigurationSaveCompletedEventArgs(true));
-                                break;
-
                             case Constants.COMMAND_ID_LOG_OPEN:
                                 _logOpenTcs?.TrySetResult(true);
                                 LogProtocolDebug("RX LOG_OPEN ACK");
                                 break;
 
                             case Constants.COMMAND_ID_LOG_CANCEL:
-                                break;
-
-                            case Constants.COMMAND_ID_LOG_RESET:
-                                _logResetTcs?.TrySetResult(true);
                                 break;
 
                             case Constants.COMMAND_ID_SET_RTC:
@@ -3307,60 +5453,6 @@ public class SerialPortService
                     {
                         switch (lastCommandSent)
                         {
-                            case Constants.COMMAND_ID_NEWCONFIG:
-                                if (!sendingConfig && _standaloneCommandAckId == lastCommandSent)
-                                {
-                                    _standaloneCommandAckTcs?.TrySetResult(false);
-                                    break;
-                                }
-
-                                Debug.WriteLine($"CFG FAIL s={settingIndex} p={parameterIndex} ch={channelIndex} a={analogueIndex} d={digitalIndex}");
-                                if (_configRetryCount < 1)
-                                {
-                                    _configRetryCount++;
-                                    Debug.WriteLine("PDM reported checksum failure for config data. Retrying...");
-                                    LoggingService.AddLog("There was a problem saving settings. Trying again...");
-                                    SendConfig();
-                                }
-                                else
-                                {
-                                    Debug.WriteLine("PDM reported checksum failure for config data. Aborting send.");
-                                    LoggingService.AddLog("Settings could not be saved. Please try again.");
-                                    sendingConfig = false;
-                                    saveToEEPROM = false;
-                                    parameterIndex = channelIndex = analogueIndex = settingIndex = digitalIndex = 0;
-                                    _configRetryCount = 0;
-                                    _configSendStopwatch.Stop();
-                                    ConfigurationSaveCompleted?.Invoke(this, new ConfigurationSaveCompletedEventArgs(false));
-                                }
-                                break;
-                            case Constants.COMMAND_ID_SAVECHANGES:
-                                if (!sendingConfig && _standaloneCommandAckId == lastCommandSent)
-                                {
-                                    _standaloneCommandAckTcs?.TrySetResult(false);
-                                    break;
-                                }
-
-                                Debug.WriteLine("SAVE FAIL");
-                                if (_saveRetryCount < 1)
-                                {
-                                    _saveRetryCount++;
-                                    Debug.WriteLine("PDM reported checksum failure when saving changes. Retrying...");
-                                    LoggingService.AddLog("There was a problem saving settings. Trying again...");
-                                    SendCommand(Constants.COMMAND_ID_SAVECHANGES);
-                                }
-                                else
-                                {
-                                    Debug.WriteLine("PDM reported checksum failure when saving changes. Try again.");
-                                    LoggingService.AddLog("Settings could not be saved. Please try again.");
-                                    parameterIndex = channelIndex = analogueIndex = settingIndex = digitalIndex = 0;
-                                    _saveRetryCount = 0;
-                                    _configSendStopwatch.Stop();
-                                    ConfigurationSaveCompleted?.Invoke(this, new ConfigurationSaveCompletedEventArgs(false));
-                                }
-
-                                break;
-
                             case Constants.COMMAND_ID_LOG_OPEN:
                                 _logOpenTcs?.TrySetResult(false);
                                 LogProtocolDebug("RX LOG_OPEN CHECKSUM_FAIL");
@@ -3369,10 +5461,6 @@ public class SerialPortService
                             case Constants.COMMAND_ID_LOG_CHUNK:
                                 _logChunkTcs?.TrySetCanceled();
                                 LogProtocolDebug("RX LOG_CHUNK CHECKSUM_FAIL");
-                                break;
-
-                            case Constants.COMMAND_ID_LOG_RESET:
-                                _logResetTcs?.TrySetResult(false);
                                 break;
 
                             case Constants.COMMAND_ID_SET_RTC:
@@ -3395,6 +5483,11 @@ public class SerialPortService
             {
                 // Do nothing. Disconnect was probably hit
             }
+        }
+
+        if (sawFramedPacketBoundary || _packetReady || _serialPort.IsOpen && _serialPort.BytesToRead > 0)
+        {
+            _parseSignal.Set();
         }
     }
 
@@ -3458,15 +5551,134 @@ public class SerialPortService
     }
     public void Close()
     {
-        if (_serialPort.IsOpen)
+        if (_isDisposed)
         {
-            ResetLogReceiveState(discardSerialInput: true);
-            _serialPort.Close();
+            return;
+        }
+
+        lock (_serialLifecycleLock)
+        {
+            _isShuttingDown = true;
+            _suspendDataReceivedReads = true;
+
+            lock (_serialReceiveLock)
+            {
+                if (_serialPort.IsOpen)
+                {
+                    ResetLogReceiveState(discardSerialInput: true);
+                    _serialPort.Close();
+                }
+
+                UnsubscribeDataReceived_NoLock();
+            }
         }
     }
+
+    public void Dispose()
+    {
+        if (_isDisposed)
+        {
+            return;
+        }
+
+        _isDisposed = true;
+
+        lock (_serialLifecycleLock)
+        {
+            _isShuttingDown = true;
+            _suspendDataReceivedReads = true;
+
+            try
+            {
+                _processTimer.Stop();
+            }
+            catch
+            {
+            }
+
+            lock (_serialReceiveLock)
+            {
+                try
+                {
+                    if (_serialPort.IsOpen)
+                    {
+                        ResetLogReceiveState(discardSerialInput: true);
+                        _serialPort.Close();
+                    }
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    UnsubscribeDataReceived_NoLock();
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        _parseLoopCts.Cancel();
+        _parseSignal.Set();
+        try
+        {
+            _parseLoopTask?.Wait(500);
+        }
+        catch
+        {
+        }
+
+        _processTimer.Dispose();
+
+        try
+        {
+            _serialPort.Dispose();
+        }
+        catch
+        {
+        }
+
+        _parseSignal.Dispose();
+        _parseLoopCts.Dispose();
+
+        _logChunkRequestLock.Dispose();
+
+        DataUpdated = null;
+        ConfigurationSaved = null;
+        ConfigurationSaveCompleted = null;
+    }
+
     public void Send(string text) => _serialPort.WriteLine(text);
 
     public void StartSendConfig()
+    {
+        lock (_configurationSaveLock)
+        {
+            if (_configurationSaveActive)
+                throw new InvalidOperationException("A controller settings save is already in progress.");
+            if (!_serialPort.IsOpen)
+                throw new IOException("The controller serial connection is closed.");
+            if (_secureSession.PinEnabled && !_secureSession.IsAuthorized)
+                throw new InvalidOperationException("Unlock the controller before saving settings.");
+            _configurationPreviousPollingSuspended = _suspendLiveRequestPolling;
+            _suspendLiveRequestPolling = true;
+            _configurationSaveActive = true;
+            _configurationCommandSentTick = Environment.TickCount64;
+            try
+            {
+                StartSendConfigCore();
+            }
+            catch
+            {
+                FailConfigurationSave();
+                throw;
+            }
+        }
+    }
+
+    private void StartSendConfigCore()
     {
         sendingConfig = true;
         settingIndex = 1;
@@ -3486,12 +5698,77 @@ public class SerialPortService
         LoggingService.AddLog("Saving settings to PDM...");
     }
 
+    private static bool IsPublicRawCommand(char commandId)
+        => commandId == Constants.COMMAND_ID_BEGIN ||
+           commandId == Constants.COMMAND_ID_SKIP ||
+           commandId == Constants.COMMAND_ID_FW_VER ||
+           commandId == Constants.COMMAND_ID_BUILD_DATE;
+
+    private bool ShouldSendCommandOverSecureEnvelope(char commandId)
+        => _secureSession.IsSessionOpen &&
+           _secureSession.IsAuthorized &&
+           !IsPublicRawCommand(commandId);
+
+    private byte[] BuildCommandFrame(byte[] commandPayload)
+    {
+        char commandId = (char)commandPayload[0];
+        if (_secureSession.IsSessionOpen && !IsPublicRawCommand(commandId) && !_secureSession.IsAuthorized)
+        {
+            throw new InvalidOperationException("Unlock the PDM before sending this command.");
+        }
+
+        if (!ShouldSendCommandOverSecureEnvelope(commandId))
+        {
+            return commandPayload;
+        }
+
+        if (commandPayload.Length > Constants.SECURE_ENVELOPE_MAX_PLAINTEXT_BYTES)
+        {
+            throw new InvalidOperationException("The command exceeds the PDM's encrypted packet size limit.");
+        }
+
+        return EncryptSecureEnvelope(
+            commandPayload,
+            _secureSession.ClientToDeviceKey,
+            _secureSession.SessionId,
+            _secureSession.TxSequence++);
+    }
+
     private void SendCommand(char commandId)
+    {
+        lock (_configurationSaveLock)
+        {
+            if (_configurationSaveActive && commandId != Constants.COMMAND_ID_SAVECHANGES)
+                return;
+            if (_configurationSaveActive)
+            {
+                _pendingConfigurationCommand = commandId;
+                _configurationCommandSentTick = Environment.TickCount64;
+            }
+            SendCommandCore(commandId);
+        }
+    }
+
+    private void SendCommandCore(char commandId)
     {
         if (_serialPort.IsOpen)
         {
-            byte[] data = new byte[1];
-            data[0] = (byte)commandId;
+            bool commandRequiresAuthorization =
+                _secureSession.IsSessionOpen &&
+                _secureSession.PinEnabled &&
+                !_secureSession.IsAuthorized &&
+                !IsPublicRawCommand(commandId);
+
+            if (commandRequiresAuthorization)
+            {
+                LogProtocolDebug($"TX block cmd={(byte)commandId}('{commandId}') sessionOpen={_secureSession.IsSessionOpen} pinEnabled={_secureSession.PinEnabled} auth={_secureSession.IsAuthorized}");
+                return;
+            }
+
+            bool sendEncrypted = ShouldSendCommandOverSecureEnvelope(commandId);
+            uint sequenceBefore = _secureSession.TxSequence;
+            byte[] data = BuildCommandFrame([(byte)commandId]);
+
             _serialPort.Write(data, 0, data.Length);
             lastCommandSent = commandId;
             if (commandId == Constants.COMMAND_ID_BEGIN)
@@ -3513,6 +5790,10 @@ public class SerialPortService
             if (commandId == Constants.COMMAND_ID_MATH_STATUS)
             {
                 _lastMathStatusRequestSentTick = Environment.TickCount64;
+            }
+            if (commandId == Constants.COMMAND_ID_CUSTOM_CAN_STATUS)
+            {
+                _lastCustomCanStatusRequestSentTick = Environment.TickCount64;
             }
         }
     }
@@ -3541,7 +5822,14 @@ public class SerialPortService
 
         if (UpdateStaticData)
         {
-            if (_lastStaticRequestSentTick == 0 || (now - _lastStaticRequestSentTick) >= StaticSnapshotRetryIntervalMs)
+            // Initial static snapshot hydrates the full settings UI. Keep retries
+            // aligned with the comms timer cadence so a missed first request does
+            // not add multi-second startup latency.
+            int staticRetryIntervalMs = HasLoadedStaticSnapshot
+                ? StaticSnapshotRetryIntervalMs
+                : Math.Min(StaticSnapshotRetryIntervalMs, 250);
+
+            if (_lastStaticRequestSentTick == 0 || (now - _lastStaticRequestSentTick) >= staticRetryIntervalMs)
             {
                 SendCommand(Constants.COMMAND_ID_REQUEST_STATIC);
             }
@@ -3549,7 +5837,13 @@ public class SerialPortService
             return;
         }
 
+        if (!HasLoadedStaticSnapshot)
+        {
+            return;
+        }
+
         UpdateDigitalInputStatusSupport(now, idleThresholdMs);
+        UpdateCustomCanStatusSupport(now, idleThresholdMs);
 
         long lastActivityTick = Math.Max(_lastLiveRequestSentTick, _lastLiveStatusFrameTick);
 
@@ -3589,6 +5883,19 @@ public class SerialPortService
                 SendCommand(Constants.COMMAND_ID_MATH_STATUS);
             }
         }
+
+        if (_customCanStatusPollingEnabled && _customCanStatusSupportState != CustomCanStatusSupportState.Unsupported)
+        {
+            int customCanPollIntervalMs = _customCanStatusSupportState == CustomCanStatusSupportState.Supported
+                ? Math.Max(idleThresholdMs * 3, idleThresholdMs)
+                : Math.Min(idleThresholdMs, 500);
+
+            if (_lastCustomCanStatusRequestSentTick == 0 ||
+                (now - _lastCustomCanStatusRequestSentTick) >= customCanPollIntervalMs)
+            {
+                SendCommand(Constants.COMMAND_ID_CUSTOM_CAN_STATUS);
+            }
+        }
     }
 
     public void RequestStaticSnapshot()
@@ -3602,6 +5909,69 @@ public class SerialPortService
         SendCommand(Constants.COMMAND_ID_REQUEST_STATIC);
     }
 
+    public void RequestCustomCanSnapshot()
+    {
+        if (!_serialPort.IsOpen || sendingConfig)
+        {
+            return;
+        }
+
+        SendCommand(Constants.COMMAND_ID_CUSTOM_CAN_STATUS);
+    }
+
+    public async Task<bool> RequestCustomCanSnapshotAsync(int timeoutMs = 2500, int attempts = 2)
+    {
+        if (!_serialPort.IsOpen || sendingConfig)
+        {
+            return false;
+        }
+
+        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
+        _suspendLiveRequestPolling = true;
+        try
+        {
+            for (int attempt = 0; attempt < Math.Max(1, attempts); attempt++)
+            {
+                // Give any in-flight live frame time to finish. Replies are dispatched by command ID, so an
+                // interleaved live frame is harmless; discarding input here would break secure-session sequencing.
+                await Task.Delay(StandaloneCommandDrainDelayMs);
+                if (!_serialPort.IsOpen || sendingConfig)
+                {
+                    return false;
+                }
+
+                var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _customCanSnapshotTcs = tcs;
+                try
+                {
+                    SendCommand(Constants.COMMAND_ID_CUSTOM_CAN_STATUS);
+                    Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
+                    if (completedTask == tcs.Task && await tcs.Task)
+                    {
+                        return true;
+                    }
+                }
+                finally
+                {
+                    if (_customCanSnapshotTcs == tcs)
+                    {
+                        _customCanSnapshotTcs = null;
+                    }
+                }
+            }
+
+            return false;
+        }
+        finally
+        {
+            _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
+            if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
+            {
+                EnsureLiveRequestPolling();
+            }
+        }
+    }
+
     public void SetMathStatusPollingChannel(int channelIndex)
     {
         _mathStatusPollingChannelIndex = channelIndex >= 0 && channelIndex < Constants.NUM_OUTPUT_CHANNELS
@@ -3609,30 +5979,96 @@ public class SerialPortService
             : -1;
     }
 
+    public void SetCustomCanStatusPollingEnabled(bool enabled)
+    {
+        _customCanStatusPollingEnabled = enabled;
+    }
+
+    public bool BeginCustomCanConfigSession()
+    {
+        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
+        _suspendLiveRequestPolling = true;
+        return previousSuspendLiveRequestPolling;
+    }
+
+    public void EndCustomCanConfigSession(bool previousSuspendLiveRequestPolling)
+    {
+        _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
+        if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
+        {
+            EnsureLiveRequestPolling();
+        }
+    }
+
     private void SendCommandWithByte(char commandId, byte value)
     {
-        if (_serialPort.IsOpen)
+        if (!_serialPort.IsOpen)
         {
-            byte[] data = new byte[2];
-            data[0] = (byte)commandId;
-            data[1] = value;
-            _serialPort.Write(data, 0, data.Length);
-            lastCommandSent = commandId;
+            return;
         }
+
+        bool commandRequiresAuthorization =
+            _secureSession.IsSessionOpen &&
+            _secureSession.PinEnabled &&
+            !_secureSession.IsAuthorized &&
+            !IsPublicRawCommand(commandId);
+
+        if (commandRequiresAuthorization)
+        {
+            LogProtocolDebug($"TX block cmd={(byte)commandId}('{commandId}') sessionOpen={_secureSession.IsSessionOpen} pinEnabled={_secureSession.PinEnabled} auth={_secureSession.IsAuthorized}");
+            return;
+        }
+
+        bool sendEncrypted = ShouldSendCommandOverSecureEnvelope(commandId);
+        byte[] commandPayload = [ (byte)commandId, value ];
+        byte[] data = sendEncrypted
+            ? EncryptSecureEnvelope(
+                commandPayload,
+                _secureSession.ClientToDeviceKey,
+                _secureSession.SessionId,
+                _secureSession.TxSequence++)
+            : commandPayload;
+
+        _serialPort.Write(data, 0, data.Length);
+        lastCommandSent = commandId;
     }
 
     private void SendCommandWithUInt32(char commandId, byte firstValue, uint value)
     {
-        if (_serialPort.IsOpen)
+        if (!_serialPort.IsOpen)
         {
-            byte[] data = new byte[6];
-            data[0] = (byte)commandId;
-            data[1] = firstValue;
-            byte[] valueBytes = BitConverter.GetBytes(value);
-            Array.Copy(valueBytes, 0, data, 2, valueBytes.Length);
-            _serialPort.Write(data, 0, data.Length);
-            lastCommandSent = commandId;
+            return;
         }
+
+        bool commandRequiresAuthorization =
+            _secureSession.IsSessionOpen &&
+            _secureSession.PinEnabled &&
+            !_secureSession.IsAuthorized &&
+            !IsPublicRawCommand(commandId);
+
+        if (commandRequiresAuthorization)
+        {
+            LogProtocolDebug($"TX block cmd={(byte)commandId}('{commandId}') sessionOpen={_secureSession.IsSessionOpen} pinEnabled={_secureSession.PinEnabled} auth={_secureSession.IsAuthorized}");
+            return;
+        }
+
+        byte[] commandPayload = new byte[6];
+        commandPayload[0] = (byte)commandId;
+        commandPayload[1] = firstValue;
+        byte[] valueBytes = BitConverter.GetBytes(value);
+        Array.Copy(valueBytes, 0, commandPayload, 2, valueBytes.Length);
+
+        bool sendEncrypted = ShouldSendCommandOverSecureEnvelope(commandId);
+        byte[] data = sendEncrypted
+            ? EncryptSecureEnvelope(
+                commandPayload,
+                _secureSession.ClientToDeviceKey,
+                _secureSession.SessionId,
+                _secureSession.TxSequence++)
+            : commandPayload;
+
+        _serialPort.Write(data, 0, data.Length);
+        lastCommandSent = commandId;
     }
 
     private void SendCommandWithPayload(char commandId, byte[] payload, int payloadLength)
@@ -3642,11 +6078,33 @@ public class SerialPortService
             return;
         }
 
-        byte[] data = new byte[payloadLength + 3];
-        data[0] = (byte)commandId;
-        data[1] = (byte)(payloadLength & 0xFF);
-        data[2] = (byte)((payloadLength >> 8) & 0xFF);
-        Array.Copy(payload, 0, data, 3, payloadLength);
+        bool commandRequiresAuthorization =
+            _secureSession.IsSessionOpen &&
+            _secureSession.PinEnabled &&
+            !_secureSession.IsAuthorized &&
+            !IsPublicRawCommand(commandId);
+
+        if (commandRequiresAuthorization)
+        {
+            LogProtocolDebug($"TX block cmd={(byte)commandId}('{commandId}') sessionOpen={_secureSession.IsSessionOpen} pinEnabled={_secureSession.PinEnabled} auth={_secureSession.IsAuthorized}");
+            return;
+        }
+
+        byte[] commandPayload = new byte[payloadLength + 3];
+        commandPayload[0] = (byte)commandId;
+        commandPayload[1] = (byte)(payloadLength & 0xFF);
+        commandPayload[2] = (byte)((payloadLength >> 8) & 0xFF);
+        Array.Copy(payload, 0, commandPayload, 3, payloadLength);
+
+        bool sendEncrypted = ShouldSendCommandOverSecureEnvelope(commandId);
+        byte[] data = sendEncrypted
+            ? EncryptSecureEnvelope(
+                commandPayload,
+                _secureSession.ClientToDeviceKey,
+                _secureSession.SessionId,
+                _secureSession.TxSequence++)
+            : commandPayload;
+
         _serialPort.Write(data, 0, data.Length);
         lastCommandSent = commandId;
     }
@@ -3658,22 +6116,41 @@ public class SerialPortService
             return;
         }
 
-        byte[] data = new byte[payload.Length + 1];
-        data[0] = (byte)commandId;
-        Array.Copy(payload, 0, data, 1, payload.Length);
+        bool commandRequiresAuthorization =
+            _secureSession.IsSessionOpen &&
+            _secureSession.PinEnabled &&
+            !_secureSession.IsAuthorized &&
+            !IsPublicRawCommand(commandId);
+
+        if (commandRequiresAuthorization)
+        {
+            LogProtocolDebug($"TX block cmd={(byte)commandId}('{commandId}') sessionOpen={_secureSession.IsSessionOpen} pinEnabled={_secureSession.PinEnabled} auth={_secureSession.IsAuthorized}");
+            return;
+        }
+
+        byte[] commandPayload = new byte[payload.Length + 1];
+        commandPayload[0] = (byte)commandId;
+        Array.Copy(payload, 0, commandPayload, 1, payload.Length);
+
+        bool sendEncrypted = ShouldSendCommandOverSecureEnvelope(commandId);
+        byte[] data = sendEncrypted
+            ? EncryptSecureEnvelope(
+                commandPayload,
+                _secureSession.ClientToDeviceKey,
+                _secureSession.SessionId,
+                _secureSession.TxSequence++)
+            : commandPayload;
+
         _serialPort.Write(data, 0, data.Length);
         lastCommandSent = commandId;
     }
 
-    private void SendStandaloneSystemConfigCommand(byte parameterIndex, byte[] payload)
+    private static byte[] BuildStandaloneConfigPacket(byte configType, byte parameterIndex, byte dataIndex, byte[] payload)
     {
-        if (!_serialPort.IsOpen)
-        {
-            return;
-        }
+        payload ??= [];
 
         int checksum = 0;
-        var packet = new List<byte>(payload.Length + 12);
+        var packet = new List<byte>(payload.Length + 11);
 
         void AddPacketByte(byte value, bool includeInChecksum)
         {
@@ -3686,9 +6163,9 @@ public class SerialPortService
 
         AddPacketByte(Constants.SERIAL_HEADER1, true);
         AddPacketByte(Constants.SERIAL_HEADER2, true);
-        AddPacketByte(2, true);
+        AddPacketByte(configType, true);
         AddPacketByte(parameterIndex, true);
-        AddPacketByte(0, true);
+        AddPacketByte(dataIndex, true);
 
         foreach (byte value in payload)
         {
@@ -3701,8 +6178,211 @@ public class SerialPortService
         AddPacketByte((byte)((checksum >> 8) & 0xFF), false);
         AddPacketByte((byte)((checksum >> 16) & 0xFF), false);
         AddPacketByte((byte)((checksum >> 24) & 0xFF), false);
+        return packet.ToArray();
+    }
 
-        SendCommandWithRawPayload(Constants.COMMAND_ID_NEWCONFIG, packet.ToArray());
+    private void SendStandaloneSystemConfigCommand(byte parameterIndex, byte[] payload)
+    {
+        if (!_serialPort.IsOpen)
+        {
+            return;
+        }
+
+        byte[] packet = BuildStandaloneConfigPacket(2, parameterIndex, 0, payload);
+        SendCommandWithRawPayload(Constants.COMMAND_ID_NEWCONFIG, packet);
+    }
+
+    private void SendStandaloneCustomCanConfigCommand(byte configType, byte parameterIndex, byte dataIndex, byte[] payload)
+    {
+        if (!_serialPort.IsOpen)
+        {
+            return;
+        }
+
+        byte[] packet = BuildStandaloneConfigPacket(configType, parameterIndex, dataIndex, payload);
+        SendCommandWithRawPayload(Constants.COMMAND_ID_NEWCONFIG, packet);
+    }
+
+    private static bool TryBuildCustomCanPayload(byte configType, int parameterIndex, uint value, out byte[] payload)
+    {
+        payload = [];
+
+        // Firmware-writable parameters only: message param 4 (status) and signal
+        // params 6/7 (live value/status) are read-only and rejected by the controller.
+        bool validMessageParameter = configType == Constants.CONFIG_DATA_CUSTOM_CAN_MESSAGE &&
+                                     parameterIndex is 0 or 1 or 2 or 3 or Constants.CUSTOM_CAN_MESSAGE_PARAM_TX_TRIGGER;
+        bool validSignalParameter = configType == Constants.CONFIG_DATA_CUSTOM_CAN_SIGNAL &&
+                                    parameterIndex is 0 or 1 or 2 or 3 or 4 or 5 or Constants.CUSTOM_CAN_SIGNAL_PARAM_VALUE_SOURCE;
+
+        if (!validMessageParameter && !validSignalParameter)
+        {
+            return false;
+        }
+
+        payload = BitConverter.GetBytes(value);
+        return true;
+    }
+
+    public async Task<bool> WriteCustomCanMessageParameterAsync(int messageIndex, int parameterIndex, uint value, int timeoutMs = 2500)
+    {
+        if (messageIndex < 0 || messageIndex >= Constants.MAX_CUSTOM_CAN_MESSAGES ||
+            parameterIndex < 0 || parameterIndex > Constants.LAST_CUSTOM_CAN_MESSAGE_PARAM_INDEX)
+        {
+            LastCustomCanWriteError = $"Custom CAN message write input out of range (slot={messageIndex + 1}, parameter={parameterIndex}, value={value}).";
+            return false;
+        }
+
+        if (!TryBuildCustomCanPayload(Constants.CONFIG_DATA_CUSTOM_CAN_MESSAGE, parameterIndex, value, out byte[] payload))
+        {
+            LastCustomCanWriteError = $"Custom CAN message payload encode failed (slot={messageIndex + 1}, parameter={parameterIndex}, value={value}).";
+            return false;
+        }
+
+        bool accepted = false;
+        for (int attempt = 0; attempt < 2 && !accepted; attempt++)
+        {
+            accepted = await AwaitStandaloneAckAsync(
+                Constants.COMMAND_ID_NEWCONFIG,
+                () => SendStandaloneCustomCanConfigCommand(Constants.CONFIG_DATA_CUSTOM_CAN_MESSAGE, (byte)parameterIndex, (byte)messageIndex, payload),
+                timeoutMs,
+                discardBeforeSend: true);
+
+            if (!accepted && attempt == 0 && _serialPort.IsOpen)
+            {
+                await Task.Delay(StandaloneCommandDrainDelayMs);
+            }
+        }
+
+        if (!accepted)
+        {
+            LastCustomCanWriteError = $"Controller rejected Custom CAN message write (slot={messageIndex + 1}, parameter={parameterIndex}, value={value}, payload={BitConverter.ToString(payload)}).";
+            return false;
+        }
+
+        LastCustomCanWriteError = null;
+        return true;
+    }
+
+    public async Task<bool> WriteCustomCanSignalParameterAsync(int signalIndex, int parameterIndex, uint value, int timeoutMs = 2500)
+    {
+        if (signalIndex < 0 || signalIndex >= Constants.MAX_CUSTOM_CAN_SIGNALS ||
+            parameterIndex < 0 || parameterIndex > Constants.LAST_CUSTOM_CAN_SIGNAL_PARAM_INDEX)
+        {
+            LastCustomCanWriteError = $"Custom CAN signal write input out of range (slot={signalIndex + 1}, parameter={parameterIndex}, value={value}).";
+            return false;
+        }
+
+        if (!TryBuildCustomCanPayload(Constants.CONFIG_DATA_CUSTOM_CAN_SIGNAL, parameterIndex, value, out byte[] payload))
+        {
+            LastCustomCanWriteError = $"Custom CAN signal payload encode failed (slot={signalIndex + 1}, parameter={parameterIndex}, value={value}).";
+            return false;
+        }
+
+        bool accepted = false;
+        for (int attempt = 0; attempt < 2 && !accepted; attempt++)
+        {
+            accepted = await AwaitStandaloneAckAsync(
+                Constants.COMMAND_ID_NEWCONFIG,
+                () => SendStandaloneCustomCanConfigCommand(Constants.CONFIG_DATA_CUSTOM_CAN_SIGNAL, (byte)parameterIndex, (byte)signalIndex, payload),
+                timeoutMs,
+                discardBeforeSend: true);
+
+            if (!accepted && attempt == 0 && _serialPort.IsOpen)
+            {
+                await Task.Delay(StandaloneCommandDrainDelayMs);
+            }
+        }
+
+        if (!accepted)
+        {
+            LastCustomCanWriteError = $"Controller rejected Custom CAN signal write (slot={signalIndex + 1}, parameter={parameterIndex}, value={value}, payload={BitConverter.ToString(payload)}).";
+            return false;
+        }
+
+        LastCustomCanWriteError = null;
+        return true;
+    }
+
+    /// <summary>Packs a message exactly like firmware CustomCANMessageConfig (packed, little-endian).</summary>
+    public static byte[] BuildCustomCanMessageRecord(uint id, ushort timeoutMs, byte dlc, byte flags, byte txTrigger)
+    {
+        byte[] record = new byte[Constants.CUSTOM_CAN_MESSAGE_RECORD_SIZE];
+        BinaryPrimitives.WriteUInt32LittleEndian(record.AsSpan(0, 4), id);
+        BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(4, 2), timeoutMs);
+        record[6] = dlc;
+        record[7] = flags;
+        record[8] = txTrigger;
+        return record;
+    }
+
+    /// <summary>Packs a signal exactly like firmware CustomCANSignalConfig (packed, little-endian).</summary>
+    public static byte[] BuildCustomCanSignalRecord(byte messageIndex, byte startBit, byte bitLength, byte flags, float factor, float offset, byte valueSource)
+    {
+        byte[] record = new byte[Constants.CUSTOM_CAN_SIGNAL_RECORD_SIZE];
+        record[0] = messageIndex;
+        record[1] = startBit;
+        record[2] = bitLength;
+        record[3] = flags;
+        BinaryPrimitives.WriteSingleLittleEndian(record.AsSpan(4, 4), factor);
+        BinaryPrimitives.WriteSingleLittleEndian(record.AsSpan(8, 4), offset);
+        record[12] = valueSource;
+        return record;
+    }
+
+    /// <summary>
+    /// Writes a whole message slot in one packet. The controller validates the complete record at once,
+    /// so no transient half-updated state can be rejected or left behind.
+    /// </summary>
+    public Task<bool> WriteCustomCanMessageRecordAsync(int messageIndex, uint id, ushort timeoutMs, byte dlc, byte flags, byte txTrigger, int timeoutMsAck = 2500)
+    {
+        if (messageIndex < 0 || messageIndex >= Constants.MAX_CUSTOM_CAN_MESSAGES)
+        {
+            LastCustomCanWriteError = $"Custom CAN message record slot out of range (slot={messageIndex + 1}).";
+            return Task.FromResult(false);
+        }
+
+        byte[] record = BuildCustomCanMessageRecord(id, timeoutMs, dlc, flags, txTrigger);
+        return WriteCustomCanRecordAsync(Constants.CONFIG_DATA_CUSTOM_CAN_MESSAGE, messageIndex, record, "message", timeoutMsAck);
+    }
+
+    /// <summary>Writes a whole signal slot in one packet (see <see cref="WriteCustomCanMessageRecordAsync"/>).</summary>
+    public Task<bool> WriteCustomCanSignalRecordAsync(int signalIndex, byte messageIndex, byte startBit, byte bitLength, byte flags, float factor, float offset, byte valueSource, int timeoutMsAck = 2500)
+    {
+        if (signalIndex < 0 || signalIndex >= Constants.MAX_CUSTOM_CAN_SIGNALS)
+        {
+            LastCustomCanWriteError = $"Custom CAN signal record slot out of range (slot={signalIndex + 1}).";
+            return Task.FromResult(false);
+        }
+
+        byte[] record = BuildCustomCanSignalRecord(messageIndex, startBit, bitLength, flags, factor, offset, valueSource);
+        return WriteCustomCanRecordAsync(Constants.CONFIG_DATA_CUSTOM_CAN_SIGNAL, signalIndex, record, "signal", timeoutMsAck);
+    }
+
+    private async Task<bool> WriteCustomCanRecordAsync(byte configType, int slotIndex, byte[] record, string kind, int timeoutMs)
+    {
+        bool accepted = false;
+        for (int attempt = 0; attempt < 2 && !accepted; attempt++)
+        {
+            accepted = await AwaitStandaloneAckAsync(
+                Constants.COMMAND_ID_NEWCONFIG,
+                () => SendStandaloneCustomCanConfigCommand(configType, Constants.CUSTOM_CAN_PARAM_RECORD, (byte)slotIndex, record),
+                timeoutMs,
+                discardBeforeSend: true);
+
+            if (!accepted && attempt == 0 && _serialPort.IsOpen)
+            {
+                await Task.Delay(StandaloneCommandDrainDelayMs);
+            }
+        }
+
+        if (!accepted)
+        {
+            LastCustomCanWriteError = $"Controller rejected Custom CAN {kind} record (slot={slotIndex + 1}, payload={BitConverter.ToString(record)}).";
+            return false;
+        }
+
+        LastCustomCanWriteError = null;
+        return true;
     }
 
     private async Task<bool> AwaitStandaloneAckAsync(char commandId, Action sendAction, int timeoutMs, bool discardBeforeSend = true, int preCommandDelayMs = StandaloneCommandDrainDelayMs)
@@ -3801,35 +6481,51 @@ public class SerialPortService
             return null;
         }
 
-        _suspendLiveRequestPolling = true;
-        ResetLogReceiveState(discardSerialInput: true);
-        var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _firmwareVersionTcs = tcs;
-
+        await _standaloneRequestLock.WaitAsync();
         try
         {
-            SendCommand(Constants.COMMAND_ID_FW_VER);
-            Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
-            if (completedTask != tcs.Task)
+            bool preserveSecureSession = _secureSession.IsSessionOpen;
+            _suspendLiveRequestPolling = true;
+            if (!preserveSecureSession)
             {
-                return null;
+                ResetLogReceiveState(discardSerialInput: true);
             }
+            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _firmwareVersionTcs = tcs;
 
-            return await tcs.Task;
+            try
+            {
+                SendCommand(Constants.COMMAND_ID_FW_VER);
+                Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
+                if (completedTask != tcs.Task)
+                {
+                    return null;
+                }
+
+                return await tcs.Task;
+            }
+            finally
+            {
+                if (_firmwareVersionTcs == tcs)
+                {
+                    _firmwareVersionTcs = null;
+                }
+
+                if (!preserveSecureSession)
+                {
+                    ResetLogReceiveState(discardSerialInput: false);
+                }
+
+                _suspendLiveRequestPolling = false;
+                if (_serialPort.IsOpen && !sendingConfig)
+                {
+                    EnsureLiveRequestPolling();
+                }
+            }
         }
         finally
         {
-            if (_firmwareVersionTcs == tcs)
-            {
-                _firmwareVersionTcs = null;
-            }
-
-            ResetLogReceiveState(discardSerialInput: false);
-            _suspendLiveRequestPolling = false;
-            if (_serialPort.IsOpen && !sendingConfig)
-            {
-                SendCommand(Constants.COMMAND_ID_REQUEST);
-            }
+            _standaloneRequestLock.Release();
         }
     }
 
@@ -3840,8 +6536,12 @@ public class SerialPortService
             return null;
         }
 
+        bool preserveSecureSession = _secureSession.IsSessionOpen;
         _suspendLiveRequestPolling = true;
-        ResetLogReceiveState(discardSerialInput: true);
+        if (!preserveSecureSession)
+        {
+            ResetLogReceiveState(discardSerialInput: true);
+        }
         var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         _buildDateTcs = tcs;
 
@@ -3863,11 +6563,15 @@ public class SerialPortService
                 _buildDateTcs = null;
             }
 
-            ResetLogReceiveState(discardSerialInput: false);
+            if (!preserveSecureSession)
+            {
+                ResetLogReceiveState(discardSerialInput: false);
+            }
+
             _suspendLiveRequestPolling = false;
             if (_serialPort.IsOpen && !sendingConfig)
             {
-                SendCommand(Constants.COMMAND_ID_REQUEST);
+                EnsureLiveRequestPolling();
             }
         }
     }
@@ -3880,8 +6584,12 @@ public class SerialPortService
         }
 
         bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
+        bool preserveSecureSession = _secureSession.IsSessionOpen;
         _suspendLiveRequestPolling = true;
-        ResetLogReceiveState(discardSerialInput: true);
+        if (!preserveSecureSession)
+        {
+            ResetLogReceiveState(discardSerialInput: true);
+        }
         var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         _firmwareDiagnosticTcs = tcs;
 
@@ -3912,6 +6620,24 @@ public class SerialPortService
         }
     }
 
+    private void ResetStandaloneReceiveState(bool discardSerialInput)
+    {
+        if (!_secureSession.IsSessionOpen)
+        {
+            ResetLogReceiveState(discardSerialInput);
+            return;
+        }
+
+        // Keep partial encrypted frames and their sequence numbers intact.
+        lock (_bufferLock)
+        {
+            receivedDataBuffer.Clear();
+        }
+
+        foundTrailer1 = false;
+        _packetReady = false;
+    }
+
     public async Task<string?> RequestCellularTestAsync(CellularParameters? cellularSettings = null, int timeoutMs = 3000)
     {
         if (!_serialPort.IsOpen)
@@ -3919,9 +6645,10 @@ public class SerialPortService
             return null;
         }
 
+        await _standaloneRequestLock.WaitAsync();
         bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
         _suspendLiveRequestPolling = true;
-        ResetLogReceiveState(discardSerialInput: true);
+        ResetStandaloneReceiveState(discardSerialInput: true);
         var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         _cellularTestTcs = tcs;
 
@@ -3943,12 +6670,15 @@ public class SerialPortService
                 _cellularTestTcs = null;
             }
 
-            ResetLogReceiveState(discardSerialInput: false);
+            ResetStandaloneReceiveState(discardSerialInput: false);
+
             _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
             if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
             {
                 SendCommand(Constants.COMMAND_ID_REQUEST);
             }
+
+            _standaloneRequestLock.Release();
         }
     }
 
@@ -3959,9 +6689,10 @@ public class SerialPortService
             return null;
         }
 
+        await _standaloneRequestLock.WaitAsync();
         bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
         _suspendLiveRequestPolling = true;
-        ResetLogReceiveState(discardSerialInput: true);
+        ResetStandaloneReceiveState(discardSerialInput: true);
         var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         _openRemoteProvisioningTcs = tcs;
 
@@ -3971,7 +6702,7 @@ public class SerialPortService
             Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
             if (completedTask != tcs.Task)
             {
-                return null;
+                throw new TimeoutException("The PDM did not reply to the registration request within the timeout. Check the controller connection and cellular diagnostics before retrying.");
             }
 
             return await tcs.Task;
@@ -3983,16 +6714,27 @@ public class SerialPortService
                 _openRemoteProvisioningTcs = null;
             }
 
-            ResetLogReceiveState(discardSerialInput: false);
+            ResetStandaloneReceiveState(discardSerialInput: false);
             _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
             if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
             {
                 SendCommand(Constants.COMMAND_ID_REQUEST);
             }
+
+            _standaloneRequestLock.Release();
         }
     }
 
     private void SendOpenRemoteProvisioningCommand(CellularParameters cellularSettings, string provisioningRequestJson)
+    {
+        byte[] data = BuildOpenRemoteProvisioningCommand(cellularSettings, provisioningRequestJson);
+        LoggingService.AddLog("Sending PDM registration request.",
+            details: $"transport={(ShouldSendCommandOverSecureEnvelope(Constants.COMMAND_ID_OPENREMOTE_PROVISION) ? "encrypted" : "legacy")}; pinEnabled={_secureSession.PinEnabled}; frameBytes={data.Length}");
+        _serialPort.Write(data, 0, data.Length);
+        lastCommandSent = Constants.COMMAND_ID_OPENREMOTE_PROVISION;
+    }
+
+    private byte[] BuildOpenRemoteProvisioningCommand(CellularParameters cellularSettings, string provisioningRequestJson)
     {
         cellularSettings.EnsurePublishTopicFromOpenRemoteFields();
         byte[] requestBytes = Encoding.ASCII.GetBytes(provisioningRequestJson.Trim());
@@ -4034,8 +6776,7 @@ public class SerialPortService
         byte[] commandAndPayload = new byte[payload.Length + 1];
         commandAndPayload[0] = (byte)Constants.COMMAND_ID_OPENREMOTE_PROVISION;
         Array.Copy(payload, 0, commandAndPayload, 1, payload.Length);
-        _serialPort.Write(commandAndPayload, 0, commandAndPayload.Length);
-        lastCommandSent = Constants.COMMAND_ID_OPENREMOTE_PROVISION;
+        return BuildCommandFrame(commandAndPayload);
     }
 
     private void SendCellularTestCommand(CellularParameters? cellularSettings)
@@ -4045,11 +6786,16 @@ public class SerialPortService
             return;
         }
 
+        byte[] data = BuildCellularTestCommand(cellularSettings);
+        _serialPort.Write(data, 0, data.Length);
+        lastCommandSent = Constants.COMMAND_ID_CELLULAR_TEST;
+    }
+
+    private byte[] BuildCellularTestCommand(CellularParameters? cellularSettings)
+    {
         if (cellularSettings is null)
         {
-            _serialPort.Write([(byte)Constants.COMMAND_ID_CELLULAR_TEST], 0, 1);
-            lastCommandSent = Constants.COMMAND_ID_CELLULAR_TEST;
-            return;
+            return BuildCommandFrame([(byte)Constants.COMMAND_ID_CELLULAR_TEST]);
         }
 
         cellularSettings.EnsurePublishTopicFromOpenRemoteFields();
@@ -4084,8 +6830,7 @@ public class SerialPortService
         byte[] commandAndPayload = new byte[payload.Length + 1];
         commandAndPayload[0] = (byte)Constants.COMMAND_ID_CELLULAR_TEST;
         Array.Copy(payload, 0, commandAndPayload, 1, payload.Length);
-        _serialPort.Write(commandAndPayload, 0, commandAndPayload.Length);
-        lastCommandSent = Constants.COMMAND_ID_CELLULAR_TEST;
+        return BuildCommandFrame(commandAndPayload);
     }
 
     private static void WriteFixedAscii(byte[] payload, ref int offset, string? value, int fieldLength)
@@ -4211,6 +6956,29 @@ public class SerialPortService
             timeoutMs);
     }
 
+    public async Task<bool> SaveStandaloneChangesAsync(int timeoutMs = 3000)
+    {
+        if (!_serialPort.IsOpen)
+        {
+            LastCustomCanWriteError = "Controller connection is closed before SAVECHANGES.";
+            return false;
+        }
+
+        bool accepted = await AwaitStandaloneAckAsync(
+            Constants.COMMAND_ID_SAVECHANGES,
+            () => SendCommand(Constants.COMMAND_ID_SAVECHANGES),
+            timeoutMs);
+
+        if (!accepted)
+        {
+            LastCustomCanWriteError = "Controller rejected SAVECHANGES after Custom CAN writes.";
+            return false;
+        }
+
+        LastCustomCanWriteError = null;
+        return true;
+    }
+
     public Task<bool> FactoryResetAsync(int timeoutMs = 8000)
     {
         return AwaitStandaloneAckAsync(
@@ -4226,10 +6994,26 @@ public class SerialPortService
             return Array.Empty<ControllerLogFileInfo>();
         }
 
+        bool preserveSecureSession = _secureSession.IsSessionOpen;
+
+        await _standaloneRequestLock.WaitAsync();
         _suspendLiveRequestPolling = true;
         try
         {
-            ResetLogReceiveState(discardSerialInput: true);
+            if (!preserveSecureSession)
+            {
+                ResetLogReceiveState(discardSerialInput: true);
+            }
+            else
+            {
+                lock (_bufferLock)
+                {
+                    receivedDataBuffer.Clear();
+                }
+
+                foundTrailer1 = false;
+                _packetReady = false;
+            }
 
             for (int attempt = 0; attempt < 3; attempt++)
             {
@@ -4335,9 +7119,22 @@ public class SerialPortService
         }
         finally
         {
-            // Align with log-transfer session teardown: clear parser state so
-            // live status framing resumes cleanly after LOG_LIST traffic.
-            ResetLogReceiveState(discardSerialInput: false);
+            // Align with log-transfer session teardown. In secure mode, avoid
+            // clearing secure stream state to keep envelope sequence continuity.
+            if (!preserveSecureSession)
+            {
+                ResetLogReceiveState(discardSerialInput: false);
+            }
+            else
+            {
+                lock (_bufferLock)
+                {
+                    receivedDataBuffer.Clear();
+                }
+
+                foundTrailer1 = false;
+                _packetReady = false;
+            }
 
             _suspendLiveRequestPolling = false;
 
@@ -4348,6 +7145,8 @@ public class SerialPortService
                 _postLogRefreshRequestRetryCount = 0;
                 SendCommand(Constants.COMMAND_ID_REQUEST);
             }
+
+            _standaloneRequestLock.Release();
         }
     }
 
@@ -4358,6 +7157,7 @@ public class SerialPortService
             return false;
         }
 
+        _bulkLogTransferStopped = false;
         _suspendLiveRequestPolling = true;
         try
         {
@@ -4417,6 +7217,7 @@ public class SerialPortService
             return null;
         }
 
+        await _standaloneRequestLock.WaitAsync();
         await _logChunkRequestLock.WaitAsync();
         try
         {
@@ -4462,6 +7263,7 @@ public class SerialPortService
                 _suspendLiveRequestPolling = false;
             }
             _logChunkRequestLock.Release();
+            _standaloneRequestLock.Release();
         }
     }
 
@@ -4526,86 +7328,219 @@ public class SerialPortService
             throw new IOException("Serial port is not open.");
         }
 
+        bool secure = _secureSession.IsSessionOpen;
+        if (secure && !CanUsePlaintextLogBulk)
+        {
+            throw new InvalidOperationException("The controller does not support authorized plaintext log downloads.");
+        }
+
+        await _standaloneRequestLock.WaitAsync(token);
+        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
+        _suspendLiveRequestPolling = true;
+        _bulkLogCancelRequested = false;
+        _bulkLogCancellationDrained = false;
+        _bulkLogTransferStopped = false;
+        SetBulkTransferReaderActive(true);
+        try
+        {
+            if (!secure)
+            {
+                ResetLogReceiveState(discardSerialInput: true);
+                SendCommand(Constants.COMMAND_ID_LOG_BULK);
+            }
+            else
+            {
+                SendCommandWithByte(Constants.COMMAND_ID_LOG_BULK, 1);
+            }
+
+            return await ReadLogBulkPacketsAsync(_serialPort.BaseStream, secure, progressCallback, token);
+        }
+        catch (OperationCanceledException) when (_bulkLogCancellationDrained)
+        {
+            throw;
+        }
+        catch (OperationCanceledException ex)
+        {
+            if (secure)
+            {
+                Close();
+                ResetSecureSession();
+            }
+            throw new IOException("Log download stalled. Reconnect to the PDM before retrying.", ex);
+        }
+        catch
+        {
+            // A partial plaintext packet cannot be handed back to the encrypted parser.
+            if (secure)
+            {
+                Close();
+                ResetSecureSession();
+            }
+            throw;
+        }
+        finally
+        {
+            if (!secure)
+            {
+                ResetLogReceiveState(discardSerialInput: false);
+            }
+            SetBulkTransferReaderActive(false);
+            _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
+            _standaloneRequestLock.Release();
+        }
+    }
+
+    private async Task<string> ReadLogBulkPacketsAsync(Stream stream, bool secure, Action<byte>? progressCallback, CancellationToken token)
+    {
         const ushort bulkMagic = 0x4C42;
         byte[] headerBuffer = new byte[6];
         byte[] checksumBuffer = new byte[4];
         byte[] payloadBuffer = new byte[4096];
         using var output = new MemoryStream();
-
-        ResetLogReceiveState(discardSerialInput: true);
-        SetBulkTransferReaderActive(true);
-
-        try
+        long lastKeepalive = Environment.TickCount64;
+        bool keepalivePending = false;
+        bool downloadDone = false;
+        bool cancelSent = false;
+        // User cancellation must not interrupt a packet; drain through the cancel ACK.
+        using var readTimeout = new CancellationTokenSource();
+        while (!downloadDone || keepalivePending || cancelSent || token.IsCancellationRequested || _bulkLogCancelRequested)
         {
-            SendCommand(Constants.COMMAND_ID_LOG_BULK);
-
-            while (true)
+            if (!cancelSent)
             {
-                token.ThrowIfCancellationRequested();
-                await ReadExactlyAsync(_serialPort.BaseStream, headerBuffer, 0, headerBuffer.Length, token);
-
-                ushort magic = (ushort)(headerBuffer[0] | (headerBuffer[1] << 8));
-                if (magic != bulkMagic)
-                {
-                    throw new IOException("Invalid bulk transfer packet header.");
-                }
-
-                byte progress = headerBuffer[2];
-                bool done = headerBuffer[3] != 0;
-                int payloadLength = headerBuffer[4] | (headerBuffer[5] << 8);
-                if (payloadLength < 0 || payloadLength > payloadBuffer.Length)
-                {
-                    throw new IOException("Invalid bulk transfer payload length.");
-                }
-
-                if (payloadLength > 0)
-                {
-                    await ReadExactlyAsync(_serialPort.BaseStream, payloadBuffer, 0, payloadLength, token);
-                }
-
-                await ReadExactlyAsync(_serialPort.BaseStream, checksumBuffer, 0, checksumBuffer.Length, token);
-                uint receivedChecksum = (uint)(checksumBuffer[0]
-                    | (checksumBuffer[1] << 8)
-                    | (checksumBuffer[2] << 16)
-                    | (checksumBuffer[3] << 24));
-
-                uint calculatedChecksum = 0;
-                for (int i = 0; i < headerBuffer.Length; i++)
-                {
-                    calculatedChecksum += headerBuffer[i];
-                }
-                for (int i = 0; i < payloadLength; i++)
-                {
-                    calculatedChecksum += payloadBuffer[i];
-                }
-
-                if (calculatedChecksum != receivedChecksum)
-                {
-                    throw new IOException("Bulk transfer checksum mismatch.");
-                }
-
-                if (payloadLength > 0)
-                {
-                    output.Write(payloadBuffer, 0, payloadLength);
-                }
-
-                progressCallback?.Invoke(progress);
-
-                if (done)
-                {
-                    return Encoding.ASCII.GetString(output.GetBuffer(), 0, (int)output.Length);
-                }
+                readTimeout.CancelAfter(TimeSpan.FromSeconds(5));
             }
+            CancellationToken readToken = readTimeout.Token;
+            if (!cancelSent && (token.IsCancellationRequested || _bulkLogCancelRequested))
+            {
+                byte[] command = [(byte)Constants.COMMAND_ID_LOG_CANCEL];
+                byte[] request = secure
+                    ? EncryptSecureEnvelope(command, _secureSession.ClientToDeviceKey,
+                        _secureSession.SessionId, _secureSession.TxSequence++)
+                    : command;
+                await stream.WriteAsync(request, 0, request.Length, readToken);
+                cancelSent = true;
+            }
+            if (secure && !cancelSent && !downloadDone && !keepalivePending && Environment.TickCount64 - lastKeepalive >= 1000)
+            {
+                byte[] request = EncryptSecureEnvelope(
+                    BuildSecureEncryptedControlRequest(SecureControlOperation.Status, Array.Empty<byte>()),
+                    _secureSession.ClientToDeviceKey, _secureSession.SessionId, _secureSession.TxSequence++);
+                await stream.WriteAsync(request, 0, request.Length, readToken);
+                lastKeepalive = Environment.TickCount64;
+                keepalivePending = true;
+            }
+
+            await ReadExactlyAsync(stream, headerBuffer, 0, 1, readToken);
+            if (secure && headerBuffer[0] == (byte)Constants.SECURE_ENVELOPE_FRAME_PREFIX)
+            {
+                byte[] envelopeHeader = new byte[Constants.SECURE_ENVELOPE_HEADER_LENGTH];
+                envelopeHeader[0] = headerBuffer[0];
+                await ReadExactlyAsync(stream, envelopeHeader, 1, envelopeHeader.Length - 1, readToken);
+                int length = BinaryPrimitives.ReadUInt16LittleEndian(envelopeHeader.AsSpan(1, 2));
+                if (length != Constants.SECURE_MANAGEMENT_RESPONSE_BASE_LENGTH && !(cancelSent && length == 1))
+                {
+                    throw new IOException("Unexpected encrypted response during plaintext log download.");
+                }
+                byte[] frame = new byte[envelopeHeader.Length + length + Constants.SECURE_TAG_LENGTH];
+                envelopeHeader.CopyTo(frame, 0);
+                await ReadExactlyAsync(stream, frame, envelopeHeader.Length, length + Constants.SECURE_TAG_LENGTH, readToken);
+                if (!TryDecryptSecureEnvelope(frame, _secureSession.DeviceToClientKey, _secureSession.SessionId,
+                    _secureSession.RxSequence, out byte[] plaintext))
+                {
+                    ResetSecureSession();
+                    throw new IOException("Log download keepalive authentication failed.");
+                }
+                _secureSession.RxSequence++;
+                if (cancelSent && plaintext.Length == 1)
+                {
+                    if (keepalivePending || plaintext[0] != (byte)Constants.COMMAND_ID_CONFIM)
+                    {
+                        throw new IOException("Log download cancellation was not acknowledged.");
+                    }
+                    CompleteBulkCancellation(token);
+                }
+                if (!keepalivePending ||
+                    !TryParseSecureManagementResponse(plaintext, SecureControlOperation.Status, out SecureManagementResponse? status) ||
+                    status == null || status.Result != SecureControlResult.Ok || !status.IsAuthorized || status.StorageFault)
+                {
+                    throw new IOException("Log download session is no longer authorized.");
+                }
+                keepalivePending = false;
+                continue;
+            }
+            if (!secure && cancelSent && headerBuffer[0] == (byte)Constants.COMMAND_ID_CONFIM)
+            {
+                CompleteBulkCancellation(token);
+            }
+            await ReadExactlyAsync(stream, headerBuffer, 1, headerBuffer.Length - 1, readToken);
+
+            ushort magic = (ushort)(headerBuffer[0] | (headerBuffer[1] << 8));
+            if (magic != bulkMagic || downloadDone || headerBuffer[2] > 100 || headerBuffer[3] > 1)
+            {
+                throw new IOException("Invalid bulk transfer packet header.");
+            }
+
+            byte progress = headerBuffer[2];
+            bool done = headerBuffer[3] != 0;
+            int payloadLength = headerBuffer[4] | (headerBuffer[5] << 8);
+            if (payloadLength > payloadBuffer.Length)
+            {
+                throw new IOException("Invalid bulk transfer payload length.");
+            }
+
+            if (payloadLength > 0)
+            {
+                await ReadExactlyAsync(stream, payloadBuffer, 0, payloadLength, readToken);
+            }
+
+            await ReadExactlyAsync(stream, checksumBuffer, 0, checksumBuffer.Length, readToken);
+            uint receivedChecksum = (uint)(checksumBuffer[0]
+                | (checksumBuffer[1] << 8)
+                | (checksumBuffer[2] << 16)
+                | (checksumBuffer[3] << 24));
+
+            uint calculatedChecksum = 0;
+            for (int i = 0; i < headerBuffer.Length; i++)
+            {
+                calculatedChecksum += headerBuffer[i];
+            }
+            for (int i = 0; i < payloadLength; i++)
+            {
+                calculatedChecksum += payloadBuffer[i];
+            }
+
+            if (calculatedChecksum != receivedChecksum)
+            {
+                throw new IOException("Bulk transfer checksum mismatch.");
+            }
+
+            if (!cancelSent && payloadLength > 0)
+            {
+                output.Write(payloadBuffer, 0, payloadLength);
+            }
+
+            if (!cancelSent) progressCallback?.Invoke(progress);
+            downloadDone = done;
         }
-        finally
-        {
-            SetBulkTransferReaderActive(false);
-            ResetLogReceiveState(discardSerialInput: false);
-        }
+        _bulkLogTransferStopped = true;
+        return Encoding.ASCII.GetString(output.GetBuffer(), 0, (int)output.Length);
+    }
+
+    private void CompleteBulkCancellation(CancellationToken token)
+    {
+        _bulkLogTransferStopped = true;
+        _bulkLogCancellationDrained = true;
+        throw new OperationCanceledException("Log download cancelled; controller session preserved.", token);
     }
 
     public void CancelLogTransfer()
     {
+        if (_bulkLogTransferActive)
+        {
+            _bulkLogCancelRequested = true;
+            return;
+        }
+        if (_bulkLogTransferStopped) return;
         bool shouldResumePolling = !_logTransferSessionActive;
         _suspendLiveRequestPolling = true;
         SendCommand(Constants.COMMAND_ID_LOG_CANCEL);
@@ -4622,44 +7557,46 @@ public class SerialPortService
             return false;
         }
 
-        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _logResetTcs = tcs;
+        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
         _suspendLiveRequestPolling = true;
-        SendCommand(Constants.COMMAND_ID_LOG_RESET);
 
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _standaloneCommandAckTcs = tcs;
+        _standaloneCommandAckId = Constants.COMMAND_ID_LOG_RESET;
         try
         {
+            SendCommand(Constants.COMMAND_ID_LOG_RESET);
             Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
             if (completedTask != tcs.Task)
             {
+                LoggingService.AddLog("Controller log reset acknowledgement timed out.");
                 return false;
             }
 
             bool resetOk = await tcs.Task;
-            if (resetOk)
+            if (resetOk && !UseSecureStreamingTransport())
             {
                 ResetLogReceiveState(discardSerialInput: true);
             }
-
+            if (!resetOk)
+            {
+                LoggingService.AddLog("Controller rejected the log reset request.");
+            }
             return resetOk;
-        }
-        catch
-        {
-            return false;
         }
         finally
         {
-            _suspendLiveRequestPolling = false;
+            if (_standaloneCommandAckTcs == tcs)
+            {
+                _standaloneCommandAckTcs = null;
+                _standaloneCommandAckId = '\0';
+            }
+            _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
 
             // Kick the live stream loop back into motion after reset completes.
-            if (_serialPort.IsOpen && !_logTransferSessionActive && !sendingConfig)
+            if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !_logTransferSessionActive && !sendingConfig)
             {
                 SendCommand(Constants.COMMAND_ID_REQUEST);
-            }
-
-            if (_logResetTcs == tcs)
-            {
-                _logResetTcs = null;
             }
         }
     }
@@ -4733,4 +7670,3 @@ public sealed class ControllerLogFileInfo
 
     public long FileSizeBytes { get; set; }
 }
-

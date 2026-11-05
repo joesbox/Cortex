@@ -262,4 +262,83 @@ public class ConfigFileSerializerTests
         Assert.Equal((byte)5, appliedRule1.OperandBType);
         Assert.Equal((byte)(Constants.NUM_DIGITAL_INPUTS - 1), appliedRule1.OperandBIndex);
     }
+
+    [Fact]
+    public void SerializeAndApplySnapshot_RoundTripsCustomCanSignalMetadata()
+    {
+        var source = new DataStructures();
+        source.CustomCanSignalsMetadata.Add(new CustomCanSignalMetadata
+        {
+            SignalIndex = 2,
+            MessageIndex = 1,
+            StartBit = 16,
+            BitLength = 12,
+            IsMotorola = false,
+            IsSigned = true,
+            Factor = 0.5f,
+            Offset = -10f,
+            Name = "Boost",
+            MinValue = -50f,
+            MaxValue = 300f,
+            Units = "kPa",
+        });
+
+        string json = ConfigFileSerializer.SerializeSettings(source);
+        Assert.Contains("CustomCanSignalMetadata", json);
+        Assert.True(ConfigFileSerializer.TryDeserialize(json, out ConfigSnapshot? snapshot, out string? error));
+        Assert.Null(error);
+        Assert.NotNull(snapshot);
+
+        var target = new DataStructures();
+        ConfigFileSerializer.ApplySnapshot(target, snapshot!);
+
+        Assert.Single(target.CustomCanSignalsMetadata);
+        CustomCanSignalMetadata applied = target.CustomCanSignalsMetadata[0];
+        Assert.Equal(2, applied.SignalIndex);
+        Assert.Equal((byte)1, applied.MessageIndex);
+        Assert.Equal((byte)16, applied.StartBit);
+        Assert.Equal((byte)12, applied.BitLength);
+        Assert.False(applied.IsMotorola);
+        Assert.True(applied.IsSigned);
+        Assert.Equal(0.5f, applied.Factor);
+        Assert.Equal(-10f, applied.Offset);
+        Assert.Equal("Boost", applied.Name);
+        Assert.Equal(-50f, applied.MinValue);
+        Assert.Equal(300f, applied.MaxValue);
+        Assert.Equal("kPa", applied.Units);
+    }
+
+    [Fact]
+    public void TryDeserialize_ReturnsTrue_WhenOnlyCustomCanSignalMetadataSectionPresent()
+    {
+        string json = """
+        {
+          "FormatVersion": 1,
+          "CustomCanSignalMetadata": [
+            {
+              "SignalIndex": 0,
+              "MessageIndex": 0,
+              "StartBit": 0,
+              "BitLength": 8,
+              "IsMotorola": false,
+              "IsSigned": false,
+              "Factor": 1,
+              "Offset": 0,
+              "Name": "RPM",
+              "MinValue": 0,
+              "MaxValue": 255,
+              "Units": "rpm"
+            }
+          ]
+        }
+        """;
+
+        bool result = ConfigFileSerializer.TryDeserialize(json, out ConfigSnapshot? snapshot, out string? error);
+
+        Assert.True(result);
+        Assert.Null(error);
+        Assert.NotNull(snapshot);
+        Assert.NotNull(snapshot!.CustomCanSignalMetadata);
+        Assert.Single(snapshot.CustomCanSignalMetadata!);
+    }
 }

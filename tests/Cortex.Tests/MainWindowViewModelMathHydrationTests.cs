@@ -131,11 +131,15 @@ public class MainWindowViewModelMathHydrationTests
         public void CloseApp() { }
         public Task<string?> OpenPdmFileContentAsync() => Task.FromResult<string?>(null);
         public Task<string?> BrowseLocalLogFilePathAsync(string initialDirectory) => Task.FromResult<string?>(null);
+        public Task<string?> BrowseDbcFilePathAsync() => Task.FromResult<string?>(null);
         public Task<bool> SavePdmFileContentAsync(string content) => Task.FromResult(true);
         public Task<bool> ConfirmAsync(string title, string message, string confirmButtonText = "CONFIRM", string cancelButtonText = "CANCEL") => Task.FromResult(true);
         public Task OpenUrlAsync(string url) => Task.CompletedTask;
         public Task<Models.LocalFirmwareUpdateSelection?> BrowseLocalFirmwareUpdateFilesAsync() => Task.FromResult<Models.LocalFirmwareUpdateSelection?>(null);
         public Task ShowAboutAsync() => Task.CompletedTask;
         public Task ShowFirmwareUpdateDialogAsync(FirmwareUpdateWindowViewModel viewModel) => Task.CompletedTask;
+        public Task<Models.PinSetupDialogResult?> ShowPinSetupWizardAsync(bool isPinAlreadyEnabled) => Task.FromResult<Models.PinSetupDialogResult?>(null);
+        public Task<bool> ShowRecoveryCodeAsync(string recoveryCode) => Task.FromResult(true);
+        public Task<Models.PinUnlockDialogResult?> ShowPinUnlockDialogAsync(bool allowRecovery, uint retryAfterMs, string? statusMessage) => Task.FromResult<Models.PinUnlockDialogResult?>(null);
     }
 }

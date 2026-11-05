@@ -13,9 +13,14 @@ namespace Cortex.Services
             WriteIndented = true,
         };
 
-        public static string SerializeSettings(DataStructures settingsData)
+        public static string SerializeSettings(DataStructures settingsData, IoFlowGraphConfigSnapshot? ioFlowGraph = null, bool includeCustomCanMetadata = true)
         {
-            var snapshot = BuildSnapshot(settingsData);
+            var snapshot = BuildSnapshot(settingsData, ioFlowGraph);
+            if (!includeCustomCanMetadata)
+            {
+                snapshot.CustomCanSignalMetadata = null;
+            }
+
             return JsonSerializer.Serialize(snapshot, JsonOptions);
         }
 
@@ -31,7 +36,7 @@ namespace Cortex.Services
                     return false;
                 }
 
-                if (snapshot.Channels == null && snapshot.DigitalInputs == null && snapshot.AnalogueInputs == null && snapshot.SystemParameters == null && snapshot.CellularParameters == null)
+                if (snapshot.Channels == null && snapshot.DigitalInputs == null && snapshot.AnalogueInputs == null && snapshot.SystemParameters == null && snapshot.CellularParameters == null && snapshot.CustomCanSignalMetadata == null && snapshot.IoFlowGraph == null)
                 {
                     error = "Configuration file does not contain any recognized configuration sections.";
                     return false;
@@ -240,13 +245,42 @@ namespace Cortex.Services
                 target.CellularParamsStaticData.PublishIntervalMs = snapshot.CellularParameters.PublishIntervalMs ?? target.CellularParamsStaticData.PublishIntervalMs;
                 target.CellularParamsStaticData.TelemetryUploadMask = snapshot.CellularParameters.TelemetryUploadMask ?? target.CellularParamsStaticData.TelemetryUploadMask;
             }
+
+            if (snapshot.CustomCanSignalMetadata != null)
+            {
+                // Metadata is a local name/limit store keyed by signal identity; merge rather than replace so
+                // loading an older file cannot wipe names tracked for other signals.
+                foreach (CustomCanSignalMetadataSnapshot metadata in snapshot.CustomCanSignalMetadata)
+                {
+                    target.CustomCanSignalsMetadata.Add(new CustomCanSignalMetadata
+                    {
+                        SignalIndex = Math.Clamp(metadata.SignalIndex ?? 0, 0, Constants.MAX_CUSTOM_CAN_SIGNALS - 1),
+                        MessageIndex = (byte)Math.Clamp(metadata.MessageIndex ?? 0, 0, Constants.MAX_CUSTOM_CAN_MESSAGES - 1),
+                        MessageId = metadata.MessageId,
+                        IsExtended = metadata.IsExtended ?? false,
+                        StartBit = Math.Clamp(metadata.StartBit ?? 0, (byte)0, (byte)63),
+                        BitLength = Math.Clamp(metadata.BitLength ?? 1, (byte)1, (byte)64),
+                        IsMotorola = metadata.IsMotorola ?? false,
+                        IsSigned = metadata.IsSigned ?? false,
+                        Factor = metadata.Factor ?? 1.0f,
+                        Offset = metadata.Offset ?? 0.0f,
+                        Name = metadata.Name ?? string.Empty,
+                        MessageName = metadata.MessageName ?? string.Empty,
+                        MinValue = metadata.MinValue,
+                        MaxValue = metadata.MaxValue,
+                        Units = metadata.Units ?? string.Empty,
+                        IdentityFingerprint = metadata.IdentityFingerprint ?? string.Empty,
+                    });
+                }
+            }
         }
 
-        private static ConfigSnapshot BuildSnapshot(DataStructures settingsData)
+        private static ConfigSnapshot BuildSnapshot(DataStructures settingsData, IoFlowGraphConfigSnapshot? ioFlowGraph)
         {
             return new ConfigSnapshot
             {
                 FormatVersion = 1,
+                IoFlowGraph = ioFlowGraph,
                 Channels = settingsData.ChannelsStaticData.Select(channel => new OutputChannelSnapshot
                 {
                     ChanType = channel.ChanType,
@@ -380,6 +414,25 @@ namespace Cortex.Services
                     PublishIntervalMs = settingsData.CellularParamsStaticData.PublishIntervalMs,
                     TelemetryUploadMask = settingsData.CellularParamsStaticData.TelemetryUploadMask,
                 },
+                CustomCanSignalMetadata = settingsData.CustomCanSignalsMetadata.Select(metadata => new CustomCanSignalMetadataSnapshot
+                {
+                    SignalIndex = metadata.SignalIndex,
+                    MessageIndex = metadata.MessageIndex,
+                    MessageId = metadata.MessageId,
+                    IsExtended = metadata.IsExtended,
+                    StartBit = metadata.StartBit,
+                    BitLength = metadata.BitLength,
+                    IsMotorola = metadata.IsMotorola,
+                    IsSigned = metadata.IsSigned,
+                    Factor = metadata.Factor,
+                    Offset = metadata.Offset,
+                    Name = metadata.Name,
+                    MessageName = metadata.MessageName,
+                    MinValue = metadata.MinValue,
+                    MaxValue = metadata.MaxValue,
+                    Units = metadata.Units,
+                    IdentityFingerprint = metadata.IdentityFingerprint,
+                }).ToList(),
             };
         }
 
@@ -426,6 +479,8 @@ namespace Cortex.Services
     {
         public int FormatVersion { get; set; } = 1;
 
+        public IoFlowGraphConfigSnapshot? IoFlowGraph { get; set; }
+
         public List<OutputChannelSnapshot>? Channels { get; set; }
 
         public List<DigitalInputSnapshot>? DigitalInputs { get; set; }
@@ -435,6 +490,8 @@ namespace Cortex.Services
         public SystemParametersSnapshot? SystemParameters { get; set; }
 
         public CellularParametersSnapshot? CellularParameters { get; set; }
+
+        public List<CustomCanSignalMetadataSnapshot>? CustomCanSignalMetadata { get; set; }
     }
 
     public sealed class OutputChannelSnapshot
@@ -601,6 +658,41 @@ namespace Cortex.Services
         public float? NTCNominalResistance { get; set; }
     }
 
+    public sealed class CustomCanSignalMetadataSnapshot
+    {
+        public int? SignalIndex { get; set; }
+
+        public int? MessageIndex { get; set; }
+
+        public uint? MessageId { get; set; }
+
+        public bool? IsExtended { get; set; }
+
+        public byte? StartBit { get; set; }
+
+        public byte? BitLength { get; set; }
+
+        public bool? IsMotorola { get; set; }
+
+        public bool? IsSigned { get; set; }
+
+        public float? Factor { get; set; }
+
+        public float? Offset { get; set; }
+
+        public string? Name { get; set; }
+
+        public string? MessageName { get; set; }
+
+        public float? MinValue { get; set; }
+
+        public float? MaxValue { get; set; }
+
+        public string? Units { get; set; }
+
+        public string? IdentityFingerprint { get; set; }
+    }
+
     public sealed class SystemParametersSnapshot
     {
         public int? SystemTemperature { get; set; }
@@ -687,5 +779,56 @@ namespace Cortex.Services
         public uint? PublishIntervalMs { get; set; }
 
         public uint? TelemetryUploadMask { get; set; }
+    }
+
+    public sealed class IoFlowGraphConfigSnapshot
+    {
+        public string ControllerSettingsSignature { get; set; } = string.Empty;
+
+        public List<IoFlowNodeConfigSnapshot> Nodes { get; set; } = [];
+
+        public List<IoFlowStandaloneLogicRuleConfigSnapshot> StandaloneLogicRules { get; set; } = [];
+
+        public Dictionary<int, int> OutputRootLogicNodeByChannel { get; set; } = [];
+    }
+
+    public sealed class IoFlowNodeConfigSnapshot
+    {
+        public string Kind { get; set; } = string.Empty;
+
+        public int Id { get; set; }
+
+        public double X { get; set; }
+
+        public double Y { get; set; }
+
+        public byte Option { get; set; }
+
+        public byte Option2 { get; set; }
+    }
+
+    public sealed class IoFlowStandaloneLogicRuleConfigSnapshot
+    {
+        public int LogicNodeId { get; set; }
+
+        public byte Operation { get; set; }
+
+        public byte HysteresisEnabled { get; set; }
+
+        public float OnThreshold { get; set; }
+
+        public float OffThreshold { get; set; }
+
+        public byte OperandAType { get; set; }
+
+        public byte OperandAIndex { get; set; }
+
+        public float OperandAConstant { get; set; }
+
+        public byte OperandBType { get; set; }
+
+        public byte OperandBIndex { get; set; }
+
+        public float OperandBConstant { get; set; }
     }
 }

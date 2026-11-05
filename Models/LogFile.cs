@@ -28,7 +28,14 @@ namespace Cortex.Models
 
         public string DownloadedIcon => IsDownloaded ? "✔" : string.Empty;
 
-        public string FileSizeMbDisplay => $"({FileSizeBytes / (1024d * 1024d):F2} MB)";
+        public string FileSizeMbDisplay => IsControllerFile && FileSizeBytes == uint.MaxValue
+            ? "(size unavailable)"
+            : $"({FileSizeBytes / (1024d * 1024d):F2} MB)";
+
+        partial void OnIsControllerFileChanged(bool value)
+        {
+            OnPropertyChanged(nameof(FileSizeMbDisplay));
+        }
 
         partial void OnFileSizeBytesChanged(long value)
         {

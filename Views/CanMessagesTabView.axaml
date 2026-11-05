@@ -1,0 +1,269 @@
+<UserControl
+	x:Class="Cortex.Views.CanMessagesTabView"
+	x:Name="Root"
+	xmlns="https://github.com/avaloniaui"
+	xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+	xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+	xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+	xmlns:vm="using:Cortex.ViewModels"
+	xmlns:models="using:Cortex.Models"
+	xmlns:controls="using:Cortex.Controls"
+	x:DataType="vm:MainWindowViewModel"
+	mc:Ignorable="d">
+	<UserControl.Resources>
+		<!-- Selection is per row; hide the per-cell current/focus outlines in every grid on this tab. -->
+		<SolidColorBrush x:Key="DataGridCellFocusVisualPrimaryBrush" Color="Transparent" />
+		<SolidColorBrush x:Key="DataGridCellFocusVisualSecondaryBrush" Color="Transparent" />
+		<SolidColorBrush x:Key="DataGridCurrencyVisualPrimaryBrush" Color="Transparent" />
+	</UserControl.Resources>
+	<Grid RowDefinitions="Auto,*" Margin="5">
+		<Border Grid.Row="0" Margin="0,0,0,8" Padding="10" BorderBrush="#443553" BorderThickness="1" CornerRadius="10">
+			<Border.Background>
+				<LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+					<GradientStop Color="#FF141722" Offset="0" />
+					<GradientStop Color="#FF221C34" Offset="0.5" />
+					<GradientStop Color="#FF302042" Offset="1" />
+				</LinearGradientBrush>
+			</Border.Background>
+			<StackPanel Spacing="8">
+				<TextBlock FontSize="16" FontWeight="SemiBold" Text="CAN Messages" />
+				<TextBlock Foreground="#FFD0C3E8" TextWrapping="Wrap" Text="Import DBC signals or define a signal manually." />
+				<TextBlock Foreground="#FFD7B66B" TextWrapping="Wrap" Text="{Binding CustomCanStatusMessage}" />
+			</StackPanel>
+		</Border>
+
+		<Grid Grid.Row="1" RowDefinitions="4*,3*" RowSpacing="10">
+			<Border Grid.Row="0" Padding="10" BorderBrush="#443553" BorderThickness="1" CornerRadius="10">
+				<Border.Background>
+					<LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+						<GradientStop Color="#FF141722" Offset="0" />
+						<GradientStop Color="#FF221C34" Offset="0.5" />
+						<GradientStop Color="#FF302042" Offset="1" />
+					</LinearGradientBrush>
+				</Border.Background>
+				<TabControl>
+					<TabItem Header="DBC Import">
+						<Grid Margin="0,8,0,0" RowDefinitions="Auto,*,Auto" RowSpacing="8">
+							<Button Grid.Row="0" HorizontalAlignment="Left" Padding="12,6" Content="Import DBC File" Command="{Binding ImportDbcFileCommand}" />
+							<DataGrid x:Name="ImportedDbcSignalsGrid" Grid.Row="1" AutoGenerateColumns="False" CanUserReorderColumns="False" CanUserResizeColumns="True" CanUserSortColumns="True" GridLinesVisibility="All" Focusable="False" IsReadOnly="True" SelectionMode="Extended" SelectionChanged="ImportedDbcSignalsGrid_SelectionChanged" ItemsSource="{Binding ImportedDbcSignals}" SelectedItem="{Binding SelectedImportedDbcSignal}">
+								<DataGrid.Columns>
+									<DataGridTextColumn Header="Message" Binding="{Binding MessageName}" Width="Auto" MinWidth="120" />
+									<DataGridTextColumn Header="Message ID" Binding="{Binding MessageIdHex}" Width="*" />
+									<DataGridTextColumn Header="ID Type" Binding="{Binding IdTypeLabel}" Width="Auto" />
+									<DataGridTextColumn Header="Signal" Binding="{Binding Name}" Width="Auto" MinWidth="120" />
+									<DataGridTextColumn Header="Start" Binding="{Binding StartBit}" Width="*" />
+									<DataGridTextColumn Header="Bits" Binding="{Binding BitLength}" Width="*" />
+									<DataGridTextColumn Header="Min" Binding="{Binding MinValue}" Width="*" />
+									<DataGridTextColumn Header="Max" Binding="{Binding MaxValue}" Width="*" />
+									<DataGridTextColumn Header="Units" Binding="{Binding Units}" Width="*" />
+								</DataGrid.Columns>
+							</DataGrid>
+							<StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+								<Button Padding="12,6" Content="Import Selected Signals" Command="{Binding ImportSelectedDbcSignalToControllerCommand}" IsEnabled="{Binding !IsCustomCanBusy}" />
+							</StackPanel>
+						</Grid>
+					</TabItem>
+					<TabItem Header="Manual Entry">
+						<ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+							<StackPanel Margin="0,6,12,6" Spacing="6">
+								<TextBlock Foreground="#FFD0C3E8" TextWrapping="Wrap"
+									Text="Define a message (CAN frame), then add its signals one at a time. To add a signal to a stored frame, pick it under Message." />
+								<Grid ColumnDefinitions="*,*" ColumnSpacing="12">
+									<Border Grid.Column="0" Padding="10,6" VerticalAlignment="Top" BorderBrush="#443553" BorderThickness="1" CornerRadius="6">
+										<StackPanel Spacing="4">
+											<TextBlock FontWeight="SemiBold" Text="Message" />
+											<Grid ColumnDefinitions="Auto,*,Auto,*" ColumnSpacing="8" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="4">
+												<TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Message" ToolTip.Tip="New message: define a new CAN frame. Or pick a stored message to add another signal to that frame; its frame settings are then fixed." />
+												<ComboBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="3" HorizontalAlignment="Stretch" ItemsSource="{Binding ManualCanMessageTargets}" SelectedItem="{Binding ManualCanMessageTarget, Mode=TwoWay}" ToolTip.Tip="New message: define a new CAN frame. Or pick a stored message to add another signal to that frame; its frame settings are then fixed.">
+													<ComboBox.ItemTemplate>
+														<DataTemplate x:DataType="models:CustomCanMessageTargetOption">
+															<TextBlock Text="{Binding Label}" />
+														</DataTemplate>
+													</ComboBox.ItemTemplate>
+												</ComboBox>
+
+												<TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="Name" ToolTip.Tip="Display name for the frame (up to 64 characters), stored locally by Cortex. Leave blank to use MSG_&lt;ID&gt;." />
+												<TextBox Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3" Watermark="e.g. EngineData" Text="{Binding ManualMessageName, Mode=TwoWay}" IsEnabled="{Binding IsManualNewMessage}" ToolTip.ShowOnDisabled="True" ToolTip.Tip="Display name for the frame (up to 64 characters), stored locally by Cortex. Leave blank to use MSG_&lt;ID&gt;." />
+
+												<TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Text="ID (Hex)" ToolTip.Tip="CAN identifier in hex, e.g. 0x123. Standard IDs are 0x000-0x7FF; tick Extended for 29-bit IDs up to 0x1FFFFFFF." />
+												<TextBox Grid.Row="2" Grid.Column="1" Watermark="0x123" Text="{Binding ManualCanMessageIdHex, Mode=TwoWay}" IsEnabled="{Binding IsManualNewMessage}" ToolTip.ShowOnDisabled="True" ToolTip.Tip="CAN identifier in hex, e.g. 0x123. Standard IDs are 0x000-0x7FF; tick Extended for 29-bit IDs up to 0x1FFFFFFF." />
+												<CheckBox Grid.Row="2" Grid.Column="2" Grid.ColumnSpan="2" IsChecked="{Binding ManualCanIsExtended, Mode=TwoWay}" Content="Extended (29-bit)" IsEnabled="{Binding IsManualNewMessage}" ToolTip.ShowOnDisabled="True" ToolTip.Tip="Use a 29-bit extended identifier (e.g. J1939). Required for IDs above 0x7FF; can also be used for low IDs sent as extended frames." />
+
+												<TextBlock Grid.Row="3" Grid.Column="0" VerticalAlignment="Center" Text="DLC" ToolTip.Tip="Data length code: number of data bytes in the frame (1-8). Every signal must fit within DLC x 8 bits." />
+												<TextBox Grid.Row="3" Grid.Column="1" Text="{Binding ManualCanDlc, Mode=TwoWay}" IsEnabled="{Binding IsManualNewMessage}" ToolTip.ShowOnDisabled="True" ToolTip.Tip="Data length code: number of data bytes in the frame (1-8). Every signal must fit within DLC x 8 bits." />
+												<TextBlock Grid.Row="3" Grid.Column="2" VerticalAlignment="Center" Text="Direction" ToolTip.Tip="Applies to the whole frame. RX: decode signals from frames received on the bus. TX one-shot: send once when the trigger turns on. TX periodic: send repeatedly at the period while the trigger is on." />
+												<ComboBox Grid.Row="3" Grid.Column="3" HorizontalAlignment="Stretch" ItemsSource="{Binding CustomCanDirectionOptions}" SelectedIndex="{Binding ManualDirectionIndex, Mode=TwoWay}" IsEnabled="{Binding IsManualNewMessage}" ToolTip.ShowOnDisabled="True" ToolTip.Tip="Applies to the whole frame. RX: decode signals from frames received on the bus. TX one-shot: send once when the trigger turns on. TX periodic: send repeatedly at the period while the trigger is on." />
+
+												<TextBlock Grid.Row="4" Grid.Column="0" VerticalAlignment="Center" Text="{Binding ManualTimeoutLabel}" ToolTip.Tip="RX: milliseconds without a frame before its signals are flagged as timed out (0 = never time out). TX periodic: transmit period in ms (1-60000). Unused for TX one-shot." />
+												<TextBox Grid.Row="4" Grid.Column="1" Text="{Binding ManualCanTimeoutMs, Mode=TwoWay}" IsEnabled="{Binding IsManualNewMessage}" ToolTip.ShowOnDisabled="True" ToolTip.Tip="RX: milliseconds without a frame before its signals are flagged as timed out (0 = never time out). TX periodic: transmit period in ms (1-60000). Unused for TX one-shot." />
+												<TextBlock Grid.Row="4" Grid.Column="2" VerticalAlignment="Center" Text="Trigger" IsVisible="{Binding IsManualTx}" ToolTip.Tip="Condition that enables transmission. Always: no condition. Channel N: only while that output channel is on (one-shot sends on each off-to-on change)." />
+												<ComboBox Grid.Row="4" Grid.Column="3" HorizontalAlignment="Stretch" IsVisible="{Binding IsManualTx}" ItemsSource="{Binding CustomCanTriggerOptions}" SelectedIndex="{Binding ManualTriggerIndex, Mode=TwoWay}" IsEnabled="{Binding IsManualNewMessage}" ToolTip.ShowOnDisabled="True" ToolTip.Tip="Condition that enables transmission. Always: no condition. Channel N: only while that output channel is on (one-shot sends on each off-to-on change)." />
+											</Grid>
+											<TextBlock Foreground="#FFD0C3E8" TextWrapping="Wrap" IsVisible="{Binding !IsManualNewMessage}"
+												Text="Frame settings come from the stored message. Change its direction in the Messages table below." />
+										</StackPanel>
+									</Border>
+
+									<Border Grid.Column="1" Padding="10,6" VerticalAlignment="Top" BorderBrush="#443553" BorderThickness="1" CornerRadius="6">
+										<StackPanel Spacing="4">
+											<TextBlock FontWeight="SemiBold" Text="Signal" />
+											<Grid ColumnDefinitions="Auto,*,Auto,*" ColumnSpacing="8" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="4">
+												<TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Name" ToolTip.Tip="Display name for this signal (up to 64 characters). Stored locally by Cortex, not on the PDM." />
+												<TextBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="3" Text="{Binding ManualSignalName, Mode=TwoWay}" ToolTip.Tip="Display name for this signal (up to 64 characters). Stored locally by Cortex, not on the PDM." />
+
+												<TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="Start Bit" ToolTip.Tip="Bit position of the signal (0-63), using DBC numbering. Intel: the least significant bit. Motorola: the most significant bit." />
+												<TextBox Grid.Row="1" Grid.Column="1" Text="{Binding ManualSignalStartBit, Mode=TwoWay}" ToolTip.Tip="Bit position of the signal (0-63), using DBC numbering. Intel: the least significant bit. Motorola: the most significant bit." />
+												<TextBlock Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" Text="Bit Length" ToolTip.Tip="Number of bits in the signal (1-64)." />
+												<TextBox Grid.Row="1" Grid.Column="3" Text="{Binding ManualSignalBitLength, Mode=TwoWay}" ToolTip.Tip="Number of bits in the signal (1-64)." />
+
+												<CheckBox Grid.Row="2" Grid.Column="1" IsChecked="{Binding ManualSignalIsMotorola, Mode=TwoWay}" Content="Motorola endian" ToolTip.Tip="Big-endian (Motorola) byte order, as in DBC @0. Leave unticked for little-endian (Intel, DBC @1)." />
+												<CheckBox Grid.Row="2" Grid.Column="3" IsChecked="{Binding ManualSignalIsSigned, Mode=TwoWay}" Content="Signed" ToolTip.Tip="Interpret the raw value as two's-complement signed (DBC -). Leave unticked for unsigned (DBC +)." />
+
+												<TextBlock Grid.Row="3" Grid.Column="0" VerticalAlignment="Center" Text="Factor" ToolTip.Tip="Scaling: physical value = raw x Factor + Offset. Must be non-zero, except for TX signals with a Constant value source." />
+												<TextBox Grid.Row="3" Grid.Column="1" Text="{Binding ManualSignalFactor, Mode=TwoWay}" ToolTip.Tip="Scaling: physical value = raw x Factor + Offset. Must be non-zero, except for TX signals with a Constant value source." />
+												<TextBlock Grid.Row="3" Grid.Column="2" VerticalAlignment="Center" Text="Offset" ToolTip.Tip="Added after scaling: physical value = raw x Factor + Offset. For TX with a Constant value source this is the raw value sent." />
+												<TextBox Grid.Row="3" Grid.Column="3" Text="{Binding ManualSignalOffset, Mode=TwoWay}" ToolTip.Tip="Added after scaling: physical value = raw x Factor + Offset. For TX with a Constant value source this is the raw value sent." />
+
+												<TextBlock Grid.Row="4" Grid.Column="0" VerticalAlignment="Center" Text="Min" ToolTip.Tip="Optional expected minimum physical value. Leave blank if not needed. Must be less than or equal to Max." />
+												<TextBox Grid.Row="4" Grid.Column="1" Text="{Binding ManualSignalMinValue, Mode=TwoWay}" ToolTip.Tip="Optional expected minimum physical value. Leave blank if not needed. Must be less than or equal to Max." />
+												<TextBlock Grid.Row="4" Grid.Column="2" VerticalAlignment="Center" Text="Max" ToolTip.Tip="Optional expected maximum physical value. Leave blank if not needed. Must be greater than or equal to Min." />
+												<TextBox Grid.Row="4" Grid.Column="3" Text="{Binding ManualSignalMaxValue, Mode=TwoWay}" ToolTip.Tip="Optional expected maximum physical value. Leave blank if not needed. Must be greater than or equal to Min." />
+
+												<TextBlock Grid.Row="5" Grid.Column="0" VerticalAlignment="Center" Text="Units" ToolTip.Tip="Optional engineering units shown alongside the value, e.g. rpm, kPa, °C (up to 32 characters)." />
+												<TextBox Grid.Row="5" Grid.Column="1" Text="{Binding ManualSignalUnits, Mode=TwoWay}" ToolTip.Tip="Optional engineering units shown alongside the value, e.g. rpm, kPa, °C (up to 32 characters)." />
+												<TextBlock Grid.Row="5" Grid.Column="2" VerticalAlignment="Center" Text="Source" IsVisible="{Binding IsManualTx}" ToolTip.Tip="TX only. Value packed into the signal. Constant: sends the Offset value as a fixed raw value. Channel N: sends that channel's live value, scaled by Factor and Offset." />
+												<ComboBox Grid.Row="5" Grid.Column="3" HorizontalAlignment="Stretch" IsVisible="{Binding IsManualTx}" ItemsSource="{Binding CustomCanValueSourceOptions}" SelectedIndex="{Binding ManualValueSourceIndex, Mode=TwoWay}" ToolTip.Tip="TX only. Value packed into the signal. Constant: sends the Offset value as a fixed raw value. Channel N: sends that channel's live value, scaled by Factor and Offset." />
+											</Grid>
+										</StackPanel>
+									</Border>
+								</Grid>
+
+								<Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+									<Button Grid.Column="0" VerticalAlignment="Top" Padding="12,6" Content="Add Signal to Controller" Command="{Binding SaveManualCanSignalToControllerCommand}" IsEnabled="{Binding CanSaveManualCanSignal}"
+										ToolTip.ShowOnDisabled="True"
+										ToolTip.Tip="Write this signal (and its message, if new) to the controller. Disabled while any field is invalid or another Custom CAN operation is in progress." />
+									<TextBlock Grid.Column="1" VerticalAlignment="Center" Foreground="#FFFF6B6B" TextWrapping="Wrap" IsVisible="{Binding HasManualCanValidationErrors}" Text="{Binding ManualCanValidationSummary}" />
+								</Grid>
+							</StackPanel>
+						</ScrollViewer>
+					</TabItem>
+				</TabControl>
+			</Border>
+
+			<Border Grid.Row="1" Padding="10" BorderBrush="#443553" BorderThickness="1" CornerRadius="10">
+				<Border.Background>
+					<LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+						<GradientStop Color="#FF141722" Offset="0" />
+						<GradientStop Color="#FF221C34" Offset="0.5" />
+						<GradientStop Color="#FF302042" Offset="1" />
+					</LinearGradientBrush>
+				</Border.Background>
+				<Grid RowDefinitions="Auto,Auto,*,Auto,*" ColumnDefinitions="*,Auto" RowSpacing="6" ColumnSpacing="10">
+					<TextBlock Grid.Row="0" Grid.ColumnSpan="2" FontSize="14" FontWeight="SemiBold" Text="Stored Messages" />
+					<Grid Grid.Row="1" ColumnDefinitions="Auto,Auto,Auto,Auto,120,Auto,*" ColumnSpacing="8">
+						<Button Grid.Column="0" Padding="12,6" Content="Delete Checked Messages" Command="{Binding DeleteCheckedStoredMessagesCommand}" IsEnabled="{Binding !IsCustomCanBusy}"
+							ToolTip.Tip="Queue deletion of the ticked messages and every signal in them. Click SAVE CHANGES to write it to the controller." />
+						<Button Grid.Column="1" Padding="12,6" Content="Clear All" Command="{Binding ClearAllStoredSignalsCommand}" IsEnabled="{Binding !IsCustomCanBusy}"
+							ToolTip.Tip="Queue deletion of every stored message and signal. Click SAVE CHANGES to write it to the controller." />
+						<Border Grid.Column="2" Width="1" Margin="4,2" Background="#443553" />
+						<TextBlock Grid.Column="3" VerticalAlignment="Center" FontWeight="SemiBold" Text="Direction" IsEnabled="{Binding HasCheckedStoredMessage}"
+							ToolTip.Tip="RX/TX is a property of the message (CAN frame). Every signal in the frame shares it." />
+						<ComboBox Grid.Column="4" HorizontalAlignment="Stretch" VerticalAlignment="Center" ItemsSource="{Binding StoredCustomCanDirectionOptions}" SelectedIndex="{Binding SelectedStoredDirectionIndex, Mode=TwoWay}" IsEnabled="{Binding HasCheckedStoredMessage}"
+							ToolTip.ShowOnDisabled="True"
+							ToolTip.Tip="RX/TX is a property of the message (CAN frame). Every signal in the frame shares it. Tick one or more messages first." />
+						<Button Grid.Column="5" Padding="12,6" Content="Apply" Command="{Binding ApplySelectedStoredDirectionCommand}">
+							<Button.IsEnabled>
+								<MultiBinding Converter="{x:Static BoolConverters.And}">
+									<Binding Path="HasCheckedStoredMessage" />
+									<Binding Path="!IsCustomCanBusy" />
+								</MultiBinding>
+							</Button.IsEnabled>
+							<ToolTip.Tip>Queue the direction change for the ticked messages. Click SAVE CHANGES to write it to the controller.</ToolTip.Tip>
+						</Button>
+						<TextBlock Grid.Column="6" VerticalAlignment="Center" Foreground="#FFD0C3E8" TextWrapping="Wrap"
+							Text="Tick messages to change their direction or delete them."
+							IsVisible="{Binding !HasCheckedStoredMessage}" />
+						<TextBlock Grid.Column="6" VerticalAlignment="Center" Foreground="#FFD7B66B" TextWrapping="Wrap"
+							Text="{Binding StoredDirectionScopeSummary}"
+							IsVisible="{Binding HasCheckedStoredMessage}" />
+					</Grid>
+					<DataGrid Grid.Row="2" MinHeight="90" AutoGenerateColumns="False" CanUserReorderColumns="False" CanUserResizeColumns="True" CanUserSortColumns="True" GridLinesVisibility="All" Focusable="True" IsReadOnly="False" SelectionMode="Single" ItemsSource="{Binding ControllerCustomCanMessages}" SelectedItem="{Binding SelectedControllerCustomCanMessage, Mode=TwoWay}">
+						<DataGrid.Columns>
+							<DataGridTemplateColumn Header="Select" Width="Auto">
+								<DataGridTemplateColumn.CellTemplate>
+									<DataTemplate x:DataType="models:CustomCanMessage">
+										<CheckBox HorizontalAlignment="Center" VerticalAlignment="Center"
+											IsChecked="{Binding IsSelected, Mode=TwoWay}"
+											ToolTip.Tip="Tick to change this message's direction or delete it (with all its signals)." />
+									</DataTemplate>
+								</DataGridTemplateColumn.CellTemplate>
+							</DataGridTemplateColumn>
+							<DataGridTextColumn Header="Message" Binding="{Binding Name}" Width="Auto" MinWidth="140" IsReadOnly="True" />
+							<DataGridTextColumn Header="ID" Binding="{Binding IdHex}" Width="Auto" MinWidth="80" IsReadOnly="True" />
+							<DataGridTextColumn Header="ID Type" Binding="{Binding IdTypeLabel}" Width="Auto" IsReadOnly="True" />
+							<DataGridTextColumn Header="DLC" Binding="{Binding Dlc}" Width="Auto" IsReadOnly="True" />
+							<DataGridTextColumn Header="Direction" Binding="{Binding DirectionLabel}" Width="*" IsReadOnly="True" />
+							<DataGridTextColumn Header="Trigger" Binding="{Binding TriggerLabel}" Width="*" IsReadOnly="True" />
+							<DataGridTextColumn Header="Timeout" Binding="{Binding TimeoutDisplay}" Width="*" IsReadOnly="True" />
+							<DataGridTextColumn Header="Period" Binding="{Binding PeriodDisplay}" Width="*" IsReadOnly="True" />
+							<DataGridTextColumn Header="Signals" Binding="{Binding SignalCount}" Width="Auto" IsReadOnly="True" />
+							<DataGridTextColumn Header="Slot" Binding="{Binding SlotNumber}" Width="Auto" IsReadOnly="True" />
+						</DataGrid.Columns>
+					</DataGrid>
+
+					<Grid Grid.Row="3" ColumnDefinitions="*,Auto" ColumnSpacing="8" Margin="0,4,0,0">
+						<TextBlock Grid.Column="0" VerticalAlignment="Center" FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Text="{Binding SelectedMessageSignalsHeader}" />
+						<Button Grid.Column="1" Padding="12,6" Content="Delete Checked Signals" Command="{Binding DeleteSelectedStoredSignalsCommand}" IsEnabled="{Binding !IsCustomCanBusy}"
+							ToolTip.Tip="Queue deletion of the ticked signals. A message is removed automatically when its last signal is deleted. Click SAVE CHANGES to apply." />
+					</Grid>
+					<DataGrid Grid.Row="4" MinHeight="90" AutoGenerateColumns="False" CanUserReorderColumns="False" CanUserResizeColumns="True" CanUserSortColumns="True" GridLinesVisibility="All" Focusable="True" IsReadOnly="False" SelectionMode="Single" ItemsSource="{Binding SelectedMessageCustomCanSignals}" SelectedItem="{Binding SelectedControllerCustomCanSignal, Mode=TwoWay}">
+						<DataGrid.Columns>
+							<DataGridTemplateColumn Header="Delete" Width="Auto">
+								<DataGridTemplateColumn.CellTemplate>
+									<DataTemplate x:DataType="models:CustomCanSignal">
+										<CheckBox HorizontalAlignment="Center" VerticalAlignment="Center"
+											IsChecked="{Binding IsMarkedForDeletion, Mode=TwoWay}"
+											ToolTip.Tip="Tick to include this signal in Delete Checked Signals." />
+									</DataTemplate>
+								</DataGridTemplateColumn.CellTemplate>
+							</DataGridTemplateColumn>
+							<DataGridTextColumn Header="Signal Name" Binding="{Binding Name, Mode=TwoWay}" Width="Auto" MinWidth="140" IsReadOnly="False" />
+							<DataGridTextColumn Header="Start Bit" Binding="{Binding StartBit}" Width="*" IsReadOnly="True" />
+							<DataGridTextColumn Header="Bits" Binding="{Binding BitLength}" Width="*" IsReadOnly="True" />
+							<DataGridTextColumn Header="Endian" Binding="{Binding EndianLabel}" Width="*" IsReadOnly="True" />
+							<DataGridTextColumn Header="Sign" Binding="{Binding SignLabel}" Width="*" IsReadOnly="True" />
+							<DataGridTextColumn Header="Factor" Binding="{Binding Factor}" Width="*" IsReadOnly="True" />
+							<DataGridTextColumn Header="Offset" Binding="{Binding Offset}" Width="*" IsReadOnly="True" />
+							<DataGridTextColumn Header="Min" Binding="{Binding MinValue}" Width="*" IsReadOnly="True" />
+							<DataGridTextColumn Header="Max" Binding="{Binding MaxValue}" Width="*" IsReadOnly="True" />
+							<DataGridTextColumn Header="Units" Binding="{Binding Units}" Width="*" IsReadOnly="True" />
+							<DataGridTextColumn Header="Source" Binding="{Binding ValueSourceDisplay}" Width="*" IsReadOnly="True" />
+							<DataGridTemplateColumn Header="Active" Width="Auto">
+								<DataGridTemplateColumn.CellTemplate>
+									<DataTemplate x:DataType="models:CustomCanSignal">
+										<Grid Width="16" Height="16" HorizontalAlignment="Center" VerticalAlignment="Center">
+											<Ellipse Fill="#2234B84A" />
+											<Ellipse Fill="#FF01D95E" IsVisible="{Binding IsDetected}" />
+										</Grid>
+									</DataTemplate>
+								</DataGridTemplateColumn.CellTemplate>
+							</DataGridTemplateColumn>
+							<DataGridTextColumn Header="Slot" Binding="{Binding SlotNumber}" Width="Auto" IsReadOnly="True" />
+						</DataGrid.Columns>
+					</DataGrid>
+
+					<Border Grid.Row="1" Grid.RowSpan="4" Grid.Column="1" Width="400" Padding="8,6" BorderBrush="#443553" BorderThickness="1" CornerRadius="6" Background="#33141722">
+						<Grid RowDefinitions="Auto,*" RowSpacing="4">
+							<TextBlock Grid.Row="0" FontWeight="SemiBold" Text="Frame Layout"
+								ToolTip.Tip="Bits used by each signal in the selected message (DBC bit numbering). Click a bit to select its signal; the selected signal is outlined. Red borders mark overlapping signals; hatched bytes are beyond the DLC." />
+							<controls:CanFrameBitMapControl Grid.Row="1" MinHeight="180"
+								Signals="{Binding SelectedMessageCustomCanSignals}"
+								SelectedSignal="{Binding SelectedControllerCustomCanSignal, Mode=TwoWay}"
+								Dlc="{Binding SelectedControllerCustomCanMessage.Dlc, FallbackValue=8}" />
+						</Grid>
+					</Border>
+				</Grid>
+			</Border>
+		</Grid>
+	</Grid>
+</UserControl>

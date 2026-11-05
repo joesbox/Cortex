@@ -3,6 +3,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using LiveChartsCore.Defaults;
 using LiveChartsCore.SkiaSharpView;
 using System;
+using System.Globalization;
 
 namespace Cortex.Models
 {
@@ -29,6 +30,25 @@ namespace Cortex.Models
 
         [ObservableProperty]
         private bool isEnabled;
+
+        private string _currentValueText = "--";
+
+        public string CurrentValueText => _currentValueText;
+
+        public void SetCurrentValue(double? value)
+        {
+            string nextValue = value.HasValue
+                ? value.Value.ToString("F2", CultureInfo.InvariantCulture)
+                : "--";
+
+            if (string.Equals(_currentValueText, nextValue, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _currentValueText = nextValue;
+            OnPropertyChanged(nameof(CurrentValueText));
+        }
 
         partial void OnIsEnabledChanged(bool value)
         {

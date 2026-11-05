@@ -1,3 +1,4 @@
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Markup.Xaml;
@@ -101,5 +102,102 @@ namespace Cortex.Views
                 item.HoldProgress = 0;
             }
         }
+
+        private void OnChannelChartPointerEntered(object? sender, PointerEventArgs e)
+        {
+            UpdateLiveHoverAnchorFromPointer(e);
+        }
+
+        private void OnChannelChartPointerMoved(object? sender, PointerEventArgs e)
+        {
+            UpdateLiveHoverAnchorFromPointer(e);
+        }
+
+        private void OnChannelChartPointerExited(object? sender, PointerEventArgs e)
+        {
+            if (DataContext is MainWindowViewModel vm)
+            {
+                vm.ClearLiveChartSelectionCommand.Execute(null);
+            }
+        }
+
+        private void UpdateLiveHoverAnchorFromPointer(PointerEventArgs e)
+        {
+            if (_channelChart == null || DataContext is not MainWindowViewModel vm)
+            {
+                return;
+            }
+
+            Point pointerPosition = e.GetPosition(_channelChart);
+
+            Rect drawArea = _channelChart.Bounds;
+            if (TryGetDrawAreaBounds(out Rect coreDrawArea))
+            {
+                drawArea = coreDrawArea;
+            }
+
+            if (drawArea.Width <= 0)
+            {
+                return;
+            }
+
+            double relativeX = Math.Clamp((pointerPosition.X - drawArea.X) / drawArea.Width, 0d, 1d);
+            vm.UpdateLiveHoverAnchorFromRelativeX(relativeX);
+        }
+
+        private bool TryGetDrawAreaBounds(out Rect bounds)
+        {
+            bounds = default;
+
+            if (_channelChart?.CoreChart == null)
+            {
+                return false;
+            }
+
+            object coreChart = _channelChart.CoreChart;
+            Type coreChartType = coreChart.GetType();
+
+            object? drawMarginLocation = coreChartType.GetProperty("DrawMarginLocation")?.GetValue(coreChart);
+            object? drawMarginSize = coreChartType.GetProperty("DrawMarginSize")?.GetValue(coreChart);
+            if (drawMarginLocation == null || drawMarginSize == null)
+            {
+                return false;
+            }
+
+            if (!TryGetNumericProperty(drawMarginLocation, "X", out double x) ||
+                !TryGetNumericProperty(drawMarginLocation, "Y", out double y) ||
+                !TryGetNumericProperty(drawMarginSize, "Width", out double width) ||
+                !TryGetNumericProperty(drawMarginSize, "Height", out double height) ||
+                width <= 0 ||
+                height <= 0)
+            {
+                return false;
+            }
+
+            bounds = new Rect(x, y, width, height);
+            return true;
+        }
+
+        private static bool TryGetNumericProperty(object instance, string propertyName, out double value)
+        {
+            value = 0;
+
+            object? raw = instance.GetType().GetProperty(propertyName)?.GetValue(instance);
+            if (raw == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                value = Convert.ToDouble(raw);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
     }
 }

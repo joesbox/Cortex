@@ -58,7 +58,8 @@
                     Height="500"
                     Margin="0,-55,0,-55"
                     HorizontalAlignment="Stretch"
-                    Pins="{Binding ConnectorPins}" />
+                    Pins="{Binding ConnectorPins}"
+                    ToolTip.Tip="Visual map of the 35-way connector. Hover and use the pin summary table below to cross-reference pin roles, configuration, and live state." />
             </StackPanel>
         </Border>
         <Border
@@ -80,6 +81,7 @@
                     <TextBlock Classes="connectorTitle" Margin="0,0,0,4" Text="Pin summary" />
                 </StackPanel>
                 <DataGrid
+                    x:Name="ConnectorPinsGrid"
                     Grid.Row="1"
                     AutoGenerateColumns="False"
                     CanUserReorderColumns="False"
@@ -88,14 +90,8 @@
                     GridLinesVisibility="All"
                     IsReadOnly="True"
                     MinWidth="1360"
-                    ItemsSource="{Binding ConnectorPins}">
-                    <DataGrid.Styles>
-
-                        <Style Selector="DataGridColumnHeader">
-                            <Setter Property="FontSize" Value="14" />
-                            <Setter Property="FontWeight" Value="SemiBold" />
-                        </Style>
-                    </DataGrid.Styles>
+                    ItemsSource="{Binding ConnectorPins}"
+                    ToolTip.Tip="Tabular pin summary showing physical role, configured type, active state, live reading, and protection or scaling details.">
                     <DataGrid.Columns>
                         <DataGridTextColumn Binding="{Binding PinNumberText}" Header="Pin" MinWidth="80" Width="80" />
                         <DataGridTextColumn Binding="{Binding PhysicalFunction}" Header="Physical role" MinWidth="260" Width="2*" />

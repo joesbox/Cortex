@@ -310,25 +310,6 @@
                         Focusable="False"
                         IsReadOnly="True"
                         ItemsSource="{Binding LiveDataView.ChannelsLiveData}">
-                        <DataGrid.Styles>
-                            <Style Selector="DataGridColumnHeader">
-                                <Setter Property="FontSize" Value="18" />
-                                <Setter Property="FontWeight" Value="ExtraBold" />
-                                <Setter Property="HorizontalContentAlignment" Value="Center" />
-                                <Setter Property="VerticalContentAlignment" Value="Center" />
-                                <Setter Property="Padding" Value="8,4,-26,4" />
-                                <Setter Property="Margin" Value="0,0,0,0" />
-                                <Setter Property="Foreground" Value="White" />
-                            </Style>
-                            <Style Selector="DataGridCell">
-                                <Setter Property="Padding" Value="0"/>
-                                <Setter Property="HorizontalContentAlignment" Value="Center"/>
-                                <Setter Property="VerticalContentAlignment" Value="Stretch"/>
-                            </Style>
-                            <Style Selector="DataGridRow:pointerover">
-                                <Setter Property="Background" Value="Transparent"/>
-                            </Style>
-                        </DataGrid.Styles>
                         <DataGrid.Columns>
                             <DataGridTextColumn
                                 Width="Auto"
@@ -342,7 +323,7 @@
                                 Width="Auto"
                                 Binding="{Binding ChanType}"
                                 Header="Type" />
-                            <DataGridTemplateColumn Width="100">
+                            <DataGridTemplateColumn Width="Auto" MinWidth="130">
                                 <DataGridTemplateColumn.Header>
                                     <Border HorizontalAlignment="Stretch">
                                         <TextBlock
@@ -662,6 +643,19 @@
                                                         <TextBlock
                                                             VerticalAlignment="Center"
                                                             Text="{Binding DisplayName}" />
+                                                        <Border
+                                                            MinWidth="72"
+                                                            Padding="6,2"
+                                                            Background="#2A213B"
+                                                            BorderBrush="#55426C"
+                                                            BorderThickness="1"
+                                                            CornerRadius="4">
+                                                            <TextBlock
+                                                                HorizontalAlignment="Right"
+                                                                VerticalAlignment="Center"
+                                                                FontFamily="Consolas"
+                                                                Text="{Binding CurrentValueText}" />
+                                                        </Border>
                                                     </StackPanel>
                                                 </CheckBox>
                                             </DataTemplate>
@@ -722,6 +716,19 @@
                                                         <TextBlock
                                                             VerticalAlignment="Center"
                                                             Text="{Binding DisplayName}" />
+                                                        <Border
+                                                            MinWidth="72"
+                                                            Padding="6,2"
+                                                            Background="#2A213B"
+                                                            BorderBrush="#55426C"
+                                                            BorderThickness="1"
+                                                            CornerRadius="4">
+                                                            <TextBlock
+                                                                HorizontalAlignment="Right"
+                                                                VerticalAlignment="Center"
+                                                                FontFamily="Consolas"
+                                                                Text="{Binding CurrentValueText}" />
+                                                        </Border>
                                                     </StackPanel>
                                                 </CheckBox>
                                             </DataTemplate>
@@ -742,31 +749,28 @@
                         </Grid>
                     </Grid>
                     <Grid Grid.Row="1">
-                        <lvc:CartesianChart
-                            x:Name="ChannelChart"
-                            Series="{Binding SeriesCollection}"
-                            FindingStrategy="{Binding LiveFindingStrategy}"
-                            HoveredPointsChangedCommand="{Binding HandleLiveHoveredPointsChangedCommand}"
-                            XAxes="{Binding XAxes}"
-                            YAxes="{Binding YAxes}"
-                            ZoomMode="None"
-                            ClipToBounds="True"/>
                         <Border
-                            Margin="12"
-                            Padding="8,6"
-                            HorizontalAlignment="Left"
-                            VerticalAlignment="Top"
-                            MaxWidth="560"
-                            Background="#CC181321"
-                            BorderBrush="#4C415C"
+                            Margin="12,8,12,12"
+                            Padding="4"
+                            Background="#FF1B1E24"
+                            BorderBrush="#443553"
                             BorderThickness="1"
-                            CornerRadius="6"
-                            IsVisible="{Binding HasLiveChartSelection}"
-                            IsHitTestVisible="False">
-                            <TextBlock
-                                Text="{Binding LiveChartHoverSummary}"
-                                TextWrapping="Wrap"
-                                FontFamily="Consolas" />
+                            CornerRadius="10"
+                            ClipToBounds="True">
+                            <lvc:CartesianChart
+                                x:Name="ChannelChart"
+                                Background="Transparent"
+                                Series="{Binding SeriesCollection}"
+                                FindingStrategy="{Binding LiveFindingStrategy}"
+                                HoveredPointsChangedCommand="{Binding HandleLiveHoveredPointsChangedCommand}"
+                                PointerEntered="OnChannelChartPointerEntered"
+                                PointerMoved="OnChannelChartPointerMoved"
+                                PointerExited="OnChannelChartPointerExited"
+                                TooltipPosition="Hidden"
+                                XAxes="{Binding XAxes}"
+                                YAxes="{Binding YAxes}"
+                                ZoomMode="None"
+                                ClipToBounds="True"/>
                         </Border>
                     </Grid>
                 </Grid>

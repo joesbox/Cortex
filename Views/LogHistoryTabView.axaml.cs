@@ -5,6 +5,7 @@ using Avalonia.Markup.Xaml;
 using Avalonia.Threading;
 using Cortex.Models;
 using Cortex.ViewModels;
+using LiveChartsCore.SkiaSharpView.Avalonia;
 using Mapsui;
 using Mapsui.Extensions;
 using Mapsui.Layers;
@@ -28,6 +29,7 @@ public partial class LogHistoryTabView : UserControl
         private const double MinimumVisibleMarkerSpacingPixels = 18;
 
         private readonly DispatcherTimer _logMapRefreshTimer;
+        private readonly CartesianChart? _logChart;
         private readonly Mapsui.UI.Avalonia.MapControl? _logMap;
         private readonly DataGrid? _logMapDataGrid;
         private MainWindowViewModel? _viewModel;
@@ -45,6 +47,7 @@ public partial class LogHistoryTabView : UserControl
         public LogHistoryTabView()
         {
             AvaloniaXamlLoader.Load(this);
+            _logChart = this.FindControl<CartesianChart>("LogChart");
             _logMap = this.FindControl<Mapsui.UI.Avalonia.MapControl>("LogMap");
             _logMapDataGrid = this.FindControl<DataGrid>("LogMapDataGrid");
 
@@ -58,6 +61,42 @@ public partial class LogHistoryTabView : UserControl
 
             DataContextChanged += (_, _) => AttachToViewModel();
             DetachedFromVisualTree += (_, _) => DetachFromViewModel();
+        }
+
+        private void OnLogChartPointerEntered(object? sender, PointerEventArgs e)
+        {
+            UpdateLogHoverAnchorFromPointer(e);
+        }
+
+        private void OnLogChartPointerMoved(object? sender, PointerEventArgs e)
+        {
+            UpdateLogHoverAnchorFromPointer(e);
+        }
+
+        private void OnLogChartPointerExited(object? sender, PointerEventArgs e)
+        {
+            if (DataContext is MainWindowViewModel vm)
+            {
+                vm.ClearLogHoverValues();
+            }
+        }
+
+        private void UpdateLogHoverAnchorFromPointer(PointerEventArgs e)
+        {
+            if (_logChart == null || DataContext is not MainWindowViewModel vm)
+            {
+                return;
+            }
+
+            double width = _logChart.Bounds.Width;
+            if (width <= 0)
+            {
+                return;
+            }
+
+            var pointerPosition = e.GetPosition(_logChart);
+            double relativeX = Math.Clamp(pointerPosition.X / width, 0d, 1d);
+            vm.UpdateLogHoverAnchorFromRelativeX(relativeX);
         }
 
         private void InitializeLogMap()
@@ -542,26 +581,24 @@ public partial class LogHistoryTabView : UserControl
             }
 
             _logMapDataGrid.Columns.Clear();
-            _logMapDataGrid.Columns.Add(CreateInspectionColumn("Date", "Date", 110));
-            _logMapDataGrid.Columns.Add(CreateInspectionColumn("Time", "Time", 125));
+            _logMapDataGrid.Columns.Add(CreateInspectionColumn("Date", "Date"));
+            _logMapDataGrid.Columns.Add(CreateInspectionColumn("Time", "Time"));
 
             foreach (LogMapParameterColumn column in _displayedLogMapColumns)
             {
-                _logMapDataGrid.Columns.Add(CreateInspectionColumn(column.ColumnId, column.Header, double.NaN));
+                _logMapDataGrid.Columns.Add(CreateInspectionColumn(column.ColumnId, column.Header));
             }
         }
 
-        private static DataGridTextColumn CreateInspectionColumn(string columnId, string header, double width)
+        private static DataGridTextColumn CreateInspectionColumn(string columnId, string header)
         {
             var column = new DataGridTextColumn
             {
                 Header = header,
                 Binding = new Binding($"[{columnId}]"),
+                Width = new DataGridLength(1, DataGridLengthUnitType.Auto),
             };
 
-            column.Width = double.IsNaN(width)
-                ? new DataGridLength(1, DataGridLengthUnitType.Star)
-                : new DataGridLength(width);
             return column;
         }
 

@@ -1,0 +1,64 @@
+<Window x:Class="Cortex.Views.PinUnlockDialogWindow" xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="Unlock PDM" Width="520" Height="340" CanResize="False" WindowStartupLocation="CenterOwner" Icon="/Assets/cortex.ico">
+  <Grid Margin="18" RowDefinitions="*,Auto" RowSpacing="12">
+	<ScrollViewer Grid.Row="0" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+	  <StackPanel Spacing="12">
+		<TextBlock Text="Unlock PDM" FontSize="18" FontWeight="SemiBold" />
+		<TextBlock x:Name="InstructionText" Text="Enter your PIN to unlock this session." TextWrapping="Wrap" Foreground="Gainsboro" />
+
+		<Border x:Name="LoginSection" BorderBrush="#443553" BorderThickness="1" CornerRadius="8" Padding="14">
+		  <Border.Background>
+			<LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+			  <GradientStop Color="#FF141722" Offset="0" />
+			  <GradientStop Color="#FF221C34" Offset="0.5" />
+			  <GradientStop Color="#FF302042" Offset="1" />
+			</LinearGradientBrush>
+		  </Border.Background>
+		  <StackPanel Spacing="10">
+			<TextBlock Text="PIN" FontWeight="Medium" />
+			<StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Left">
+			  <TextBox x:Name="PinBox1" Width="44" MaxLength="1" HorizontalContentAlignment="Center" />
+			  <TextBox x:Name="PinBox2" Width="44" MaxLength="1" HorizontalContentAlignment="Center" />
+			  <TextBox x:Name="PinBox3" Width="44" MaxLength="1" HorizontalContentAlignment="Center" />
+			  <TextBox x:Name="PinBox4" Width="44" MaxLength="1" HorizontalContentAlignment="Center" />
+			</StackPanel>
+		  </StackPanel>
+		</Border>
+
+		<Border x:Name="RecoverySection" BorderBrush="#443553" BorderThickness="1" CornerRadius="8" Padding="14" IsVisible="False">
+		  <Border.Background>
+			<LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+			  <GradientStop Color="#FF141722" Offset="0" />
+			  <GradientStop Color="#FF221C34" Offset="0.5" />
+			  <GradientStop Color="#FF302042" Offset="1" />
+			</LinearGradientBrush>
+		  </Border.Background>
+		  <StackPanel Spacing="10">
+			<TextBlock Text="Recover access with your recovery key and set a new PIN." TextWrapping="Wrap" Foreground="Gainsboro" />
+			<TextBlock Text="Recovery Key" FontWeight="Medium" />
+			<TextBox x:Name="RecoveryKeyBox" Watermark="Recovery key" />
+			<TextBlock Text="New PIN" FontWeight="Medium" />
+			<StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Left">
+			  <TextBox x:Name="NewPinBox1" Width="44" MaxLength="1" HorizontalContentAlignment="Center" />
+			  <TextBox x:Name="NewPinBox2" Width="44" MaxLength="1" HorizontalContentAlignment="Center" />
+			  <TextBox x:Name="NewPinBox3" Width="44" MaxLength="1" HorizontalContentAlignment="Center" />
+			  <TextBox x:Name="NewPinBox4" Width="44" MaxLength="1" HorizontalContentAlignment="Center" />
+			</StackPanel>
+		  </StackPanel>
+		</Border>
+
+		<Border Padding="0,2,0,0">
+		  <StackPanel Spacing="6">
+			<TextBlock x:Name="RetryText" Foreground="Gainsboro" TextWrapping="Wrap" IsVisible="False" />
+			<TextBlock x:Name="StatusText" Foreground="Orange" TextWrapping="Wrap" IsVisible="False" />
+		  </StackPanel>
+		</Border>
+	  </StackPanel>
+	</ScrollViewer>
+
+	<StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10">
+	  <Button x:Name="CancelButton" Content="CANCEL" MinWidth="96" />
+	  <Button x:Name="ToggleModeButton" Content="RECOVER PIN" MinWidth="110" />
+	  <Button x:Name="UnlockButton" Content="UNLOCK" MinWidth="96" />
+	</StackPanel>
+  </Grid>
+</Window>

@@ -16,13 +16,28 @@
         private bool _allowCloseWithoutUnsavedPrompt;
 
         public MainWindow()
+            : this(appCloser => new MainWindowViewModel(appCloser))
+        {
+        }
+
+        public MainWindow(Func<IAppCloser, MainWindowViewModel> viewModelFactory)
         {
             InitializeComponent();
 
-            var vm = new MainWindowViewModel(this);
+            if (viewModelFactory == null)
+            {
+                throw new ArgumentNullException(nameof(viewModelFactory));
+            }
+
+            MainWindowViewModel vm = viewModelFactory(this);
+            InitializeViewModel(vm);
+        }
+
+        private void InitializeViewModel(MainWindowViewModel vm)
+        {
             DataContext = vm;
 
-            _ = vm.RestoreProvisioningSessionAsync();
+            StartBackgroundTask(vm.RestoreProvisioningSessionAsync(), "Restore provisioning session");
 
             Closing += async (_, args) =>
             {
@@ -59,11 +74,19 @@
                 Close();
             };
 
+            Closed += (_, _) =>
+            {
+                if (DataContext is IDisposable disposable)
+                {
+                    disposable.Dispose();
+                }
+            };
+
             vm.PropertyChanged += (_, args) =>
                 {
-                    if (args.PropertyName == nameof(vm.IsConnected))
+                    if (args.PropertyName == nameof(vm.IsControllerUiReady))
                     {
-                        UpdateConnectionState(vm.IsConnected);
+                        UpdateConnectionState(vm.IsControllerUiReady);
                     }
 
                     if (args.PropertyName == nameof(vm.SdOK))
@@ -92,7 +115,7 @@
                     }
                 };
 
-            UpdateConnectionState(vm.IsConnected);
+            UpdateConnectionState(vm.IsControllerUiReady);
             UpdateSDStatus(vm.SdOK);
             UpdateCurrentStatus(vm.OverCurrent);
             UpdateTempStatus(vm.OverTemperature);
@@ -103,6 +126,26 @@
         public void CloseApp()
         {
             Close();
+        }
+
+        private void StartBackgroundTask(Task task, string operationName)
+        {
+            _ = ObserveBackgroundTaskAsync(task, operationName);
+        }
+
+        private static async Task ObserveBackgroundTaskAsync(Task task, string operationName)
+        {
+            try
+            {
+                await task;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                LoggingService.AddLog($"{operationName} failed: {ex.Message}", exception: ex);
+            }
         }
 
         public async Task<string?> OpenPdmFileContentAsync()
@@ -154,6 +197,25 @@
             }
 
             var selectedFile = (await StorageProvider.OpenFilePickerAsync(options)).FirstOrDefault();
+            return selectedFile?.TryGetLocalPath();
+        }
+
+        public async Task<string?> BrowseDbcFilePathAsync()
+        {
+            var selectedFile = (await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+            {
+                Title = "Import CAN DBC",
+                AllowMultiple = false,
+                FileTypeFilter =
+                [
+                    new FilePickerFileType("DBC File")
+                    {
+                        Patterns = ["*.dbc"],
+                    },
+                    FilePickerFileTypes.All,
+                ],
+            })).FirstOrDefault();
+
             return selectedFile?.TryGetLocalPath();
         }
 
@@ -314,6 +376,24 @@
             {
                 viewModel.CloseRequested -= CloseRequested;
             }
+        }
+
+        public async Task<PinSetupDialogResult?> ShowPinSetupWizardAsync(bool isPinAlreadyEnabled)
+        {
+            var dialog = new PinSetupDialogWindow(isPinAlreadyEnabled);
+            return await dialog.ShowDialog<PinSetupDialogResult?>(this);
+        }
+
+        public async Task<bool> ShowRecoveryCodeAsync(string recoveryCode)
+        {
+            var dialog = new RecoveryCodeDialogWindow(recoveryCode);
+            return await dialog.ShowDialog<bool>(this);
+        }
+
+        public async Task<PinUnlockDialogResult?> ShowPinUnlockDialogAsync(bool allowRecovery, uint retryAfterMs, string? statusMessage)
+        {
+            var dialog = new PinUnlockDialogWindow(allowRecovery, retryAfterMs, statusMessage);
+            return await dialog.ShowDialog<PinUnlockDialogResult?>(this);
         }
 
         private void UpdateConnectionState(bool isConnected)

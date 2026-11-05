@@ -1,0 +1,22 @@
+<Window x:Class="Cortex.Views.RecoveryCodeDialogWindow" xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="Recovery Code" Width="600" Height="380" CanResize="False" WindowStartupLocation="CenterOwner" Icon="/Assets/cortex.ico">
+  <Grid Margin="18" RowDefinitions="Auto,Auto,Auto,Auto,*,Auto" RowSpacing="12">
+	<TextBlock Grid.Row="0" Text="Recovery Key" FontSize="18" FontWeight="SemiBold" />
+	<TextBlock Grid.Row="1" Text="Store this key somewhere safe. It is required if you forget your PIN." TextWrapping="Wrap" Foreground="Gainsboro" />
+	<Border Grid.Row="2" BorderBrush="DimGray" BorderThickness="1" CornerRadius="6" Padding="14">
+	  <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+		<SelectableTextBlock x:Name="RecoveryCodeText" Grid.Column="0" FontSize="18" VerticalAlignment="Center" />
+		<Button x:Name="CopyButton" Grid.Column="1" Content="COPY CODE" MinWidth="110" />
+	  </Grid>
+	</Border>
+	<Border Grid.Row="3" Margin="0,2,0,0" Padding="10" BorderBrush="DimGray" BorderThickness="1" CornerRadius="6">
+	  <CheckBox x:Name="AcknowledgeCheckBox" Content="I have stored this recovery code safely." />
+	</Border>
+	<Border Grid.Row="4" Padding="0,6,0,0">
+	  <TextBlock x:Name="StatusText" Foreground="Orange" TextWrapping="Wrap" />
+	</Border>
+	<StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10">
+	  <Button x:Name="CloseButton" Content="CLOSE" MinWidth="96" />
+	  <Button x:Name="DoneButton" Content="DONE" MinWidth="96" />
+	</StackPanel>
+  </Grid>
+</Window>

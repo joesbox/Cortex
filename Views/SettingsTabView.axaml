@@ -31,7 +31,7 @@
         </Style>
     </UserControl.Styles>
     <Grid RowDefinitions="*, Auto">
-        <TabControl Grid.Row="0">
+        <TabControl x:Name="SettingsTabs" Grid.Row="0">
             <TabItem Header="I/O">
                 <Grid ColumnDefinitions="*,Auto">
                     <Border
@@ -300,7 +300,7 @@
                                             Spacing="9">
                                         <StackPanel
                                             HorizontalAlignment="Center"
-                                            IsEnabled="{Binding IsPWMChannel}"
+                                            IsEnabled="{Binding IsManualPwmDutyChannel}"
                                             Orientation="Vertical">
                                             <TextBlock
                                                 HorizontalAlignment="Center"
@@ -317,7 +317,7 @@
                                                     Width="200"
                                                     HorizontalAlignment="Center"
                                                     VerticalAlignment="Center"
-                                                    IsEnabled="{Binding IsPWMChannel}"
+                                                    IsEnabled="{Binding IsManualPwmDutyChannel}"
                                                     IsSnapToTickEnabled="True"
                                                     Maximum="100"
                                                     Minimum="0"
@@ -751,6 +751,91 @@
                                                     TickFrequency="0.1" />
                                             </StackPanel>
                                         </StackPanel>
+                                        <Border
+                                            Margin="0,12,0,0"
+                                            Padding="10"
+                                            BorderBrush="#443553"
+                                            BorderThickness="1"
+                                            CornerRadius="8"
+                                            HorizontalAlignment="Stretch"
+                                            MaxWidth="560">
+                                            <StackPanel Orientation="Vertical" Spacing="8">
+                                                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+                                                    <TextBlock
+                                                        Grid.Column="0"
+                                                        Classes="ioFieldLabel"
+                                                        VerticalAlignment="Center"
+                                                        Text="CAN TX"
+                                                        ToolTip.Tip="Transmit custom CAN messages while this output is active." />
+                                                    <ToggleSwitch
+                                                        Grid.Column="1"
+                                                        HorizontalAlignment="Left"
+                                                        VerticalAlignment="Center"
+                                                        BorderBrush="#302042"
+                                                        BorderThickness="1"
+                                                        CornerRadius="10"
+                                                        OffContent="Disabled"
+                                                        OnContent="Enabled"
+                                                        IsChecked="{Binding SelectedChannelCanTxEnabled, Mode=OneWay}"
+                                                        Command="{Binding ToggleSelectedChannelCanTxCommand}"
+                                                        ToolTip.Tip="Enable or disable TX messages assigned to this channel." />
+                                                </Grid>
+
+                                                <TextBlock
+                                                    Foreground="#FFD0C3E8"
+                                                    TextWrapping="Wrap"
+                                                    ToolTip.Tip="Shows which stored CAN TX messages are currently tied to this output channel."
+                                                    Text="{Binding SelectedChannelCanTxSummary}" />
+
+                                                <Grid ColumnDefinitions="150,*" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="6"
+                                                      IsEnabled="{Binding SelectedChannelCanTxControlsEnabled}">
+                                                    <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Message" ToolTip.Tip="Choose which stored CAN message this output channel controls." />
+                                                    <ComboBox
+                                                        Grid.Row="0"
+                                                        Grid.Column="1"
+                                                        HorizontalAlignment="Stretch"
+                                                        ToolTip.Tip="Only messages with stored signals are listed here."
+                                                        ItemsSource="{Binding SelectedChannelCanTxMessages}"
+                                                        SelectedItem="{Binding SelectedChannelCanTxMessage, Mode=TwoWay}">
+                                                        <ComboBox.ItemTemplate>
+                                                            <DataTemplate>
+                                                                <TextBlock Text="{Binding SelectionSummary}" />
+                                                            </DataTemplate>
+                                                        </ComboBox.ItemTemplate>
+                                                    </ComboBox>
+
+                                                    <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="Mode" ToolTip.Tip="One-shot sends on output activation; periodic repeats while active." />
+                                                    <ComboBox
+                                                        Grid.Row="1"
+                                                        Grid.Column="1"
+                                                        HorizontalAlignment="Stretch"
+                                                        ToolTip.Tip="TX one-shot: send once when output turns on. TX periodic: repeat at the chosen interval while output remains on."
+                                                        ItemsSource="{Binding ChannelCanTxModeOptions}"
+                                                        SelectedIndex="{Binding SelectedChannelCanTxModeIndex, Mode=TwoWay}" />
+
+                                                    <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" IsVisible="{Binding ShowSelectedChannelCanTxTiming}" Text="{Binding SelectedChannelCanTxTimeoutLabel}" ToolTip.Tip="{Binding SelectedChannelCanTxTimeoutTooltip}" />
+                                                    <Grid Grid.Row="2" Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="8" VerticalAlignment="Center" IsVisible="{Binding ShowSelectedChannelCanTxTiming}">
+                                                        <Slider
+                                                            Grid.Column="0"
+                                                            HorizontalAlignment="Stretch"
+                                                            ToolTip.Tip="{Binding SelectedChannelCanTxTimeoutTooltip}"
+                                                            Minimum="100"
+                                                            Maximum="30000"
+                                                            TickFrequency="100"
+                                                            IsSnapToTickEnabled="True"
+                                                            Value="{Binding SelectedChannelCanTxTimeoutMs, Mode=TwoWay}" />
+                                                        <TextBlock Grid.Column="1" VerticalAlignment="Center" Text="{Binding SelectedChannelCanTxTimeoutMs, StringFormat='{}{0} ms'}" />
+                                                    </Grid>
+                                                </Grid>
+
+                                                <TextBlock
+                                                    Foreground="#FFD0C3E8"
+                                                    TextWrapping="Wrap"
+                                                    IsVisible="{Binding !HasAvailableChannelCanTxMessage}"
+                                                    Text="No TX message is currently configured in CAN Messages." />
+
+                                            </StackPanel>
+                                        </Border>
                                         </StackPanel>
                                     </Border>
                                     <Border
@@ -970,7 +1055,7 @@
                                                 ItemsSource="{Binding AnalogueChannelTypes}"
                                                 DisplayMemberBinding="{Binding Label}"
                                                 SelectedValueBinding="{Binding Type}"
-                                                SelectedValue="{Binding SelectedAnalogueInput.ChanType, Mode=TwoWay}" />
+                                                SelectedValue="{Binding SelectedAnalogueInput?.ChanType, Mode=TwoWay}" />
                                             <TextBlock
                                                 HorizontalAlignment="Center"
                                                 VerticalAlignment="Center"
@@ -978,11 +1063,11 @@
                                             <ComboBox
                                                 Width="160"
                                                 HorizontalAlignment="Center"
-                                                IsEnabled="{Binding SelectedAnalogueInput.IsUnitsSelectable}"
+                                                IsEnabled="{Binding SelectedAnalogueInput?.IsUnitsSelectable}"
                                                 ItemsSource="{Binding FilteredAnalogueUnits}"
                                                 DisplayMemberBinding="{Binding Label}"
                                                 SelectedValueBinding="{Binding Units}"
-                                                SelectedValue="{Binding SelectedAnalogueInput.Units, Mode=TwoWay}" />
+                                                SelectedValue="{Binding SelectedAnalogueInput?.Units, Mode=TwoWay}" />
                                             <TextBlock
                                                 HorizontalAlignment="Center"
                                                 VerticalAlignment="Center"
@@ -992,11 +1077,11 @@
                                                 Width="110"
                                                 HorizontalAlignment="Center"
                                                 VerticalAlignment="Center"
-                                                IsEnabled="{Binding SelectedAnalogueInput.AllowPullResistors}"
+                                                IsEnabled="{Binding SelectedAnalogueInput?.AllowPullResistors}"
                                                 BorderBrush="#302042"
                                                 BorderThickness="1"
                                                 CornerRadius="10"
-                                                IsChecked="{Binding SelectedAnalogueInput.PullUpEnable, Mode=TwoWay}"
+                                                IsChecked="{Binding SelectedAnalogueInput?.PullUpEnable, Mode=TwoWay}"
                                                 OffContent="Disabled"
                                                 OnContent="Enabled" />
                                             <TextBlock
@@ -1008,11 +1093,11 @@
                                                 Width="110"
                                                 HorizontalAlignment="Center"
                                                 VerticalAlignment="Center"
-                                                IsEnabled="{Binding SelectedAnalogueInput.AllowPullResistors}"
+                                                IsEnabled="{Binding SelectedAnalogueInput?.AllowPullResistors}"
                                                 BorderBrush="#302042"
                                                 BorderThickness="1"
                                                 CornerRadius="10"
-                                                IsChecked="{Binding SelectedAnalogueInput.PullDownEnable, Mode=TwoWay}"
+                                                IsChecked="{Binding SelectedAnalogueInput?.PullDownEnable, Mode=TwoWay}"
                                                 OffContent="Disabled"
                                                 OnContent="Enabled" />
                                             </StackPanel>
@@ -1022,7 +1107,7 @@
                                             Margin="0,4,0,0"
                                             Padding="12"
                                             HorizontalAlignment="Center"
-                                            IsVisible="{Binding SelectedAnalogueInput.HasDetailSettings}"
+                                            IsVisible="{Binding SelectedAnalogueInput?.HasDetailSettings}"
                                             BorderBrush="#443553"
                                             BorderThickness="1"
                                             CornerRadius="8">
@@ -1030,19 +1115,19 @@
                                                 Orientation="Vertical"
                                                 Spacing="8">
                                             <TextBlock
-                                                IsVisible="{Binding SelectedAnalogueInput.IsCalibrationMode}"
+                                                IsVisible="{Binding SelectedAnalogueInput?.IsCalibrationMode}"
                                                 HorizontalAlignment="Center"
                                                 VerticalAlignment="Center"
                                                 Text="Calibration points" />
                                             <ComboBox
                                                 Width="120"
                                                 HorizontalAlignment="Center"
-                                                IsVisible="{Binding SelectedAnalogueInput.IsCalibrationMode}"
+                                                IsVisible="{Binding SelectedAnalogueInput?.IsCalibrationMode}"
                                                 ItemsSource="{Binding AnalogueCalibrationPointOptions}"
-                                                SelectedItem="{Binding SelectedAnalogueInput.CalibrationPoints, Mode=TwoWay}" />
+                                                SelectedItem="{Binding SelectedAnalogueInput?.CalibrationPoints, Mode=TwoWay}" />
 
                                             <Grid
-                                                IsVisible="{Binding SelectedAnalogueInput.IsCalibrationMode}"
+                                                IsVisible="{Binding SelectedAnalogueInput?.IsCalibrationMode}"
                                                 ColumnDefinitions="Auto,Auto,Auto"
                                                 ColumnSpacing="8"
                                                 RowDefinitions="Auto,Auto,Auto,Auto">
@@ -1051,58 +1136,58 @@
                                                 <TextBlock Grid.Row="0" Grid.Column="2" Text="Value" HorizontalAlignment="Center" />
 
                                                 <TextBlock Grid.Row="1" Grid.Column="0" Text="1" HorizontalAlignment="Center" />
-                                                <TextBox Grid.Row="1" Grid.Column="1" Width="80" Text="{Binding SelectedAnalogueInput.CalibrationVolt1, Mode=TwoWay}" />
-                                                <TextBox Grid.Row="1" Grid.Column="2" Width="80" Text="{Binding SelectedAnalogueInput.CalibrationValue1, Mode=TwoWay}" />
+                                                <TextBox Grid.Row="1" Grid.Column="1" Width="80" Text="{Binding SelectedAnalogueInput?.CalibrationVolt1, Mode=TwoWay}" />
+                                                <TextBox Grid.Row="1" Grid.Column="2" Width="80" Text="{Binding SelectedAnalogueInput?.CalibrationValue1, Mode=TwoWay}" />
 
                                                 <TextBlock Grid.Row="2" Grid.Column="0" Text="2" HorizontalAlignment="Center" />
-                                                <TextBox Grid.Row="2" Grid.Column="1" Width="80" Text="{Binding SelectedAnalogueInput.CalibrationVolt2, Mode=TwoWay}" />
-                                                <TextBox Grid.Row="2" Grid.Column="2" Width="80" Text="{Binding SelectedAnalogueInput.CalibrationValue2, Mode=TwoWay}" />
+                                                <TextBox Grid.Row="2" Grid.Column="1" Width="80" Text="{Binding SelectedAnalogueInput?.CalibrationVolt2, Mode=TwoWay}" />
+                                                <TextBox Grid.Row="2" Grid.Column="2" Width="80" Text="{Binding SelectedAnalogueInput?.CalibrationValue2, Mode=TwoWay}" />
 
-                                                <TextBlock Grid.Row="3" Grid.Column="0" Text="3" HorizontalAlignment="Center" IsVisible="{Binding SelectedAnalogueInput.IsThreePointCalibration}" />
-                                                <TextBox Grid.Row="3" Grid.Column="1" Width="80" Text="{Binding SelectedAnalogueInput.CalibrationVolt3, Mode=TwoWay}" IsVisible="{Binding SelectedAnalogueInput.IsThreePointCalibration}" />
-                                                <TextBox Grid.Row="3" Grid.Column="2" Width="80" Text="{Binding SelectedAnalogueInput.CalibrationValue3, Mode=TwoWay}" IsVisible="{Binding SelectedAnalogueInput.IsThreePointCalibration}" />
+                                                <TextBlock Grid.Row="3" Grid.Column="0" Text="3" HorizontalAlignment="Center" IsVisible="{Binding SelectedAnalogueInput?.IsThreePointCalibration}" />
+                                                <TextBox Grid.Row="3" Grid.Column="1" Width="80" Text="{Binding SelectedAnalogueInput?.CalibrationVolt3, Mode=TwoWay}" IsVisible="{Binding SelectedAnalogueInput?.IsThreePointCalibration}" />
+                                                <TextBox Grid.Row="3" Grid.Column="2" Width="80" Text="{Binding SelectedAnalogueInput?.CalibrationValue3, Mode=TwoWay}" IsVisible="{Binding SelectedAnalogueInput?.IsThreePointCalibration}" />
                                             </Grid>
 
                                             <TextBlock
-                                                IsVisible="{Binding SelectedAnalogueInput.IsCalibrationMode}"
+                                                IsVisible="{Binding SelectedAnalogueInput?.IsCalibrationMode}"
                                                 HorizontalAlignment="Center"
                                                 VerticalAlignment="Center"
                                                 Text="Channel input range (min / max)" />
                                             <StackPanel
-                                                IsVisible="{Binding SelectedAnalogueInput.IsCalibrationMode}"
+                                                IsVisible="{Binding SelectedAnalogueInput?.IsCalibrationMode}"
                                                 HorizontalAlignment="Center"
                                                 Orientation="Horizontal"
                                                 Spacing="8">
                                                 <TextBox
                                                     Width="80"
                                                     HorizontalAlignment="Center"
-                                                    Text="{Binding SelectedAnalogueInput.ConfigRangeMin, Mode=TwoWay}" />
+                                                    Text="{Binding SelectedAnalogueInput?.ConfigRangeMin, Mode=TwoWay}" />
                                                 <TextBox
                                                     Width="80"
                                                     HorizontalAlignment="Center"
-                                                    Text="{Binding SelectedAnalogueInput.ConfigRangeMax, Mode=TwoWay}" />
+                                                    Text="{Binding SelectedAnalogueInput?.ConfigRangeMax, Mode=TwoWay}" />
                                             </StackPanel>
 
                                             <TextBlock
-                                                IsVisible="{Binding SelectedAnalogueInput.IsNtcMode}"
+                                                IsVisible="{Binding SelectedAnalogueInput?.IsNtcMode}"
                                                 HorizontalAlignment="Center"
                                                 VerticalAlignment="Center"
                                                 Text="NTC Beta" />
                                             <TextBox
-                                                IsVisible="{Binding SelectedAnalogueInput.IsNtcMode}"
+                                                IsVisible="{Binding SelectedAnalogueInput?.IsNtcMode}"
                                                 Width="150"
                                                 HorizontalAlignment="Center"
-                                                Text="{Binding SelectedAnalogueInput.NtcBeta, Mode=TwoWay}" />
+                                                Text="{Binding SelectedAnalogueInput?.NtcBeta, Mode=TwoWay}" />
                                             <TextBlock
-                                                IsVisible="{Binding SelectedAnalogueInput.IsNtcMode}"
+                                                IsVisible="{Binding SelectedAnalogueInput?.IsNtcMode}"
                                                 HorizontalAlignment="Center"
                                                 VerticalAlignment="Center"
                                                 Text="NTC Resistance @25&#176;C (ohms)" />
                                             <TextBox
-                                                IsVisible="{Binding SelectedAnalogueInput.IsNtcMode}"
+                                                IsVisible="{Binding SelectedAnalogueInput?.IsNtcMode}"
                                                 Width="150"
                                                 HorizontalAlignment="Center"
-                                                Text="{Binding SelectedAnalogueInput.NtcNominalResistance, Mode=TwoWay}" />
+                                                Text="{Binding SelectedAnalogueInput?.NtcNominalResistance, Mode=TwoWay}" />
                                             </StackPanel>
                                         </Border>
                                     </StackPanel>
@@ -1114,6 +1199,9 @@
             </TabItem>
             <TabItem Header="I/O Flow">
                 <views:IoFlowTabView />
+            </TabItem>
+            <TabItem x:Name="CanMessagesTab" Header="CAN Messages">
+                <views:CanMessagesTabView />
             </TabItem>
             <TabItem Header="Connector">
                 <views:ConnectorTabView />
@@ -1850,6 +1938,50 @@
                                             Foreground="#FFD7B66B"
                                             IsVisible="{Binding IsFactoryResetInProgress}"
                                             Text="{Binding FactoryResetStatusMessage}"/>
+                                    </StackPanel>
+                                    <TextBlock
+                                        Classes="groupTitle"
+                                        Margin="5"
+                                        VerticalAlignment="Center"
+                                        HorizontalAlignment="Center"
+                                        Text="PIN Lock" />
+                                    <StackPanel
+                                        Margin="0,5,0,10"
+                                        HorizontalAlignment="Center"
+                                        Orientation="Vertical"
+                                        Spacing="8">
+                                        <Button
+                                            Width="170"
+                                            HorizontalAlignment="Center"
+                                            HorizontalContentAlignment="Center"
+                                            Command="{Binding ConfigurePinLockCommand}"
+                                            Content="{Binding ConfigurePinLockButtonText}"
+                                            ToolTip.Tip="Set or change the 4-digit PIN lock for secure USB access."
+                                            IsEnabled="{Binding CanConfigurePinLock}"/>
+                                        <Button
+                                            Width="170"
+                                            HorizontalAlignment="Center"
+                                            HorizontalContentAlignment="Center"
+                                            Command="{Binding DisablePinLockCommand}"
+                                            Content="{Binding DisablePinLockButtonText}"
+                                            ToolTip.Tip="Disable PIN lock using an authorized secure session."
+                                            IsEnabled="{Binding CanDisablePinLock}"/>
+                                        <TextBlock
+                                            Width="220"
+                                            HorizontalAlignment="Center"
+                                            TextAlignment="Center"
+                                            TextWrapping="Wrap"
+                                            Foreground="#FFD7B66B"
+                                            IsVisible="{Binding ShowPinLockStatus}"
+                                            Text="{Binding PinLockStatusMessage}"/>
+                                        <TextBlock
+                                            Width="220"
+                                            HorizontalAlignment="Center"
+                                            TextAlignment="Center"
+                                            TextWrapping="Wrap"
+                                            Foreground="#FFD7B66B"
+                                            IsVisible="{Binding HasPinLockRetryDelay}"
+                                            Text="{Binding PinLockRetryMessage}"/>
                                     </StackPanel>
                                 </StackPanel>
                             </Border>

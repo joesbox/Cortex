@@ -1,14 +1,330 @@
 using Cortex.Models;
 using Cortex.Services;
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
 using Xunit;
 
 namespace Cortex.Tests;
 
 public class SerialPortProtocolTests
 {
+    [Fact]
+    public void CustomCanRecords_MatchFirmwarePackedStructLayout()
+    {
+        byte[] message = SerialPortService.BuildCustomCanMessageRecord(0x18FF1234, 1000, 8, 0x0B, 3);
+        Assert.Equal(Constants.CUSTOM_CAN_MESSAGE_RECORD_SIZE, message.Length);
+        Assert.Equal(new byte[] { 0x34, 0x12, 0xFF, 0x18, 0xE8, 0x03, 8, 0x0B, 3 }, message);
+
+        byte[] signal = SerialPortService.BuildCustomCanSignalRecord(2, 7, 12, 0x05, 0.5f, -40f, 255);
+        Assert.Equal(Constants.CUSTOM_CAN_SIGNAL_RECORD_SIZE, signal.Length);
+        Assert.Equal(new byte[] { 2, 7, 12, 0x05 }, signal[..4]);
+        Assert.Equal(0.5f, BinaryPrimitives.ReadSingleLittleEndian(signal.AsSpan(4)));
+        Assert.Equal(-40f, BinaryPrimitives.ReadSingleLittleEndian(signal.AsSpan(8)));
+        Assert.Equal(255, signal[12]);
+    }
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void ProvisioningAndCellularCommands_UseSessionTransportRegardlessOfPin(bool sessionOpen, bool pinEnabled)
+    {
+        using var service = new SerialPortService("COM1");
+        object session = GetField<object>(service, "_secureSession");
+        SetProperty(session, "IsSessionOpen", sessionOpen);
+        SetProperty(session, "IsAuthorized", sessionOpen);
+        SetProperty(session, "PinEnabled", pinEnabled);
+        SetProperty(session, "TxSequence", 7u);
+        var settings = new CellularParameters
+        {
+            APN = "test-apn",
+            ClientID = "test-pdm",
+            UseTLS = true,
+            OpenRemotePort = 8883,
+            TelemetryUploadMask = 0x12345678,
+        };
+        const string request = "{\"test\":true}";
+        byte[] provisioning = (byte[])InvokeInstanceMethod(service, "BuildOpenRemoteProvisioningCommand", settings, request)!;
+        byte[] cellular = (byte[])InvokeInstanceMethod(service, "BuildCellularTestCommand", settings)!;
+        byte[] cellularWithoutSettings = (byte[])InvokeInstanceMethod(service, "BuildCellularTestCommand", new object[] { null! })!;
+
+        if (sessionOpen)
+        {
+            provisioning = DecryptCommandFrame(provisioning, session, 7);
+            cellular = DecryptCommandFrame(cellular, session, 8);
+            cellularWithoutSettings = DecryptCommandFrame(cellularWithoutSettings, session, 9);
+        }
+
+        Assert.Equal((byte)Constants.COMMAND_ID_OPENREMOTE_PROVISION, provisioning[0]);
+        Assert.Equal((byte)Constants.COMMAND_ID_CELLULAR_TEST, cellular[0]);
+        int settingsLength = Constants.CELLULAR_APN_LENGTH + Constants.CELLULAR_HOST_LENGTH + sizeof(ushort) +
+            Constants.CELLULAR_CLIENT_ID_LENGTH + Constants.CELLULAR_MQTT_USERNAME_LENGTH +
+            Constants.CELLULAR_MQTT_PASSWORD_LENGTH + Constants.CELLULAR_TOPIC_LENGTH + sizeof(byte);
+        Assert.Equal(1 + settingsLength + sizeof(ushort) + request.Length, provisioning.Length);
+        Assert.Equal(1 + settingsLength + sizeof(uint), cellular.Length);
+        Assert.Equal(provisioning.AsSpan(1, settingsLength).ToArray(), cellular.AsSpan(1, settingsLength).ToArray());
+        Assert.Equal(request.Length, BinaryPrimitives.ReadUInt16LittleEndian(provisioning.AsSpan(1 + settingsLength, 2)));
+        Assert.Equal(request, Encoding.ASCII.GetString(provisioning.AsSpan(1 + settingsLength + 2)));
+        Assert.Equal(settings.TelemetryUploadMask, BinaryPrimitives.ReadUInt32LittleEndian(cellular.AsSpan(1 + settingsLength)));
+        Assert.Equal(new byte[] { (byte)Constants.COMMAND_ID_CELLULAR_TEST }, cellularWithoutSettings);
+        Assert.Equal(sessionOpen ? 10u : 7u, GetProperty<uint>(session, "TxSequence"));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(6144)]
+    public void Provisioning_RejectsRequestOutsideFirmwareLimit(int requestLength)
+    {
+        using var service = new SerialPortService("COM1");
+        var exception = Assert.Throws<TargetInvocationException>(() =>
+            InvokeInstanceMethod(service, "BuildOpenRemoteProvisioningCommand", new CellularParameters(), new string('x', requestLength)));
+        Assert.IsType<InvalidOperationException>(exception.InnerException);
+        Assert.Contains("6143", exception.InnerException.Message);
+    }
+
+    [Fact]
+    public void Provisioning_MaximumRequestFitsSingleEncryptedFirmwarePacket()
+    {
+        using var service = new SerialPortService("COM1");
+        object session = GetField<object>(service, "_secureSession");
+        SetProperty(session, "IsSessionOpen", true);
+        SetProperty(session, "IsAuthorized", true);
+        string request = new('x', 6143);
+
+        byte[] frame = (byte[])InvokeInstanceMethod(service, "BuildOpenRemoteProvisioningCommand", new CellularParameters(), request)!;
+        byte[] plaintext = DecryptCommandFrame(frame, session, 0);
+
+        Assert.True(plaintext.Length <= Constants.SECURE_ENVELOPE_MAX_PLAINTEXT_BYTES);
+        Assert.Equal(request, Encoding.ASCII.GetString(plaintext.AsSpan(plaintext.Length - request.Length)));
+    }
+
+    [Theory]
+    [InlineData(Constants.COMMAND_ID_OPENREMOTE_PROVISION)]
+    [InlineData(Constants.COMMAND_ID_CELLULAR_TEST)]
+    public void OperationalCommand_LockedSessionCannotFallBackToPlaintext(char command)
+    {
+        using var service = new SerialPortService("COM1");
+        object session = GetField<object>(service, "_secureSession");
+        SetProperty(session, "IsSessionOpen", true);
+        SetProperty(session, "PinEnabled", true);
+
+        var exception = Assert.Throws<TargetInvocationException>(() =>
+            InvokeInstanceMethod(service, "BuildCommandFrame", new byte[] { (byte)command }));
+
+        Assert.IsType<InvalidOperationException>(exception.InnerException);
+        Assert.Equal(0u, GetProperty<uint>(session, "TxSequence"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void StandaloneRequestReset_PreservesFragmentedEncryptedResponse(bool pinEnabled)
+    {
+        using var service = new SerialPortService("COM1");
+        object session = GetField<object>(service, "_secureSession");
+        SetProperty(session, "IsSessionOpen", true);
+        SetProperty(session, "IsAuthorized", true);
+        SetProperty(session, "PinEnabled", pinEnabled);
+        SetProperty(session, "RxSequence", 4u);
+        byte[] plaintext = Encoding.ASCII.GetBytes("Provisioning: OK");
+        MethodInfo encrypt = typeof(SerialPortService).GetMethod("EncryptSecureEnvelope", BindingFlags.NonPublic | BindingFlags.Static)!;
+        byte[] frame = (byte[])encrypt.Invoke(null, new object[]
+        {
+            plaintext, GetProperty<byte[]>(session, "DeviceToClientKey"), GetProperty<byte[]>(session, "SessionId"), 4u,
+        })!;
+        List<byte> incoming = GetField<List<byte>>(service, "_secureIncomingBuffer");
+        incoming.AddRange(frame[..10]);
+
+        InvokeInstanceMethod(service, "ResetStandaloneReceiveState", true);
+        InvokeInstanceMethod(service, "ResetStandaloneReceiveState", false);
+        Assert.Equal(frame[..10], incoming.ToArray());
+        incoming.AddRange(frame[10..]);
+        object[] args = { Array.Empty<byte>() };
+        Assert.True((bool)typeof(SerialPortService)
+            .GetMethod("TryReadNextSecureIncomingPayload", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(service, args)!);
+        Assert.Equal(plaintext, (byte[])args[0]);
+        Assert.Equal(5u, GetProperty<uint>(session, "RxSequence"));
+    }
+
+    private static void SetProperty(object instance, string name, object value)
+        => instance.GetType().GetProperty(name)!.SetValue(instance, value);
+
+    private static T GetProperty<T>(object instance, string name)
+        => (T)instance.GetType().GetProperty(name)!.GetValue(instance)!;
+
+    private static byte[] DecryptCommandFrame(byte[] frame, object session, uint sequence)
+    {
+        Assert.Equal((byte)Constants.SECURE_ENVELOPE_FRAME_PREFIX, frame[0]);
+        Assert.Equal(sequence, BinaryPrimitives.ReadUInt32LittleEndian(frame.AsSpan(3, 4)));
+        int length = BinaryPrimitives.ReadUInt16LittleEndian(frame.AsSpan(1, 2));
+        Assert.Equal(Constants.SECURE_ENVELOPE_HEADER_LENGTH + length + Constants.SECURE_TAG_LENGTH, frame.Length);
+        byte[] nonce = new byte[12];
+        GetProperty<byte[]>(session, "SessionId").CopyTo(nonce, 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(nonce.AsSpan(8), sequence);
+        byte[] plaintext = new byte[length];
+        using var cipher = new ChaCha20Poly1305(GetProperty<byte[]>(session, "ClientToDeviceKey"));
+        cipher.Decrypt(nonce, frame.AsSpan(7, length), frame.AsSpan(7 + length), plaintext, frame.AsSpan(0, 7));
+        return plaintext;
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ConfigurationSave_FinalAckUsesPendingCommandAndRestoresPolling(bool previouslySuspended)
+    {
+        using var service = new SerialPortService("COM1");
+        SetField(service, "_configurationSaveActive", true);
+        SetField(service, "_configurationPreviousPollingSuspended", previouslySuspended);
+        SetField(service, "_configurationCommandSentTick", Environment.TickCount64);
+        SetField(service, "_pendingConfigurationCommand", Constants.COMMAND_ID_SAVECHANGES);
+        SetField(service, "_suspendLiveRequestPolling", true);
+        SetField(service, "lastCommandSent", Constants.COMMAND_ID_REQUEST);
+        bool? result = null;
+        service.ConfigurationSaveCompleted += (_, args) => result = args.Succeeded;
+
+        Assert.True((bool)InvokeInstanceMethod(service, "HandleConfigurationAcknowledgement",
+            (byte)Constants.COMMAND_ID_CONFIM)!);
+        Assert.Equal(true, result);
+        Assert.False(GetField<bool>(service, "_configurationSaveActive"));
+        Assert.Equal(previouslySuspended, GetField<bool>(service, "_suspendLiveRequestPolling"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ConfigurationSave_MissingAckTimesOutAndNotifiesFailure(bool previouslySuspended)
+    {
+        using var service = new SerialPortService("COM1");
+        SetField(service, "_configurationSaveActive", true);
+        SetField(service, "_configurationPreviousPollingSuspended", previouslySuspended);
+        SetField(service, "_configurationCommandSentTick", Environment.TickCount64 - 10001);
+        SetField(service, "_suspendLiveRequestPolling", true);
+        SetField(service, "sendingConfig", true);
+        bool? result = null;
+        service.ConfigurationSaveCompleted += (_, args) => result = args.Succeeded;
+
+        InvokeInstanceMethod(service, "CheckConfigurationSaveTimeout");
+        Assert.Equal(false, result);
+        Assert.False(GetField<bool>(service, "sendingConfig"));
+        Assert.False(GetField<bool>(service, "_configurationSaveActive"));
+        Assert.Equal(previouslySuspended, GetField<bool>(service, "_suspendLiveRequestPolling"));
+    }
+
+    [Fact]
+    public void ConfigurationSave_LivePollCannotReplacePendingCommand()
+    {
+        using var service = new SerialPortService("COM1");
+        SetField(service, "_configurationSaveActive", true);
+        SetField(service, "_configurationCommandSentTick", Environment.TickCount64);
+        SetField(service, "_pendingConfigurationCommand", Constants.COMMAND_ID_SAVECHANGES);
+        SetField(service, "lastCommandSent", Constants.COMMAND_ID_SAVECHANGES);
+        InvokeInstanceMethod(service, "SendCommand", Constants.COMMAND_ID_REQUEST);
+        Assert.Equal(Constants.COMMAND_ID_SAVECHANGES, GetField<char>(service, "lastCommandSent"));
+        Assert.Equal(Constants.COMMAND_ID_SAVECHANGES, GetField<char>(service, "_pendingConfigurationCommand"));
+    }
+
+    [Theory]
+    [InlineData(Constants.COMMAND_ID_NEWCONFIG)]
+    [InlineData(Constants.COMMAND_ID_SAVECHANGES)]
+    public void ConfigurationAck_SecondFailureReportsFailureAndStopsSave(char command)
+    {
+        using var service = new SerialPortService("COM1");
+        SetField(service, "lastCommandSent", command);
+        SetField(service, "sendingConfig", true);
+        SetField(service, "saveToEEPROM", true);
+        SetField(service, "_configRetryCount", 1);
+        SetField(service, "_saveRetryCount", 1);
+        bool? succeeded = null;
+        service.ConfigurationSaveCompleted += (_, args) => succeeded = args.Succeeded;
+
+        Assert.True((bool)InvokeInstanceMethod(service, "HandleConfigurationAcknowledgement",
+            (byte)Constants.COMMAND_ID_CHECKSUM_FAIL)!);
+        Assert.Equal(false, succeeded);
+        Assert.False(GetField<bool>(service, "sendingConfig"));
+        Assert.False(GetField<bool>(service, "saveToEEPROM"));
+    }
+
+    [Theory]
+    [InlineData(Constants.COMMAND_ID_CONFIM, true)]
+    [InlineData(Constants.COMMAND_ID_CHECKSUM_FAIL, false)]
+    public async Task ConfigurationAck_DoesNotAdvanceBulkSaveForStandaloneWrite(char response, bool success)
+    {
+        using var service = new SerialPortService("COM1");
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        SetField(service, "_standaloneCommandAckTcs", completion);
+        SetField(service, "_standaloneCommandAckId", Constants.COMMAND_ID_NEWCONFIG);
+        SetField(service, "lastCommandSent", Constants.COMMAND_ID_NEWCONFIG);
+        Assert.True((bool)InvokeInstanceMethod(service, "HandleConfigurationAcknowledgement", (byte)response)!);
+        Assert.Equal(success, await completion.Task);
+        Assert.Equal(0, GetField<int>(service, "_configPacketsSent"));
+    }
+
+    [Theory]
+    [InlineData(Constants.COMMAND_ID_CONFIM, Constants.COMMAND_ID_LOG_RESET, true)]
+    [InlineData(Constants.COMMAND_ID_CHECKSUM_FAIL, Constants.COMMAND_ID_LOG_RESET, false)]
+    [InlineData(Constants.COMMAND_ID_CONFIM, Constants.COMMAND_ID_REQUEST, true)]
+    [InlineData(Constants.COMMAND_ID_CHECKSUM_FAIL, Constants.COMMAND_ID_REQUEST, false)]
+    public async Task LogReset_SharedAckHandler_UsesPendingRequestDespiteLivePolling(char response, char lastCommand, bool expected)
+    {
+        using var service = new SerialPortService("COM1");
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        SetField(service, "_standaloneCommandAckTcs", completion);
+        SetField(service, "_standaloneCommandAckId", Constants.COMMAND_ID_LOG_RESET);
+        SetField(service, "lastCommandSent", lastCommand);
+
+        Assert.False((bool)InvokeInstanceMethod(service, "TryHandleStandaloneAckByte", (byte)'!')!);
+        Assert.False(completion.Task.IsCompleted);
+        Assert.True((bool)InvokeInstanceMethod(service, "TryHandleStandaloneAckByte", (byte)response)!);
+        Assert.Equal(expected, await completion.Task);
+    }
+
+    [Fact]
+    public async Task SecureManagementResponse_IsDemultiplexedFromStreamedPayloads()
+    {
+        using var service = new SerialPortService("COM1");
+        var completion = new TaskCompletionSource<byte[]?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        SetField(service, "_secureManagementResponseTcs", completion);
+        SetField(service, "_secureManagementExpectedOperation", (byte)SecureControlOperation.Disable);
+
+        byte[] liveData = new byte[Constants.SECURE_MANAGEMENT_RESPONSE_BASE_LENGTH];
+        liveData[0] = (byte)Constants.COMMAND_ID_REQUEST;
+        byte[] otherOperation = BuildManagementPayload(SecureControlOperation.Status);
+        byte[] expected = BuildManagementPayload(SecureControlOperation.Disable);
+
+        Assert.False((bool)InvokeInstanceMethod(service, "TryCompleteSecureManagementResponse", liveData)!);
+        Assert.False((bool)InvokeInstanceMethod(service, "TryCompleteSecureManagementResponse", otherOperation)!);
+        Assert.False(completion.Task.IsCompleted);
+        Assert.True((bool)InvokeInstanceMethod(service, "TryCompleteSecureManagementResponse", expected)!);
+        Assert.Same(expected, await completion.Task);
+        Assert.False((bool)InvokeInstanceMethod(service, "TryCompleteSecureManagementResponse", expected)!);
+    }
+
+    [Fact]
+    public async Task SecureSessionReset_FailsPendingManagementRequestImmediately()
+    {
+        using var service = new SerialPortService("COM1");
+        var completion = new TaskCompletionSource<byte[]?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        SetField(service, "_secureManagementResponseTcs", completion);
+        SetField(service, "_secureManagementExpectedOperation", (byte)SecureControlOperation.SetPin);
+
+        InvokeInstanceMethod(service, "ResetSecureSession");
+
+        Assert.Null(await completion.Task);
+        Assert.False(service.IsSecureSessionOpen);
+    }
+
+    private static byte[] BuildManagementPayload(SecureControlOperation operation)
+    {
+        byte[] payload = new byte[Constants.SECURE_MANAGEMENT_RESPONSE_BASE_LENGTH];
+        payload[0] = (byte)Constants.SECURE_CONTROL_FRAME_PREFIX;
+        payload[1] = (byte)operation;
+        payload[2] = (byte)SecureControlResult.Ok;
+        return payload;
+    }
+
     [Theory]
     [InlineData(OutputChannel.MathOperandType.Constant, 0)]
     [InlineData(OutputChannel.MathOperandType.Channel, 1)]
@@ -16,6 +332,7 @@ public class SerialPortProtocolTests
     [InlineData(OutputChannel.MathOperandType.SystemValue, 3)]
     [InlineData(OutputChannel.MathOperandType.Rule, 4)]
     [InlineData(OutputChannel.MathOperandType.DigitalInput, 5)]
+    [InlineData(OutputChannel.MathOperandType.CanSignal, 6)]
     public void MathOperandType_MatchesControllerProtocol(OutputChannel.MathOperandType operandType, int expected)
     {
         Assert.Equal((byte)expected, (byte)operandType);
@@ -45,6 +362,99 @@ public class SerialPortProtocolTests
     public void ExpectsFramedResponse_IsTrue_ForDigitalInputStatusCommand()
     {
         Assert.True(InvokeExpectsFramedResponse(Constants.COMMAND_ID_DIGITAL_INPUT_STATUS));
+    }
+
+    [Fact]
+    public void ExpectsFramedResponse_IsTrue_ForCustomCanStatusCommand()
+    {
+        Assert.True(InvokeExpectsFramedResponse(Constants.COMMAND_ID_CUSTOM_CAN_STATUS));
+    }
+
+    [Fact]
+    public void ParseCustomCanStatusPacket_ClearsUnusedSlotsAfterShortSnapshot()
+    {
+        SerialPortService service = CreateService();
+
+        try
+        {
+            DataStructures data = GetField<DataStructures>(service, "dataStructures");
+
+            data.CustomCanMessagesLiveData[1].Flags = 0x01;
+            data.CustomCanMessagesLiveData[1].Id = 0x555;
+            data.CustomCanSignalsLiveData[1].Flags = 0x01;
+            data.CustomCanSignalsLiveData[1].MessageIndex = 1;
+            data.CustomCanSignalsStaticData[1].Flags = 0x01;
+
+            byte[] frame = BuildCustomCanStatusFrame(
+                crcValid: 1,
+                messageRecords:
+                [
+                    (0x18FF50E5u, (ushort)1500, (byte)8, (byte)0x03, (byte)CustomCanStatus.Valid),
+                ],
+                signalRecords:
+                [
+                    ((byte)0, (byte)16, (byte)12, (byte)0x01, 0.5f, -10.0f, 24.5f, (byte)CustomCanStatus.Valid),
+                ]);
+
+            SetField(service, "dataBytes", frame);
+            SetField(service, "dataLength", frame.Length);
+
+            bool parsed = (bool)InvokeInstanceMethod(service, "ParseCustomCanStatusPacket")!;
+
+            Assert.True(parsed);
+            Assert.Equal((uint)0x18FF50E5, data.CustomCanMessagesStaticData[0].Id);
+            Assert.Equal((byte)0x03, data.CustomCanMessagesStaticData[0].Flags);
+            Assert.Equal((byte)CustomCanStatus.Valid, data.CustomCanSignalsStaticData[0].Status);
+
+            Assert.Equal((byte)0, data.CustomCanMessagesStaticData[1].Flags);
+            Assert.Equal((byte)CustomCanStatus.Disabled, data.CustomCanMessagesStaticData[1].Status);
+            Assert.Equal((byte)0, data.CustomCanSignalsStaticData[1].Flags);
+            Assert.Equal((byte)CustomCanStatus.Disabled, data.CustomCanSignalsStaticData[1].Status);
+            Assert.Equal(string.Empty, data.CustomCanSignalsStaticData[1].MessageName);
+        }
+        finally
+        {
+            StopProcessTimer(service);
+        }
+    }
+
+    [Fact]
+    public void ParseCustomCanStatusPacket_DoesNotEnableSlotsWithDisabledStatus()
+    {
+        SerialPortService service = CreateService();
+
+        try
+        {
+            DataStructures data = GetField<DataStructures>(service, "dataStructures");
+
+            byte[] frame = BuildCustomCanStatusFrame(
+                crcValid: 1,
+                messageRecords:
+                [
+                    (0x321u, (ushort)500, (byte)8, (byte)0x03, (byte)CustomCanStatus.Disabled),
+                ],
+                signalRecords:
+                [
+                    ((byte)0, (byte)8, (byte)8, (byte)0x01, 1.0f, 0.0f, 0.0f, (byte)CustomCanStatus.Disabled),
+                ]);
+
+            SetField(service, "dataBytes", frame);
+            SetField(service, "dataLength", frame.Length);
+
+            bool parsed = (bool)InvokeInstanceMethod(service, "ParseCustomCanStatusPacket")!;
+
+            Assert.True(parsed);
+            Assert.False(data.CustomCanMessagesStaticData[0].IsEnabled);
+            Assert.False(data.CustomCanSignalsStaticData[0].IsEnabled);
+            Assert.Equal((byte)0x02, data.CustomCanMessagesStaticData[0].Flags);
+            Assert.Equal((byte)0x00, data.CustomCanSignalsStaticData[0].Flags);
+            Assert.Equal((byte)CustomCanStatus.Disabled, data.CustomCanMessagesStaticData[0].Status);
+            Assert.Equal((byte)CustomCanStatus.Disabled, data.CustomCanSignalsStaticData[0].Status);
+        }
+        finally
+        {
+            StopProcessTimer(service);
+        }
     }
 
     [Fact]
@@ -401,6 +811,253 @@ public class SerialPortProtocolTests
         }
     }
 
+    [Fact]
+    public void TryBuildCustomCanPayload_EncodesMessageTimeoutAsUInt32LittleEndian()
+    {
+        byte[] payload = InvokeBuildCustomCanPayload(Constants.CONFIG_DATA_CUSTOM_CAN_MESSAGE, parameterIndex: 1, value: 1500);
+
+        Assert.Equal(new byte[] { 0xDC, 0x05, 0x00, 0x00 }, payload);
+    }
+
+    [Fact]
+    public void TryBuildCustomCanPayload_EncodesSignalHeaderFieldsAsUInt32LittleEndian()
+    {
+        byte[] payload = InvokeBuildCustomCanPayload(Constants.CONFIG_DATA_CUSTOM_CAN_SIGNAL, parameterIndex: 2, value: 64);
+
+        Assert.Equal(new byte[] { 64, 0x00, 0x00, 0x00 }, payload);
+    }
+
+    [Fact]
+    public void ParseCustomCanStatusPacket_ParsesVersion2TxFields()
+    {
+        SerialPortService service = CreateService();
+
+        try
+        {
+            DataStructures data = GetField<DataStructures>(service, "dataStructures");
+
+            byte[] frame = BuildCustomCanStatusFrameV2(
+                crcValid: 1,
+                messageRecords:
+                [
+                    // Enabled periodic TX message triggered by channel 4 (index 3).
+                    (0x801u, (ushort)100, (byte)7, (byte)0x0D, (byte)3, (byte)CustomCanStatus.Disabled),
+                ],
+                signalRecords:
+                [
+                    // Enabled constant-source signal on the TX message.
+                    ((byte)0, (byte)48, (byte)4, (byte)0x01, 1.0f, 15.0f, (byte)255, 0.0f, (byte)CustomCanStatus.Disabled),
+                ]);
+
+            SetField(service, "dataBytes", frame);
+            SetField(service, "dataLength", frame.Length);
+
+            bool parsed = (bool)InvokeInstanceMethod(service, "ParseCustomCanStatusPacket")!;
+
+            Assert.True(parsed);
+            CustomCanMessage message = data.CustomCanMessagesStaticData[0];
+            Assert.Equal((uint)0x801, message.Id);
+            Assert.Equal((byte)0x0D, message.Flags);
+            Assert.Equal((byte)3, message.TxTrigger);
+            Assert.True(message.IsTx);
+            Assert.True(message.IsPeriodic);
+            Assert.True(message.IsEnabled);
+            Assert.Equal("TX periodic", message.DirectionLabel);
+            Assert.Equal("CH4", message.TriggerLabel);
+            Assert.Equal("100 ms", message.PeriodDisplay);
+
+            CustomCanSignal signal = data.CustomCanSignalsStaticData[0];
+            // Signals on TX messages report Disabled status but keep their configured enable flag.
+            Assert.True(signal.IsEnabled);
+            Assert.Equal((byte)255, signal.ValueSource);
+            Assert.True(signal.IsConstantSource);
+            Assert.Same(message, signal.OwnerMessage);
+            Assert.Equal("Constant", signal.ValueSourceDisplay);
+        }
+        finally
+        {
+            StopProcessTimer(service);
+        }
+    }
+
+    [Fact]
+    public void ParseCustomCanStatusPacket_RejectsUnknownVersion()
+    {
+        SerialPortService service = CreateService();
+
+        try
+        {
+            byte[] frame = BuildCustomCanStatusFrameV2(
+                crcValid: 1,
+                messageRecords: [],
+                signalRecords: [],
+                version: 3);
+
+            SetField(service, "dataBytes", frame);
+            SetField(service, "dataLength", frame.Length);
+
+            bool parsed = (bool)InvokeInstanceMethod(service, "ParseCustomCanStatusPacket")!;
+
+            Assert.False(parsed);
+        }
+        finally
+        {
+            StopProcessTimer(service);
+        }
+    }
+
+    [Fact]
+    public void TryBuildCustomCanPayload_AcceptsTxTriggerAndValueSourceParameters()
+    {
+        byte[] triggerPayload = InvokeBuildCustomCanPayload(
+            Constants.CONFIG_DATA_CUSTOM_CAN_MESSAGE, Constants.CUSTOM_CAN_MESSAGE_PARAM_TX_TRIGGER, value: 3);
+        byte[] sourcePayload = InvokeBuildCustomCanPayload(
+            Constants.CONFIG_DATA_CUSTOM_CAN_SIGNAL, Constants.CUSTOM_CAN_SIGNAL_PARAM_VALUE_SOURCE, value: 255);
+
+        Assert.Equal(new byte[] { 3, 0x00, 0x00, 0x00 }, triggerPayload);
+        Assert.Equal(new byte[] { 255, 0x00, 0x00, 0x00 }, sourcePayload);
+    }
+
+    [Theory]
+    [InlineData(Constants.CONFIG_DATA_CUSTOM_CAN_MESSAGE, 4)]
+    [InlineData(Constants.CONFIG_DATA_CUSTOM_CAN_SIGNAL, 6)]
+    [InlineData(Constants.CONFIG_DATA_CUSTOM_CAN_SIGNAL, 7)]
+    public void TryBuildCustomCanPayload_RejectsReadOnlyParameters(byte configType, int parameterIndex)
+    {
+        MethodInfo method = typeof(SerialPortService).GetMethod("TryBuildCustomCanPayload", BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("Unable to find TryBuildCustomCanPayload.");
+
+        object?[] args = { configType, parameterIndex, (uint)1, null };
+
+        bool accepted = (bool)(method.Invoke(null, args)
+            ?? throw new InvalidOperationException("TryBuildCustomCanPayload returned null."));
+
+        Assert.False(accepted);
+    }
+
+    [Fact]
+    public void TryBuildCustomCanPayload_RejectsInvalidParameterIndex()
+    {
+        MethodInfo method = typeof(SerialPortService).GetMethod("TryBuildCustomCanPayload", BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("Unable to find TryBuildCustomCanPayload.");
+
+        object?[] args =
+        {
+            Constants.CONFIG_DATA_CUSTOM_CAN_SIGNAL,
+            9,
+            (uint)300,
+            null,
+        };
+
+        bool accepted = (bool)(method.Invoke(null, args)
+            ?? throw new InvalidOperationException("TryBuildCustomCanPayload returned null."));
+
+        Assert.False(accepted);
+    }
+
+    [Fact]
+    public void BuildStandaloneConfigPacket_UsesConfigParameterDataIndexOrder_AndLittleEndianChecksum()
+    {
+        byte[] packet = InvokeBuildStandaloneConfigPacket(
+            Constants.CONFIG_DATA_CUSTOM_CAN_SIGNAL,
+            parameterIndex: 4,
+            dataIndex: 2,
+            payload: new byte[] { 0x11, 0x22, 0x33, 0x44 });
+
+        Assert.Equal(new byte[]
+        {
+            Constants.SERIAL_HEADER1,
+            Constants.SERIAL_HEADER2,
+            Constants.CONFIG_DATA_CUSTOM_CAN_SIGNAL,
+            4,
+            2,
+            0x11,
+            0x22,
+            0x33,
+            0x44,
+            Constants.SERIAL_TRAILER1,
+            Constants.SERIAL_TRAILER2,
+            0x97,
+            0x01,
+            0x00,
+            0x00,
+        }, packet);
+    }
+
+    [Fact]
+    public void SecureHandshake_X25519KeyPairGeneration_IsAvailable()
+    {
+        MethodInfo method = typeof(SerialPortService).GetMethod("TryGenerateX25519KeyPair", BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("Unable to find TryGenerateX25519KeyPair.");
+
+        object?[] args =
+        {
+            null,
+            null,
+        };
+
+        bool generated = (bool)(method.Invoke(null, args)
+            ?? throw new InvalidOperationException("TryGenerateX25519KeyPair returned null."));
+
+        Assert.True(generated);
+        Assert.NotNull(args[0]);
+        Assert.IsType<byte[]>(args[1]);
+        Assert.Equal(Constants.SECURE_DEVICE_PUBLIC_KEY_BYTES, ((byte[])args[1]!).Length);
+
+        ((IDisposable?)args[0])?.Dispose();
+    }
+
+    [Fact]
+    public void SecureHandshake_X25519SharedSecretDerivation_SucceedsForValidPeerPublicKeys()
+    {
+        MethodInfo generateMethod = typeof(SerialPortService).GetMethod("TryGenerateX25519KeyPair", BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("Unable to find TryGenerateX25519KeyPair.");
+        MethodInfo deriveMethod = typeof(SerialPortService).GetMethod("TryDeriveX25519SharedSecret", BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("Unable to find TryDeriveX25519SharedSecret.");
+
+        object?[] leftArgs = { null, null };
+        object?[] rightArgs = { null, null };
+
+        bool leftGenerated = (bool)(generateMethod.Invoke(null, leftArgs)
+            ?? throw new InvalidOperationException("TryGenerateX25519KeyPair returned null for left key."));
+        bool rightGenerated = (bool)(generateMethod.Invoke(null, rightArgs)
+            ?? throw new InvalidOperationException("TryGenerateX25519KeyPair returned null for right key."));
+
+        try
+        {
+            Assert.True(leftGenerated);
+            Assert.True(rightGenerated);
+
+            IDisposable leftKey = (IDisposable)(leftArgs[0]
+                ?? throw new InvalidOperationException("Left key was null."));
+            IDisposable rightKey = (IDisposable)(rightArgs[0]
+                ?? throw new InvalidOperationException("Right key was null."));
+            byte[] leftPublicKey = (byte[])(leftArgs[1]
+                ?? throw new InvalidOperationException("Left public key was null."));
+            byte[] rightPublicKey = (byte[])(rightArgs[1]
+                ?? throw new InvalidOperationException("Right public key was null."));
+
+            object?[] deriveLeftArgs = { leftKey, rightPublicKey, null };
+            object?[] deriveRightArgs = { rightKey, leftPublicKey, null };
+
+            bool leftDerived = (bool)(deriveMethod.Invoke(null, deriveLeftArgs)
+                ?? throw new InvalidOperationException("TryDeriveX25519SharedSecret returned null for left key."));
+            bool rightDerived = (bool)(deriveMethod.Invoke(null, deriveRightArgs)
+                ?? throw new InvalidOperationException("TryDeriveX25519SharedSecret returned null for right key."));
+
+            Assert.True(leftDerived);
+            Assert.True(rightDerived);
+            Assert.IsType<byte[]>(deriveLeftArgs[2]);
+            Assert.IsType<byte[]>(deriveRightArgs[2]);
+            Assert.Equal((byte[])deriveLeftArgs[2]!, (byte[])deriveRightArgs[2]!);
+        }
+        finally
+        {
+            ((IDisposable?)leftArgs[0])?.Dispose();
+            ((IDisposable?)rightArgs[0])?.Dispose();
+        }
+    }
+
     private static SerialPortService CreateService() => new("COM1");
 
     private static bool InvokeExpectsFramedResponse(char commandId)
@@ -410,6 +1067,36 @@ public class SerialPortProtocolTests
 
         return (bool)(method.Invoke(null, new object[] { commandId })
             ?? throw new InvalidOperationException("ExpectsFramedResponse returned null."));
+    }
+
+    private static byte[] InvokeBuildCustomCanPayload(byte configType, int parameterIndex, uint value)
+    {
+        MethodInfo method = typeof(SerialPortService).GetMethod("TryBuildCustomCanPayload", BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("Unable to find TryBuildCustomCanPayload.");
+
+        object?[] args =
+        {
+            configType,
+            parameterIndex,
+            value,
+            null,
+        };
+
+        bool accepted = (bool)(method.Invoke(null, args)
+            ?? throw new InvalidOperationException("TryBuildCustomCanPayload returned null."));
+
+        Assert.True(accepted);
+        return (byte[])(args[3]
+            ?? throw new InvalidOperationException("TryBuildCustomCanPayload did not output payload."));
+    }
+
+    private static byte[] InvokeBuildStandaloneConfigPacket(byte configType, byte parameterIndex, byte dataIndex, byte[] payload)
+    {
+        MethodInfo method = typeof(SerialPortService).GetMethod("BuildStandaloneConfigPacket", BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("Unable to find BuildStandaloneConfigPacket.");
+
+        return (byte[])(method.Invoke(null, new object[] { configType, parameterIndex, dataIndex, payload })
+            ?? throw new InvalidOperationException("BuildStandaloneConfigPacket returned null."));
     }
 
     private static object? InvokeInstanceMethod(object instance, string methodName, params object[] args)
@@ -475,6 +1162,109 @@ public class SerialPortProtocolTests
         ];
 
         frame.AddRange(states);
+        frame.Add(Constants.SERIAL_TRAILER1);
+        frame.Add(Constants.SERIAL_TRAILER2);
+
+        uint checksum = 0;
+        foreach (byte value in frame)
+        {
+            checksum += value;
+        }
+
+        frame.AddRange(BitConverter.GetBytes(checksum));
+        return frame.ToArray();
+    }
+
+    private static byte[] BuildCustomCanStatusFrame(
+        byte crcValid,
+        (uint id, ushort timeoutMs, byte dlc, byte flags, byte status)[] messageRecords,
+        (byte messageIndex, byte startBit, byte bitLength, byte flags, float factor, float offset, float runtimeValue, byte status)[] signalRecords)
+    {
+        List<byte> frame =
+        [
+            Constants.SERIAL_HEADER1,
+            Constants.SERIAL_HEADER2,
+            (byte)Constants.COMMAND_ID_CUSTOM_CAN_STATUS,
+            1,
+            crcValid,
+            (byte)messageRecords.Length,
+            (byte)signalRecords.Length,
+        ];
+
+        foreach ((uint id, ushort timeoutMs, byte dlc, byte flags, byte status) message in messageRecords)
+        {
+            frame.AddRange(BitConverter.GetBytes(message.id));
+            frame.AddRange(BitConverter.GetBytes(message.timeoutMs));
+            frame.Add(message.dlc);
+            frame.Add(message.flags);
+            frame.Add(message.status);
+        }
+
+        foreach ((byte messageIndex, byte startBit, byte bitLength, byte flags, float factor, float offset, float runtimeValue, byte status) signal in signalRecords)
+        {
+            frame.Add(signal.messageIndex);
+            frame.Add(signal.startBit);
+            frame.Add(signal.bitLength);
+            frame.Add(signal.flags);
+            frame.AddRange(BitConverter.GetBytes(signal.factor));
+            frame.AddRange(BitConverter.GetBytes(signal.offset));
+            frame.AddRange(BitConverter.GetBytes(signal.runtimeValue));
+            frame.Add(signal.status);
+        }
+
+        frame.Add(Constants.SERIAL_TRAILER1);
+        frame.Add(Constants.SERIAL_TRAILER2);
+
+        uint checksum = 0;
+        foreach (byte value in frame)
+        {
+            checksum += value;
+        }
+
+        frame.AddRange(BitConverter.GetBytes(checksum));
+        return frame.ToArray();
+    }
+
+    private static byte[] BuildCustomCanStatusFrameV2(
+        byte crcValid,
+        (uint id, ushort timeoutMs, byte dlc, byte flags, byte txTrigger, byte status)[] messageRecords,
+        (byte messageIndex, byte startBit, byte bitLength, byte flags, float factor, float offset, byte valueSource, float runtimeValue, byte status)[] signalRecords,
+        byte version = 2)
+    {
+        List<byte> frame =
+        [
+            Constants.SERIAL_HEADER1,
+            Constants.SERIAL_HEADER2,
+            (byte)Constants.COMMAND_ID_CUSTOM_CAN_STATUS,
+            version,
+            crcValid,
+            (byte)messageRecords.Length,
+            (byte)signalRecords.Length,
+        ];
+
+        foreach ((uint id, ushort timeoutMs, byte dlc, byte flags, byte txTrigger, byte status) message in messageRecords)
+        {
+            frame.AddRange(BitConverter.GetBytes(message.id));
+            frame.AddRange(BitConverter.GetBytes(message.timeoutMs));
+            frame.Add(message.dlc);
+            frame.Add(message.flags);
+            frame.Add(message.txTrigger);
+            frame.Add(message.status);
+        }
+
+        foreach ((byte messageIndex, byte startBit, byte bitLength, byte flags, float factor, float offset, byte valueSource, float runtimeValue, byte status) signal in signalRecords)
+        {
+            frame.Add(signal.messageIndex);
+            frame.Add(signal.startBit);
+            frame.Add(signal.bitLength);
+            frame.Add(signal.flags);
+            frame.AddRange(BitConverter.GetBytes(signal.factor));
+            frame.AddRange(BitConverter.GetBytes(signal.offset));
+            frame.Add(signal.valueSource);
+            frame.AddRange(BitConverter.GetBytes(signal.runtimeValue));
+            frame.Add(signal.status);
+        }
+
         frame.Add(Constants.SERIAL_TRAILER1);
         frame.Add(Constants.SERIAL_TRAILER2);
 

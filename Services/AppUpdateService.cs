@@ -13,9 +13,19 @@ namespace Cortex.Services
     {
         public const string CortexGitHubReleasesUrl = "https://github.com/joesbox/Cortex/releases";
 
-        private const string CortexGitHubApiLatestReleaseUrl = "https://api.github.com/repos/joesbox/Cortex/releases/latest";
+        public const string LatestReleaseUrl = "https://updates.mannelectronics.uk/cortex/latest";
 
         private static readonly HttpClient HttpClient = new HttpClient();
+        private readonly HttpClient _httpClient;
+
+        public AppUpdateService() : this(HttpClient)
+        {
+        }
+
+        public AppUpdateService(HttpClient httpClient)
+        {
+            _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        }
 
         public static string GetCurrentVersion()
         {
@@ -37,23 +47,23 @@ namespace Cortex.Services
 
         public async Task<AppReleaseInfo?> GetLatestReleaseAsync(CancellationToken cancellationToken)
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, CortexGitHubApiLatestReleaseUrl);
+            using var request = new HttpRequestMessage(HttpMethod.Get, LatestReleaseUrl);
             request.Headers.UserAgent.ParseAdd("Cortex");
 
-            using HttpResponseMessage response = await HttpClient.SendAsync(request, cancellationToken);
+            using HttpResponseMessage response = await _httpClient.SendAsync(request, cancellationToken);
             response.EnsureSuccessStatusCode();
 
             await using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            var payload = await JsonSerializer.DeserializeAsync<GitHubReleaseResponse>(responseStream, cancellationToken: cancellationToken);
-            if (payload == null || string.IsNullOrWhiteSpace(payload.TagName))
+            var payload = await JsonSerializer.DeserializeAsync<LatestReleaseResponse>(responseStream, cancellationToken: cancellationToken);
+            if (payload == null || string.IsNullOrWhiteSpace(payload.Version))
             {
-                return null;
+                throw new JsonException("The update service returned no Cortex release version.");
             }
 
             return new AppReleaseInfo
             {
-                Version = NormalizeVersion(payload.TagName),
-                GitHubUrl = string.IsNullOrWhiteSpace(payload.HtmlUrl) ? CortexGitHubReleasesUrl : payload.HtmlUrl,
+                Version = NormalizeVersion(payload.Version),
+                GitHubUrl = string.IsNullOrWhiteSpace(payload.GitHubUrl) ? CortexGitHubReleasesUrl : payload.GitHubUrl,
             };
         }
 
@@ -74,13 +84,13 @@ namespace Cortex.Services
             return sanitized.Trim();
         }
 
-        private sealed class GitHubReleaseResponse
+        private sealed class LatestReleaseResponse
         {
-            [JsonPropertyName("tag_name")]
-            public string? TagName { get; set; }
+            [JsonPropertyName("version")]
+            public string? Version { get; set; }
 
-            [JsonPropertyName("html_url")]
-            public string? HtmlUrl { get; set; }
+            [JsonPropertyName("github_url")]
+            public string? GitHubUrl { get; set; }
         }
     }
 

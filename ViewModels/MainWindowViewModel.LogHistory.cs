@@ -91,6 +91,14 @@ namespace Cortex.ViewModels
         [ObservableProperty]
         private ObservableCollection<ISeries> logSeriesCollection = new();
 
+        private ObservableCollection<ChartSeriesToggleItem> logChartLegendItems = new();
+
+        public ObservableCollection<ChartSeriesToggleItem> LogChartLegendItems
+        {
+            get => logChartLegendItems;
+            private set => SetProperty(ref logChartLegendItems, value);
+        }
+
         [ObservableProperty]
         private ObservableCollection<LogMetricRow> logMetricRows = new();
 
@@ -100,7 +108,7 @@ namespace Cortex.ViewModels
 
         public bool CanResetLogs => !IsLogBusy && IsConnected;
 
-        public bool CanAccessOperationalTabs => IsConnected && !IsLogBusy;
+        public bool CanAccessOperationalTabs => IsControllerUiReady && !IsLogBusy;
 
         public FindingStrategy LogFindingStrategy => FindingStrategy.CompareOnlyXTakeClosest;
 
@@ -183,8 +191,10 @@ namespace Cortex.ViewModels
         private Dictionary<string, List<LogSeriesPoint>> _activeFilteredLogSeries = new(StringComparer.OrdinalIgnoreCase);
         private List<string> _activeLogSeriesKeys = [];
         private IReadOnlyDictionary<string, string> _activeSystemDisplayNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private List<string> _activeDisplayedLogSeriesKeys = [];
         private CancellationTokenSource? _logLoadCts;
         private int _selectedLogLoadVersion;
+        private bool _deferredSelectedLogLoadRequested;
         private bool _updatingLogSelectionMasterState;
         private bool _bulkUpdatingLogSelections;
         private const int MaxRenderedLogPointsPerSeries = 1800;
@@ -283,7 +293,7 @@ namespace Cortex.ViewModels
         partial void OnSelectedLogFileChanged(LogFile? value)
         {
             OnPropertyChanged(nameof(CanDownloadSelectedLog));
-            _ = HandleSelectedLogFileChangedAsync(value);
+            StartBackgroundTask(HandleSelectedLogFileChangedAsync(value), "Selected log file change handling");
         }
 
         partial void OnIsLogBusyChanged(bool value)
@@ -296,6 +306,11 @@ namespace Cortex.ViewModels
             OnPropertyChanged(nameof(CanFactoryReset));
             OnPropertyChanged(nameof(CanTestCellularConnection));
             OnPropertyChanged(nameof(CanProvisionOpenRemote));
+
+            if (!value && _deferredSelectedLogLoadRequested && SelectedLogFile is not null)
+            {
+                StartBackgroundTask(HandleSelectedLogFileChangedAsync(SelectedLogFile), "Deferred selected log load");
+            }
         }
 
         partial void OnAreAllSystemParametersSelectedChanged(bool value)
@@ -463,9 +478,13 @@ namespace Cortex.ViewModels
                 return;
             }
 
-            _logLoadCts?.Cancel();
-            _logLoadCts = new CancellationTokenSource();
-            var token = _logLoadCts.Token;
+            CancellationTokenSource? previousLogLoadCts = _logLoadCts;
+            previousLogLoadCts?.Cancel();
+            previousLogLoadCts?.Dispose();
+
+            var logLoadCts = new CancellationTokenSource();
+            _logLoadCts = logLoadCts;
+            var token = logLoadCts.Token;
 
             _pauseLiveUiUpdates = true;
             IsLogBusy = true;
@@ -555,6 +574,12 @@ namespace Cortex.ViewModels
             }
             finally
             {
+                if (_logLoadCts == logLoadCts)
+                {
+                    _logLoadCts = null;
+                }
+
+                logLoadCts.Dispose();
                 IsLogBusy = false;
                 _pauseLiveUiUpdates = false;
                 OnPropertyChanged(nameof(CanDownloadSelectedLog));
@@ -574,8 +599,11 @@ namespace Cortex.ViewModels
 
             if (IsLogBusy)
             {
+                _deferredSelectedLogLoadRequested = true;
                 return;
             }
+
+            _deferredSelectedLogLoadRequested = false;
 
             string cacheKey = BuildLogCacheKey(selectedFile);
             if (_downloadedLogCache.TryGetValue(cacheKey, out string? cachedContent))
@@ -809,6 +837,14 @@ namespace Cortex.ViewModels
             }
 
             AddLog("Downloading log...");
+
+            if (_portService.IsSecureSessionAuthorized && !_portService.CanUsePlaintextLogBulk)
+            {
+                AddLog("Secure session active. Using chunked download mode.");
+                return await ReadLogFromControllerPullAsync(token);
+            }
+
+            bool secureDownload = _portService.IsSecureSessionAuthorized;
             try
             {
                 return await _portService.ReadLogBulkAsync(progress =>
@@ -817,7 +853,7 @@ namespace Cortex.ViewModels
                     LogDownloadProgress = progress;
                 }, token);
             }
-            catch (Exception ex) when (ex is IOException || ex is InvalidOperationException)
+            catch (Exception ex) when (!secureDownload && (ex is IOException || ex is InvalidOperationException))
             {
                 AddLog($"Stream download failed. Trying alternative download mode...");
                 _portService.CancelLogTransfer();
@@ -834,16 +870,21 @@ namespace Cortex.ViewModels
             const int pullChunkTimeoutMs = 2000;
             int processedChunkCount = 0;
 
+            if (!_portService!.StartLogTransferStream())
+            {
+                throw new IOException("Controller rejected log stream start.");
+            }
+
             while (true)
             {
                 token.ThrowIfCancellationRequested();
-                var chunk = await _portService!.RequestLogChunkAsync(pullChunkTimeoutMs);
+                var chunk = await _portService.WaitForLogChunkAsync(pullChunkTimeoutMs);
                 if (chunk == null)
                 {
                     consecutiveChunkFailures++;
                     if (consecutiveChunkFailures >= maxConsecutiveChunkFailures)
                     {
-                        throw new IOException("Controller log chunk request timed out.");
+                        throw new IOException("Controller log stream timed out.");
                     }
 
                     int retryDelayMs = Math.Min(500, 75 * consecutiveChunkFailures);

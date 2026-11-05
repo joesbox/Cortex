@@ -3,7 +3,9 @@ using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using Avalonia.Threading;
+using Cortex.Services;
 using Cortex.Views;
+using Cortex.ViewModels;
 using System;
 using System.Diagnostics;
 using System.IO.Ports;
@@ -71,7 +73,7 @@ public partial class App : Application
                 MainWindow? mainWindow = null;
                 await Dispatcher.UIThread.InvokeAsync(() =>
                 {
-                    mainWindow = new MainWindow();
+                    mainWindow = CreateMainWindow();
                 });
 
                 splash.SetProgress(92, "Finalizing startup...");
@@ -92,7 +94,7 @@ public partial class App : Application
                 {
                     await Dispatcher.UIThread.InvokeAsync(() =>
                     {
-                        fallbackWindow = new MainWindow();
+                        fallbackWindow = CreateMainWindow();
                     });
 
                     await ShowMainWindowAsync(desktop, splash, fallbackWindow);
@@ -113,6 +115,18 @@ public partial class App : Application
                     });
                 }
             }
+        }
+
+        private static MainWindow CreateMainWindow()
+        {
+            var dependencies = new MainWindowViewModelDependencies(
+                appUpdateService: new AppUpdateService(),
+                firmwareUpdateService: new FirmwareUpdateService(),
+                provisioningApiClient: new ProvisioningApiClient(),
+                provisioningSessionStore: new ProvisioningSessionStore(),
+                ioFlowGraphStore: new IoFlowGraphStore());
+
+            return new MainWindow(appCloser => new MainWindowViewModel(appCloser, dependencies));
         }
 
         private static async Task ShowMainWindowAsync(

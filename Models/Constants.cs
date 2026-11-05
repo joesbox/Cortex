@@ -80,6 +80,8 @@
 
         public const char COMMAND_ID_DIGITAL_INPUT_STATUS = 'D';
 
+        public const char COMMAND_ID_CUSTOM_CAN_STATUS = 'B';
+
         public const int LOG_FILE_NAME_LENGTH = 24;
 
         public const int LAST_CHANNEL_PARAM_INDEX = 45;
@@ -168,8 +170,67 @@
 
         public const int LAST_CELLULAR_PARAM_INDEX = 15;
 
+        public const byte CONFIG_DATA_CUSTOM_CAN_MESSAGE = 5;
+
+        public const byte CONFIG_DATA_CUSTOM_CAN_SIGNAL = 6;
+
+        public const int MAX_CUSTOM_CAN_MESSAGES = 100;
+
+        public const int MAX_CUSTOM_CAN_SIGNALS = 100;
+
+        public const int LAST_CUSTOM_CAN_MESSAGE_PARAM_INDEX = 5;
+
+        public const int LAST_CUSTOM_CAN_SIGNAL_PARAM_INDEX = 8;
+
+        public const int CUSTOM_CAN_MESSAGE_PARAM_TX_TRIGGER = 5;
+
+        public const int CUSTOM_CAN_SIGNAL_PARAM_VALUE_SOURCE = 8;
+
+        /// <summary>Parameter index that writes a whole packed message/signal record atomically.</summary>
+        public const byte CUSTOM_CAN_PARAM_RECORD = 255;
+
+        public const int CUSTOM_CAN_MESSAGE_RECORD_SIZE = 9;
+
+        public const int CUSTOM_CAN_SIGNAL_RECORD_SIZE = 13;
+
+        public const byte CUSTOM_CAN_TX_TRIGGER_ALWAYS = 255;
+
+        public const byte CUSTOM_CAN_VALUE_SOURCE_CONSTANT = 255;
+
+        public const byte CUSTOM_CAN_STATUS_VERSION_LEGACY = 1;
+
+        public const byte CUSTOM_CAN_STATUS_VERSION_TX = 2;
+
         public const int TIME_ZONE_RULE_LENGTH = 15;
 
         public const int LAST_DIGITAL_PARAM_INDEX = 0;
+
+        public const byte SECURE_PROTOCOL_VERSION = 1;
+
+        public const char SECURE_CONTROL_FRAME_PREFIX = 'a';
+
+        public const char SECURE_ENVELOPE_FRAME_PREFIX = '!';
+
+        public const int SECURE_CONTROL_MAX_PAYLOAD_BYTES = 32;
+
+        public const int SECURE_ENVELOPE_MAX_PLAINTEXT_BYTES = 6656;
+
+        public const int SECURE_MANAGEMENT_RESPONSE_BASE_LENGTH = 8;
+
+        public const int SECURE_MANAGEMENT_RESPONSE_WITH_RECOVERY_LENGTH = 40;
+
+        public const int SECURE_PROVISION_SEED_BYTES = 32;
+
+        public const int SECURE_DEVICE_PUBLIC_KEY_BYTES = 32;
+
+        public const int SECURE_SESSION_ID_BYTES = 8;
+
+        public const int SECURE_RECOVERY_KEY_LENGTH = 32;
+
+        public const int SECURE_PIN_LENGTH = 4;
+
+        public const int SECURE_TAG_LENGTH = 16;
+
+        public const int SECURE_ENVELOPE_HEADER_LENGTH = 7;
     }
 }

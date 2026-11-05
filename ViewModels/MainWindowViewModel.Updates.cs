@@ -10,8 +10,8 @@ namespace Cortex.ViewModels
 {
     public partial class MainWindowViewModel
     {
-        private readonly AppUpdateService _appUpdateService = new();
-        private readonly FirmwareUpdateService _firmwareUpdateService = new();
+        private readonly AppUpdateService _appUpdateService;
+        private readonly FirmwareUpdateService _firmwareUpdateService;
         private CancellationTokenSource? _applicationUpdateCheckCts;
         private AppReleaseInfo? _latestApplicationRelease;
         private AppReleaseInfo? _availableApplicationRelease;
@@ -106,14 +106,17 @@ namespace Cortex.ViewModels
 
         private async Task RefreshApplicationUpdateStateAsync(bool manualCheck = false)
         {
-            _applicationUpdateCheckCts?.Cancel();
+            CancellationTokenSource? previousCheckCts = _applicationUpdateCheckCts;
+            previousCheckCts?.Cancel();
+            previousCheckCts?.Dispose();
+
             var checkCts = new CancellationTokenSource();
             _applicationUpdateCheckCts = checkCts;
 
             IsCheckingApplicationUpdate = true;
             _availableApplicationRelease = null;
             IsApplicationUpdateAvailable = false;
-            ApplicationUpdateStatusMessage = "Checking GitHub releases...";
+            ApplicationUpdateStatusMessage = "Checking for Cortex updates...";
             NotifyApplicationUpdateInfoChanged();
 
             try
@@ -126,7 +129,7 @@ namespace Cortex.ViewModels
 
                 if (_latestApplicationRelease == null)
                 {
-                    ApplicationUpdateStatusMessage = "No Cortex releases were found on GitHub.";
+                    ApplicationUpdateStatusMessage = "No Cortex releases were found by the update service.";
                     NotifyApplicationUpdateInfoChanged();
                     return;
                 }
@@ -176,7 +179,10 @@ namespace Cortex.ViewModels
                 if (_applicationUpdateCheckCts == checkCts)
                 {
                     IsCheckingApplicationUpdate = false;
+                    _applicationUpdateCheckCts = null;
                 }
+
+                checkCts.Dispose();
             }
         }
 
@@ -190,6 +196,7 @@ namespace Cortex.ViewModels
         private void ResetFirmwareUpdateState()
         {
             _firmwareCheckCts?.Cancel();
+            _firmwareCheckCts?.Dispose();
             _firmwareCheckCts = null;
             _latestFirmwareRelease = null;
             _availableFirmwareRelease = null;
@@ -208,7 +215,16 @@ namespace Cortex.ViewModels
                 return;
             }
 
-            _firmwareCheckCts?.Cancel();
+            // Avoid contending with secure-session discovery/unlock traffic.
+            if (_isSecureUnlockWorkflowActive)
+            {
+                return;
+            }
+
+            CancellationTokenSource? previousCheckCts = _firmwareCheckCts;
+            previousCheckCts?.Cancel();
+            previousCheckCts?.Dispose();
+
             var checkCts = new CancellationTokenSource();
             _firmwareCheckCts = checkCts;
 
@@ -258,8 +274,11 @@ namespace Cortex.ViewModels
                 if (_firmwareCheckCts == checkCts)
                 {
                     IsCheckingFirmwareUpdate = false;
+                    _firmwareCheckCts = null;
                     UpdateFirmwareButtonPresentation();
                 }
+
+                checkCts.Dispose();
             }
         }
 

@@ -1,6 +1,7 @@
 ﻿using Avalonia.Threading;
 using System;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -112,8 +113,9 @@ namespace Cortex.Services
                     File.AppendAllText(DetailedLogFilePath, entry + Environment.NewLine);
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                Trace.WriteLine($"Failed to write detailed Cortex log entry: {ex.Message}");
             }
         }
     }

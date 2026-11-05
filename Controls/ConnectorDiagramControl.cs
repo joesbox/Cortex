@@ -73,13 +73,23 @@ namespace Cortex.Controls
             Typeface typeface = new("Inter, Segoe UI, Arial", FontStyle.Normal, FontWeight.Bold);
             Pen pinOutlinePen = new(new SolidColorBrush(Color.Parse(ConnectorPinPalette.Outline)), Math.Max(1.6, 2.1 * scale));
             Pen socketRingPen = new(new SolidColorBrush(Color.Parse("#AA0C111B")), Math.Max(2.4, 3.2 * scale));
+            Pen highlightRingPen = new(new SolidColorBrush(Color.Parse("#CBA5FF")), Math.Max(2.0, 2.8 * scale));
             IBrush socketBrush = new SolidColorBrush(Color.Parse("#FF121923"));
             IBrush pinShadowBrush = new SolidColorBrush(Color.Parse("#55141722"));
+            IBrush highlightOuterGlowBrush = new SolidColorBrush(Color.Parse("#339C4DFF"));
+            IBrush highlightInnerGlowBrush = new SolidColorBrush(Color.Parse("#66B77BFF"));
 
             foreach (ConnectorPinDisplayItem pin in Pins)
             {
                 double radius = ConnectorPinCatalog.PinRadius * scale;
                 Point center = TransformPoint(diagramBounds, pin.X, pin.Y);
+
+                if (pin.IsHighlighted)
+                {
+                    context.DrawEllipse(highlightOuterGlowBrush, null, center, radius + (14.5 * scale), radius + (14.5 * scale));
+                    context.DrawEllipse(highlightInnerGlowBrush, null, center, radius + (9.5 * scale), radius + (9.5 * scale));
+                    context.DrawEllipse(null, highlightRingPen, center, radius + (6.2 * scale), radius + (6.2 * scale));
+                }
 
                 context.DrawEllipse(pinShadowBrush, null, new Point(center.X, center.Y + (1.6 * scale)), radius + (1.5 * scale), radius + (1.5 * scale));
                 context.DrawEllipse(socketBrush, socketRingPen, center, radius + (4.2 * scale), radius + (4.2 * scale));

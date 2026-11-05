@@ -26,6 +26,7 @@ namespace Cortex.Models
         private IBrush _pinTextBrush = Brushes.Transparent;
         private IBrush _badgeBrush = Brushes.Transparent;
         private IBrush _statusBrush = Brushes.Transparent;
+        private bool _isHighlighted;
 
         public string ConfiguredType
         {
@@ -85,6 +86,12 @@ namespace Cortex.Models
         {
             get => _statusBrush;
             private set => SetProperty(ref _statusBrush, value);
+        }
+
+        public bool IsHighlighted
+        {
+            get => _isHighlighted;
+            private set => SetProperty(ref _isHighlighted, value);
         }
 
         public string PinNumberText => PinNumber.ToString(CultureInfo.InvariantCulture);
@@ -176,6 +183,11 @@ namespace Cortex.Models
         public void Dispose()
         {
             DetachAllSources();
+        }
+
+        public void SetHighlighted(bool isHighlighted)
+        {
+            IsHighlighted = isHighlighted;
         }
 
         private void DetachAllSources()

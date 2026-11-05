@@ -26,4 +26,15 @@ public abstract partial class IoFlowNodeViewModel : ObservableObject
 
     [ObservableProperty]
     private string _borderHex;
+
+    [ObservableProperty]
+    private bool _isSelected;
+
+    [ObservableProperty]
+    private double _borderThickness = 2;
+
+    protected void SetDefaultBorderHex(string borderHex)
+    {
+        BorderHex = borderHex;
+    }
 }

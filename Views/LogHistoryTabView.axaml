@@ -363,26 +363,6 @@
                                                     Focusable="False"
                                                     IsReadOnly="True"
                                                     ItemsSource="{Binding LogMetricRows}">
-                                                    <DataGrid.Styles>
-                                                        <Style Selector="DataGridColumnHeader">
-                                                            <Setter Property="FontSize" Value="18" />
-                                                            <Setter Property="FontWeight" Value="ExtraBold" />
-                                                            <Setter Property="HorizontalContentAlignment" Value="Center" />
-                                                            <Setter Property="VerticalContentAlignment" Value="Center" />
-                                                            <Setter Property="Padding" Value="8,4,-26,4" />
-                                                            <Setter Property="Margin" Value="0,0,0,0" />
-                                                            <Setter Property="Foreground" Value="White" />
-                                                        </Style>
-                                                        <Style Selector="DataGridCell">
-                                                            <Setter Property="Padding" Value="12,6"/>
-                                                            <Setter Property="VerticalContentAlignment" Value="Center"/>
-                                                            <Setter Property="Foreground" Value="White" />
-                                                            <Setter Property="HorizontalContentAlignment" Value="Center" />
-                                                        </Style>
-                                                        <Style Selector="DataGridRow:pointerover">
-                                                            <Setter Property="Background" Value="Transparent"/>
-                                                        </Style>
-                                                    </DataGrid.Styles>
                                                     <DataGrid.Columns>
                                                         <DataGridTextColumn
                                                             Width="2*"
@@ -419,57 +399,117 @@
                                 SelectedIndex="{Binding SelectedLogDetailTabIndex, Mode=TwoWay}"
                                 TabStripPlacement="Top">
                                 <TabItem Header="Chart" FontSize="15">
-                                    <Grid Margin="16" ClipToBounds="True">
-                                        <lvc:CartesianChart
-                                            x:Name="LogChart"
-                                            FindingStrategy="{Binding LogFindingStrategy}"
-                                            HorizontalAlignment="Stretch"
-                                            VerticalAlignment="Stretch"
-                                            LegendPosition="Bottom"
-                                            Series="{Binding LogSeriesCollection}"
-                                            XAxes="{Binding LogXAxes}"
-                                            YAxes="{Binding LogYAxes}"
-                                            ZoomMode="X"
-                                            ClipToBounds="True"/>
+                                    <Grid Margin="16" RowDefinitions="*,Auto" RowSpacing="8" ClipToBounds="True">
+                                        <Border
+                                            Grid.Row="0"
+                                            Padding="4"
+                                            Background="#FF1B1E24"
+                                            BorderBrush="#443553"
+                                            BorderThickness="1"
+                                            CornerRadius="10"
+                                            ClipToBounds="True">
+                                            <lvc:CartesianChart
+                                                x:Name="LogChart"
+                                                Background="Transparent"
+                                                FindingStrategy="{Binding LogFindingStrategy}"
+                                                HorizontalAlignment="Stretch"
+                                                VerticalAlignment="Stretch"
+                                                LegendPosition="Hidden"
+                                                PointerEntered="OnLogChartPointerEntered"
+                                                PointerMoved="OnLogChartPointerMoved"
+                                                PointerExited="OnLogChartPointerExited"
+                                                Series="{Binding LogSeriesCollection}"
+                                                TooltipPosition="Hidden"
+                                                XAxes="{Binding LogXAxes}"
+                                                YAxes="{Binding LogYAxes}"
+                                                ZoomMode="X"
+                                                ClipToBounds="True"/>
+                                        </Border>
+                                        <ItemsControl
+                                            Grid.Row="1"
+                                            ItemsSource="{Binding LogChartLegendItems}">
+                                            <ItemsControl.ItemsPanel>
+                                                <ItemsPanelTemplate>
+                                                    <WrapPanel Orientation="Horizontal" />
+                                                </ItemsPanelTemplate>
+                                            </ItemsControl.ItemsPanel>
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Border
+                                                        Margin="0,0,8,4"
+                                                        Padding="8,4"
+                                                        Background="#1D2230"
+                                                        BorderBrush="#443553"
+                                                        BorderThickness="1"
+                                                        CornerRadius="6">
+                                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                                            <Ellipse
+                                                                Width="10"
+                                                                Height="10"
+                                                                VerticalAlignment="Center"
+                                                                Fill="{Binding SwatchBrush}" />
+                                                            <TextBlock
+                                                                VerticalAlignment="Center"
+                                                                Text="{Binding DisplayName}" />
+                                                            <Border
+                                                                MinWidth="72"
+                                                                Padding="6,2"
+                                                                Background="#2A213B"
+                                                                BorderBrush="#55426C"
+                                                                BorderThickness="1"
+                                                                CornerRadius="4">
+                                                                <TextBlock
+                                                                    HorizontalAlignment="Right"
+                                                                    FontFamily="Consolas"
+                                                                    Text="{Binding CurrentValueText}" />
+                                                            </Border>
+                                                        </StackPanel>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
                                     </Grid>
                                 </TabItem>
                                 <TabItem Header="Map" FontSize="15">
                                     <Grid Margin="0,8,0,0"
                                           RowDefinitions="8*,4*"
                                           RowSpacing="8">
-                                        <mapsui:MapControl x:Name="LogMap" Grid.Row="0"/>
-                                        <DataGrid
-                                            x:Name="LogMapDataGrid"
-                                            AutoGenerateColumns="False"
-                                            CanUserReorderColumns="False"
-                                            CanUserResizeColumns="True"
-                                            CanUserSortColumns="False"
-                                            GridLinesVisibility="All"
-                                            Focusable="False"
-                                            IsReadOnly="True"
+                                        <Border
+                                            Grid.Row="0"
+                                            Padding="4"
+                                            Background="#FF1B1E24"
+                                            BorderBrush="#443553"
+                                            BorderThickness="1">
+                                            <mapsui:MapControl x:Name="LogMap"/>
+                                        </Border>
+                                        <Border
                                             Grid.Row="1"
-                                            ItemsSource="{Binding LogMapInspectionRows}">
-                                            <DataGrid.Styles>
-                                                <Style Selector="DataGridColumnHeader">
-                                                    <Setter Property="FontSize" Value="18" />
-                                                    <Setter Property="FontWeight" Value="ExtraBold" />
-                                                    <Setter Property="HorizontalContentAlignment" Value="Center" />
-                                                    <Setter Property="VerticalContentAlignment" Value="Center" />
-                                                    <Setter Property="Padding" Value="8,4,-26,4" />
-                                                    <Setter Property="Margin" Value="0,0,0,0" />
-                                                    <Setter Property="Foreground" Value="White" />
-                                                </Style>
-                                                <Style Selector="DataGridCell">
-                                                    <Setter Property="Padding" Value="0"/>
-                                                    <Setter Property="HorizontalContentAlignment" Value="Center"/>
-                                                    <Setter Property="VerticalContentAlignment" Value="Stretch"/>
-                                                    <Setter Property="Foreground" Value="White" />
-                                                </Style>
-                                                <Style Selector="DataGridRow:pointerover">
-                                                    <Setter Property="Background" Value="Transparent"/>
-                                                </Style>
-                                            </DataGrid.Styles>
-                                        </DataGrid>
+                                            Padding="4"
+                                            BorderBrush="#443553"
+                                            BorderThickness="1"
+                                            CornerRadius="10"
+                                            ClipToBounds="True">
+                                            <Border.Background>
+                                                <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                                                    <GradientStop Color="#FF141722" Offset="0" />
+                                                    <GradientStop Color="#FF221C34" Offset="0.5" />
+                                                    <GradientStop Color="#FF302042" Offset="1" />
+                                                </LinearGradientBrush>
+                                            </Border.Background>
+                                            <DataGrid
+                                                x:Name="LogMapDataGrid"
+                                                AutoGenerateColumns="False"
+                                                CanUserReorderColumns="False"
+                                                CanUserResizeColumns="True"
+                                                CanUserSortColumns="False"
+                                                GridLinesVisibility="All"
+                                                Focusable="False"
+                                                IsReadOnly="True"
+                                                ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                                                ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                                ItemsSource="{Binding LogMapInspectionRows}">
+                                            </DataGrid>
+                                        </Border>
                                     </Grid>
                                 </TabItem>
                             </TabControl>

@@ -12,6 +12,44 @@
         <local:ViewLocator />
     </Application.DataTemplates>
 
+    <Application.Resources>
+        <ControlTheme x:Key="FlatDataGridColumnHeaderTheme" TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="#443553" />
+            <Setter Property="BorderThickness" Value="0,0,1,1" />
+            <Setter Property="Padding" Value="8,4" />
+            <Setter Property="FontSize" Value="16" />
+            <Setter Property="FontWeight" Value="ExtraBold" />
+            <Setter Property="Foreground" Value="#FFF5F7FF" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Template">
+                <ControlTemplate>
+                    <Border
+                        Background="{TemplateBinding Background}"
+                        BorderBrush="{TemplateBinding BorderBrush}"
+                        BorderThickness="{TemplateBinding BorderThickness}"
+                        Padding="{TemplateBinding Padding}">
+                        <ContentPresenter
+                            HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                            VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                            Content="{TemplateBinding Content}"
+                            ContentTemplate="{TemplateBinding ContentTemplate}" />
+                    </Border>
+                </ControlTemplate>
+            </Setter>
+            <Style Selector="^:pointerover">
+                <Setter Property="Background" Value="Transparent" />
+            </Style>
+            <Style Selector="^:pressed">
+                <Setter Property="Background" Value="Transparent" />
+            </Style>
+            <Style Selector="^:focus">
+                <Setter Property="Background" Value="Transparent" />
+            </Style>
+        </ControlTheme>
+    </Application.Resources>
+
     <Application.Styles>
         <StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml" />
 
@@ -46,6 +84,51 @@
         <Style Selector="TabItem:disabled Image.tab-icon">
             <Setter Property="Opacity" Value="0.35"/>
         </Style>
+
+        <Style Selector="DataGrid">
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="BorderBrush" Value="#443553" />
+            <Setter Property="CornerRadius" Value="10" />
+            <Setter Property="ClipToBounds" Value="True" />
+            <Setter Property="ColumnHeaderTheme" Value="{StaticResource FlatDataGridColumnHeaderTheme}" />
+            <Setter Property="Background">
+                <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                    <GradientStop Color="#FF141722" Offset="0" />
+                    <GradientStop Color="#FF221C34" Offset="0.5" />
+                    <GradientStop Color="#FF302042" Offset="1" />
+                </LinearGradientBrush>
+            </Setter>
+        </Style>
+
+        <Style Selector="DataGridColumnHeadersPresenter">
+            <Setter Property="Margin" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+        </Style>
+
+        <Style Selector="DataGridColumnHeader">
+            <Setter Property="Margin" Value="0" />
+            <Setter Property="BorderBrush" Value="#443553" />
+            <Setter Property="BorderThickness" Value="0,0,1,1" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="FontSize" Value="16" />
+            <Setter Property="FontWeight" Value="ExtraBold" />
+            <Setter Property="Foreground" Value="#FFF5F7FF" />
+        </Style>
+
+
+        <Style Selector="DataGridCell:pointerover">
+            <Setter Property="Background" Value="Transparent" />
+        </Style>
+
+        <Style Selector="DataGridCell:selected">
+            <Setter Property="Background" Value="Transparent" />
+        </Style>
+
+        <Style Selector="DataGridCell:current">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+        </Style>
+
         <FluentTheme>
             <FluentTheme.Palettes>
                 <ColorPaletteResources

@@ -1,0 +1,33 @@
+<Window x:Class="Cortex.Views.PinSetupDialogWindow" xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="Set PIN Lock" Width="520" Height="420" CanResize="False" WindowStartupLocation="CenterOwner" Icon="/Assets/cortex.ico">
+  <Grid Margin="18" RowDefinitions="Auto,Auto,Auto,Auto,*,Auto" RowSpacing="12">
+	<TextBlock Grid.Row="0" x:Name="HeadingText" Text="Set PIN Lock" FontSize="18" FontWeight="SemiBold" />
+	<TextBlock Grid.Row="1" Text="Choose a 4-digit PIN for secure Cortex USB access." TextWrapping="Wrap" Foreground="Gainsboro" />
+	<Border Grid.Row="2" BorderBrush="DimGray" BorderThickness="1" CornerRadius="6" Padding="14">
+	  <StackPanel Spacing="10">
+		<TextBlock Text="PIN" FontWeight="Medium" />
+		<StackPanel Orientation="Horizontal" Spacing="8">
+		  <TextBox x:Name="PinBox1" Width="44" MaxLength="1" HorizontalContentAlignment="Center" />
+		  <TextBox x:Name="PinBox2" Width="44" MaxLength="1" HorizontalContentAlignment="Center" />
+		  <TextBox x:Name="PinBox3" Width="44" MaxLength="1" HorizontalContentAlignment="Center" />
+		  <TextBox x:Name="PinBox4" Width="44" MaxLength="1" HorizontalContentAlignment="Center" />
+		</StackPanel>
+		<TextBlock Text="Confirm PIN" FontWeight="Medium" />
+		<StackPanel Orientation="Horizontal" Spacing="8">
+		  <TextBox x:Name="ConfirmBox1" Width="44" MaxLength="1" HorizontalContentAlignment="Center" />
+		  <TextBox x:Name="ConfirmBox2" Width="44" MaxLength="1" HorizontalContentAlignment="Center" />
+		  <TextBox x:Name="ConfirmBox3" Width="44" MaxLength="1" HorizontalContentAlignment="Center" />
+		  <TextBox x:Name="ConfirmBox4" Width="44" MaxLength="1" HorizontalContentAlignment="Center" />
+		</StackPanel>
+		<Button x:Name="ToggleShowButton" Content="Show PIN" MinWidth="96" HorizontalAlignment="Left" />
+	  </StackPanel>
+	</Border>
+	<TextBlock Grid.Row="3" Text="PIN lock applies to Cortex USB access. Save your recovery key after setup." TextWrapping="Wrap" Foreground="Gainsboro" />
+	<Border Grid.Row="4" Padding="0,6,0,0">
+	  <TextBlock x:Name="StatusText" Foreground="Orange" TextWrapping="Wrap" />
+	</Border>
+	<StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10">
+	  <Button x:Name="CancelButton" Content="CANCEL" MinWidth="96" />
+	  <Button x:Name="ContinueButton" Content="CONTINUE" MinWidth="96" />
+	</StackPanel>
+  </Grid>
+</Window>

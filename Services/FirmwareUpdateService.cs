@@ -254,6 +254,7 @@ namespace Cortex.Services
         {
             bool expectControllerRestart = false;
             bool controllerRestartAccepted = false;
+            bool firmwareSessionEnded = false;
             if (firmwareBytes.Length == 0)
             {
                 throw new InvalidOperationException("Firmware file is empty.");
@@ -294,6 +295,7 @@ namespace Cortex.Services
                 controllerRestartAccepted = true;
 
                 serialPortService.EndFirmwareUpdateSession(expectControllerRestart: true);
+                firmwareSessionEnded = true;
                 expectControllerRestart = false;
 
                 progress.Report(new FirmwareUpdateProgressInfo
@@ -336,7 +338,7 @@ namespace Cortex.Services
             }
             finally
             {
-                if (expectControllerRestart)
+                if (!firmwareSessionEnded)
                 {
                     serialPortService.EndFirmwareUpdateSession(expectControllerRestart);
                 }
@@ -353,10 +355,38 @@ namespace Cortex.Services
             CancellationToken cancellationToken,
             string statusMessage)
         {
-            if (!await serialPortService.BeginFirmwareUploadAsync(assetType, payload.Length, 5000))
+            bool uploadBeginAccepted = await serialPortService.BeginFirmwareUploadAsync(assetType, payload.Length, 5000);
+            if (!uploadBeginAccepted)
             {
                 string diagnostic = await GetFirmwareDiagnosticSuffixAsync(serialPortService);
-                throw new InvalidOperationException($"Controller refused firmware upload start{diagnostic}");
+                bool beginLikelyAccepted = diagnostic.Contains("upload begin accepted", StringComparison.OrdinalIgnoreCase);
+
+                if (!beginLikelyAccepted)
+                {
+                    // Some reconnect paths leave the controller in a stale upload state
+                    // until it receives an explicit cancel. Try that reset once, then retry.
+                    await serialPortService.CancelFirmwareUploadAsync(2000);
+
+                    uploadBeginAccepted = await serialPortService.BeginFirmwareUploadAsync(assetType, payload.Length, 5000);
+                    if (!uploadBeginAccepted)
+                    {
+                        bool reconnected = await serialPortService.WaitForControllerReconnectAsync(5000, 250);
+                        if (reconnected)
+                        {
+                            uploadBeginAccepted = await serialPortService.BeginFirmwareUploadAsync(assetType, payload.Length, 5000);
+                        }
+                    }
+
+                    if (!uploadBeginAccepted)
+                    {
+                        diagnostic = await GetFirmwareDiagnosticSuffixAsync(serialPortService);
+                    }
+                }
+
+                if (!uploadBeginAccepted && !beginLikelyAccepted)
+                {
+                    throw new InvalidOperationException($"Controller refused firmware upload start{diagnostic}");
+                }
             }
 
             int bytesSent = 0;

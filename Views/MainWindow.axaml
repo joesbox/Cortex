@@ -116,7 +116,7 @@
                     ToolTip.Placement="Right"
                     ToolTip.Tip="Log History"
                     ToolTip.VerticalOffset="0"
-                    IsEnabled="{Binding IsConnected}">
+                    IsEnabled="{Binding CanAccessOperationalTabs}">
                     <TabItem.Header>
                         <StackPanel HorizontalAlignment="Center" Orientation="Horizontal">
                             <Image

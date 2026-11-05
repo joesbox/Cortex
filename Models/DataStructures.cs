@@ -38,6 +38,16 @@ namespace Cortex.Models
         [ObservableProperty]
         public CellularParameters cellularParamsStaticData;
 
+        public ObservableCollection<CustomCanMessage> CustomCanMessagesLiveData { get; set; }
+
+        public ObservableCollection<CustomCanMessage> CustomCanMessagesStaticData { get; set; }
+
+        public ObservableCollection<CustomCanSignal> CustomCanSignalsLiveData { get; set; }
+
+        public ObservableCollection<CustomCanSignal> CustomCanSignalsStaticData { get; set; }
+
+        public ObservableCollection<CustomCanSignalMetadata> CustomCanSignalsMetadata { get; set; }
+
         public DataStructures()
         {
             channelsLiveData = new ObservableCollection<OutputChannel>();
@@ -67,6 +77,23 @@ namespace Cortex.Models
             {
                 analogueInputsStaticData.Add(new AnalogueInput(i + 1, false, false, null));
                 analogueInputsLiveData.Add(new AnalogueInput(i + 1, false, false, null));
+            }
+
+            CustomCanMessagesLiveData = new ObservableCollection<CustomCanMessage>();
+            CustomCanMessagesStaticData = new ObservableCollection<CustomCanMessage>();
+            for (int i = 0; i < Constants.MAX_CUSTOM_CAN_MESSAGES; i++)
+            {
+                CustomCanMessagesLiveData.Add(new CustomCanMessage { Index = i, Dlc = 8, TimeoutMs = 1000 });
+                CustomCanMessagesStaticData.Add(new CustomCanMessage { Index = i, Dlc = 8, TimeoutMs = 1000 });
+            }
+
+            CustomCanSignalsLiveData = new ObservableCollection<CustomCanSignal>();
+            CustomCanSignalsStaticData = new ObservableCollection<CustomCanSignal>();
+            CustomCanSignalsMetadata = new ObservableCollection<CustomCanSignalMetadata>();
+            for (int i = 0; i < Constants.MAX_CUSTOM_CAN_SIGNALS; i++)
+            {
+                CustomCanSignalsLiveData.Add(new CustomCanSignal { Index = i, Factor = 1.0f, Name = $"Signal {i + 1}" });
+                CustomCanSignalsStaticData.Add(new CustomCanSignal { Index = i, Factor = 1.0f, Name = $"Signal {i + 1}" });
             }
 
             systemParams = new SystemParameters();
