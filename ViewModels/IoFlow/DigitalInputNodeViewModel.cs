@@ -12,7 +12,16 @@ public sealed partial class DigitalInputNodeViewModel : IoFlowNodeViewModel
         _liveStatusText = "Unknown";
     }
 
-    public DigitalInput Input { get; }
+    public DigitalInput Input { get; private set; }
+
+    public void AssignInput(DigitalInput input)
+    {
+        Input = input;
+        Title = $"Digital Input {input.InputNumber}";
+        OnPropertyChanged(nameof(Input));
+        OnPropertyChanged(nameof(InputNumber));
+        UpdateLiveState(null);
+    }
 
     public int InputNumber => Input.InputNumber;
 

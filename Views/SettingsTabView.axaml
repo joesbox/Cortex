@@ -5,6 +5,7 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:rs="using:RangeSlider.Avalonia.Controls"
+    xmlns:controls="using:Cortex.Controls"
     xmlns:views="using:Cortex.Views"
     xmlns:vm="using:Cortex.ViewModels"
     x:DataType="vm:MainWindowViewModel"
@@ -32,7 +33,7 @@
     </UserControl.Styles>
     <Grid RowDefinitions="*, Auto">
         <TabControl x:Name="SettingsTabs" Grid.Row="0">
-            <TabItem Header="I/O">
+            <TabItem x:Name="LegacyIoTab" Header="I/O" IsVisible="False" IsEnabled="False">
                 <Grid ColumnDefinitions="*,Auto">
                     <Border
                         Grid.Column="0"
@@ -777,6 +778,7 @@
                                                         OffContent="Disabled"
                                                         OnContent="Enabled"
                                                         IsChecked="{Binding SelectedChannelCanTxEnabled, Mode=OneWay}"
+                                                        IsEnabled="{Binding HasAssignedChannelCanTxMessages}"
                                                         Command="{Binding ToggleSelectedChannelCanTxCommand}"
                                                         ToolTip.Tip="Enable or disable TX messages assigned to this channel." />
                                                 </Grid>
@@ -787,34 +789,51 @@
                                                     ToolTip.Tip="Shows which stored CAN TX messages are currently tied to this output channel."
                                                     Text="{Binding SelectedChannelCanTxSummary}" />
 
-                                                <Grid ColumnDefinitions="150,*" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="6"
-                                                      IsEnabled="{Binding SelectedChannelCanTxControlsEnabled}">
-                                                    <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Message" ToolTip.Tip="Choose which stored CAN message this output channel controls." />
-                                                    <ComboBox
-                                                        Grid.Row="0"
-                                                        Grid.Column="1"
-                                                        HorizontalAlignment="Stretch"
-                                                        ToolTip.Tip="Only messages with stored signals are listed here."
-                                                        ItemsSource="{Binding SelectedChannelCanTxMessages}"
-                                                        SelectedItem="{Binding SelectedChannelCanTxMessage, Mode=TwoWay}">
+                                                <TextBlock Text="Stored message to add" />
+                                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                    <ComboBox Grid.Column="0" HorizontalAlignment="Stretch"
+                                                              ItemsSource="{Binding SelectedChannelCanTxMessages}"
+                                                              SelectedItem="{Binding ChannelCanTxMessageToAdd, Mode=TwoWay}"
+                                                              ToolTip.Tip="Select a stored message to add. Each message can be assigned to one output channel.">
                                                         <ComboBox.ItemTemplate>
                                                             <DataTemplate>
                                                                 <TextBlock Text="{Binding SelectionSummary}" />
                                                             </DataTemplate>
                                                         </ComboBox.ItemTemplate>
                                                     </ComboBox>
+                                                    <Button Grid.Column="1" Content="Add message" Command="{Binding AddSelectedChannelCanTxMessageCommand}"
+                                                            IsEnabled="{Binding HasAvailableChannelCanTxMessage}" />
+                                                </Grid>
+                                                <TextBlock Text="Assigned TX messages" />
+                                                <ListBox ItemsSource="{Binding AssignedChannelCanTxMessages}"
+                                                         SelectedItem="{Binding SelectedChannelCanTxMessage, Mode=TwoWay}"
+                                                         MaxHeight="180"
+                                                         ToolTip.Tip="Select an assignment to edit its mode and period. Selecting does not change any assignment.">
+                                                    <ListBox.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <StackPanel>
+                                                                <TextBlock Text="{Binding SelectionSummary}" />
+                                                                <TextBlock Text="{Binding DirectionLabel}" />
+                                                            </StackPanel>
+                                                        </DataTemplate>
+                                                    </ListBox.ItemTemplate>
+                                                </ListBox>
+                                                <Button Content="Remove selected message" Command="{Binding RemoveSelectedChannelCanTxMessageCommand}"
+                                                        IsEnabled="{Binding SelectedChannelCanTxControlsEnabled}" />
 
-                                                    <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="Mode" ToolTip.Tip="One-shot sends on output activation; periodic repeats while active." />
+                                                <Grid ColumnDefinitions="150,*" RowDefinitions="Auto,Auto" ColumnSpacing="10" RowSpacing="6"
+                                                      IsEnabled="{Binding SelectedChannelCanTxControlsEnabled}">
+                                                    <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Mode" ToolTip.Tip="One-shot sends on output activation; periodic repeats while active." />
                                                     <ComboBox
-                                                        Grid.Row="1"
+                                                        Grid.Row="0"
                                                         Grid.Column="1"
                                                         HorizontalAlignment="Stretch"
                                                         ToolTip.Tip="TX one-shot: send once when output turns on. TX periodic: repeat at the chosen interval while output remains on."
                                                         ItemsSource="{Binding ChannelCanTxModeOptions}"
                                                         SelectedIndex="{Binding SelectedChannelCanTxModeIndex, Mode=TwoWay}" />
 
-                                                    <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" IsVisible="{Binding ShowSelectedChannelCanTxTiming}" Text="{Binding SelectedChannelCanTxTimeoutLabel}" ToolTip.Tip="{Binding SelectedChannelCanTxTimeoutTooltip}" />
-                                                    <Grid Grid.Row="2" Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="8" VerticalAlignment="Center" IsVisible="{Binding ShowSelectedChannelCanTxTiming}">
+                                                    <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" IsVisible="{Binding ShowSelectedChannelCanTxTiming}" Text="{Binding SelectedChannelCanTxTimeoutLabel}" ToolTip.Tip="{Binding SelectedChannelCanTxTimeoutTooltip}" />
+                                                    <Grid Grid.Row="1" Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="8" VerticalAlignment="Center" IsVisible="{Binding ShowSelectedChannelCanTxTiming}">
                                                         <Slider
                                                             Grid.Column="0"
                                                             HorizontalAlignment="Stretch"
@@ -864,16 +883,16 @@
                                                         <TextBlock Grid.Column="2" VerticalAlignment="Center" Foreground="#FFD0C3E8" Text="{Binding SelectedMathRuleCount, StringFormat='Active rules: {0}'}" />
                                                     </Grid>
                                                     <Grid ColumnDefinitions="170,220" ColumnSpacing="10">
-                                                        <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="Root rule" ToolTip.Tip="Choose which active rule provides the final result for this MATH channel." />
-                                                        <ComboBox Grid.Column="1" Width="220" Classes="ioFieldInput" ItemsSource="{Binding MathRootRuleOptions}" DisplayMemberBinding="{Binding Label}" SelectedValueBinding="{Binding Value}" SelectedValue="{Binding SelectedMathRootRule}" ToolTip.Tip="Choose which active rule provides the final result for this MATH channel." />
-                                                    </Grid>
-                                                    <Grid ColumnDefinitions="170,220" ColumnSpacing="10">
                                                         <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="Output mode" ToolTip.Tip="Select whether the final MATH result drives a digital output or a PWM output." />
                                                         <ComboBox Grid.Column="1" Width="220" Classes="ioFieldInput" ItemsSource="{Binding MathOutputModes}" SelectedIndex="{Binding SelectedMathOutputModeIndex}" ToolTip.Tip="Select whether the final MATH result drives a digital output or a PWM output." />
                                                     </Grid>
                                                     <Grid ColumnDefinitions="170,220" ColumnSpacing="10">
                                                         <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="Editing rule" ToolTip.Tip="Choose which active rule to edit in the controls below." />
                                                         <ComboBox Grid.Column="1" Width="220" Classes="ioFieldInput" ItemsSource="{Binding MathRuleSlotOptions}" DisplayMemberBinding="{Binding Label}" SelectedValueBinding="{Binding Value}" SelectedValue="{Binding SelectedMathRuleSlotIndex}" ToolTip.Tip="Choose which active rule to edit in the controls below." />
+                                                    </Grid>
+                                                    <Grid ColumnDefinitions="170,220" ColumnSpacing="10">
+                                                        <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="Root rule" ToolTip.Tip="Select whether the rule currently being edited provides the final result for this MATH channel." />
+                                                        <ToggleSwitch Grid.Column="1" Width="220" IsEnabled="{Binding CanToggleSelectedMathRuleRoot}" IsChecked="{Binding SelectedMathRuleIsRoot, Mode=TwoWay}" OffContent="No" OnContent="Yes" ToolTip.Tip="Only one active rule can be the root. Turning this on selects the current editing rule; turning it off selects the next active rule." />
                                                     </Grid>
                                                     <Grid ColumnDefinitions="170,220" ColumnSpacing="10">
                                                         <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="Operator" ToolTip.Tip="Select the logic or arithmetic operation this rule will perform." />
@@ -902,7 +921,7 @@
                                                             </Grid>
                                                             <Grid ColumnDefinitions="170,220" ColumnSpacing="10" IsVisible="{Binding SelectedMathOperandAUsesIndex}">
                                                                 <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="{Binding SelectedMathOperandAIndexLabel}" ToolTip.Tip="Choose the specific source used for operand A." />
-                                                                <ComboBox Grid.Column="1" Width="220" Classes="ioFieldInput" ItemsSource="{Binding SelectedMathOperandAIndexOptions}" DisplayMemberBinding="{Binding Label}" SelectedValueBinding="{Binding Value}" SelectedValue="{Binding SelectedMathOperandAIndexValue}" ToolTip.Tip="Choose the specific source used for operand A." />
+                                                                <ComboBox Grid.Column="1" Width="220" Classes="ioFieldInput" ItemsSource="{Binding SelectedMathOperandAIndexOptions}" DisplayMemberBinding="{Binding Label}" SelectedItem="{Binding SelectedMathOperandAIndexOption, Mode=TwoWay}" ToolTip.Tip="Choose the specific source used for operand A." />
                                                             </Grid>
                                                         </StackPanel>
                                                     </Border>
@@ -919,7 +938,7 @@
                                                             </Grid>
                                                             <Grid ColumnDefinitions="170,220" ColumnSpacing="10" IsVisible="{Binding SelectedMathOperandBUsesIndex}">
                                                                 <TextBlock Grid.Column="0" Classes="ioFieldLabel" Text="{Binding SelectedMathOperandBIndexLabel}" ToolTip.Tip="Choose the specific source used for operand B." />
-                                                                <ComboBox Grid.Column="1" Width="220" Classes="ioFieldInput" ItemsSource="{Binding SelectedMathOperandBIndexOptions}" DisplayMemberBinding="{Binding Label}" SelectedValueBinding="{Binding Value}" SelectedValue="{Binding SelectedMathOperandBIndexValue}" ToolTip.Tip="Choose the specific source used for operand B." />
+                                                                <ComboBox Grid.Column="1" Width="220" Classes="ioFieldInput" ItemsSource="{Binding SelectedMathOperandBIndexOptions}" DisplayMemberBinding="{Binding Label}" SelectedItem="{Binding SelectedMathOperandBIndexOption, Mode=TwoWay}" ToolTip.Tip="Choose the specific source used for operand B." />
                                                             </Grid>
                                                         </StackPanel>
                                                     </Border>
@@ -932,45 +951,58 @@
                                                             </Grid>
                                                         </StackPanel>
                                                     </Border>
-                                                    <Border Padding="14" Background="#221C34" BorderBrush="#5A4A78" BorderThickness="1" CornerRadius="10">
+                                                    <Border Classes="mathRuntimePanel" Width="510" Padding="14" Background="#221C34" BorderBrush="#5A4A78" BorderThickness="1" CornerRadius="10">
                                                         <StackPanel Orientation="Vertical" Spacing="12">
                                                             <TextBlock FontSize="16" FontWeight="Bold" Text="Runtime status" />
-                                                            <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto,Auto" RowSpacing="10" ColumnSpacing="10">
-                                                                <Border Grid.Row="0" Grid.Column="0" Background="#2A1F3E" BorderBrush="#5A4A78" BorderThickness="1" CornerRadius="8" Padding="10">
+                                                            <Grid ColumnDefinitions="235,235" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="10" ColumnSpacing="10">
+                                                                <Border Grid.Row="0" Grid.ColumnSpan="2" MinHeight="80" Background="#2A1F3E" BorderBrush="#5A4A78" BorderThickness="1" CornerRadius="8" Padding="10">
+                                                                    <StackPanel Spacing="6">
+                                                                        <TextBlock Foreground="#FFAF9FC8" FontSize="14" Text="Operand A - live value" />
+                                                                        <TextBlock Classes="mathLiveValue" FontSize="16" FontWeight="SemiBold" Foreground="#FFE9E1F8" Text="{Binding SelectedMathRuntimeOperandAText}" TextWrapping="Wrap" />
+                                                                    </StackPanel>
+                                                                </Border>
+                                                                <Border Grid.Row="1" Grid.ColumnSpan="2" IsVisible="{Binding SelectedMathRuleUsesOperandB}" MinHeight="80" Background="#2A1F3E" BorderBrush="#5A4A78" BorderThickness="1" CornerRadius="8" Padding="10">
+                                                                    <StackPanel Spacing="6">
+                                                                        <TextBlock Foreground="#FFAF9FC8" FontSize="14" Text="Operand B - live value" />
+                                                                        <TextBlock Classes="mathLiveValue" FontSize="16" FontWeight="SemiBold" Foreground="#FFE9E1F8" Text="{Binding SelectedMathRuntimeOperandBText}" TextWrapping="Wrap" />
+                                                                    </StackPanel>
+                                                                </Border>
+                                                                <Border Grid.Row="2" Grid.ColumnSpan="2" MinHeight="80" Background="#2A1F3E" BorderBrush="#5A4A78" BorderThickness="1" CornerRadius="8" Padding="10">
+                                                                    <StackPanel Spacing="6">
+                                                                        <TextBlock Foreground="#FFAF9FC8" FontSize="14" Text="Rule result" />
+                                                                        <TextBlock Classes="mathLiveValue" FontSize="18" FontWeight="SemiBold" Foreground="#FFE9E1F8" Text="{Binding SelectedMathRuntimeResultText}" TextWrapping="Wrap" />
+                                                                        <TextBlock FontSize="15" Foreground="#FFD0C3E8" Text="{Binding SelectedMathRuntimeRuleValueText}" TextWrapping="Wrap" />
+                                                                    </StackPanel>
+                                                                </Border>
+                                                                <Border Grid.Row="3" Grid.ColumnSpan="2" MinHeight="110" Background="#2A1F3E" BorderBrush="#5A4A78" BorderThickness="1" CornerRadius="8" Padding="10">
                                                                     <StackPanel Orientation="Vertical" Spacing="6">
-                                                                        <TextBlock Foreground="#FFAF9FC8" FontSize="13" Text="Root result" />
+                                                                        <TextBlock Foreground="#FFAF9FC8" FontSize="14" Text="Root output effect" />
                                                                         <TextBlock FontSize="15" Foreground="#FFE9E1F8" Text="{Binding SelectedMathRuntimeRootValueText}" TextWrapping="Wrap" />
                                                                         <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
                                                                             <TextBlock Grid.Column="0" FontSize="15" FontWeight="Bold" Text="&#9679;" Foreground="{Binding SelectedMathRuntimeRootStatusBrush}" />
-                                                                            <TextBlock Grid.Column="1" Foreground="#FFD0C3E8" FontSize="13" TextWrapping="Wrap" Text="{Binding SelectedMathRuntimeRootStatusText}" />
+                                                                            <TextBlock Grid.Column="1" Foreground="#FFD0C3E8" FontSize="14" TextWrapping="Wrap" Text="{Binding SelectedMathRuntimeRootStatusText}" />
                                                                         </Grid>
                                                                     </StackPanel>
                                                                 </Border>
-                                                                <Border Grid.Row="0" Grid.Column="1" Background="#2A1F3E" BorderBrush="#5A4A78" BorderThickness="1" CornerRadius="8" Padding="10">
+                                                                <Border Grid.Row="4" Grid.Column="0" Background="#2A1F3E" BorderBrush="#5A4A78" BorderThickness="1" CornerRadius="8" Padding="10">
                                                                     <StackPanel Orientation="Vertical" Spacing="6">
-                                                                        <TextBlock Foreground="#FFAF9FC8" FontSize="13" Text="Channel health" />
+                                                                        <TextBlock Foreground="#FFAF9FC8" FontSize="14" Text="Channel health" />
                                                                         <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
                                                                             <TextBlock Grid.Column="0" FontSize="15" FontWeight="Bold" Text="{Binding SelectedMathRuntimeChannelStatusIcon}" Foreground="{Binding SelectedMathRuntimeChannelStatusBrush}" />
                                                                             <TextBlock Grid.Column="1" FontSize="14" Foreground="#FFE9E1F8" Text="{Binding SelectedMathRuntimeChannelErrorText}" TextWrapping="Wrap" />
                                                                         </Grid>
                                                                     </StackPanel>
                                                                 </Border>
-                                                                <Border Grid.Row="1" Grid.Column="0" Background="#2A1F3E" BorderBrush="#5A4A78" BorderThickness="1" CornerRadius="8" Padding="10">
+                                                                <Border Grid.Row="4" Grid.Column="1" Background="#2A1F3E" BorderBrush="#5A4A78" BorderThickness="1" CornerRadius="8" Padding="10">
                                                                     <StackPanel Orientation="Vertical" Spacing="6">
-                                                                        <TextBlock Foreground="#FFAF9FC8" FontSize="13" Text="Rule result" />
-                                                                        <TextBlock FontSize="15" Foreground="#FFE9E1F8" Text="{Binding SelectedMathRuntimeRuleValueText}" TextWrapping="Wrap" />
-                                                                    </StackPanel>
-                                                                </Border>
-                                                                <Border Grid.Row="1" Grid.Column="1" Background="#2A1F3E" BorderBrush="#5A4A78" BorderThickness="1" CornerRadius="8" Padding="10">
-                                                                    <StackPanel Orientation="Vertical" Spacing="6">
-                                                                        <TextBlock Foreground="#FFAF9FC8" FontSize="13" Text="Rule health" />
+                                                                        <TextBlock Foreground="#FFAF9FC8" FontSize="14" Text="Rule health" />
                                                                         <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
                                                                             <TextBlock Grid.Column="0" FontSize="15" FontWeight="Bold" Text="{Binding SelectedMathRuntimeRuleStatusIcon}" Foreground="{Binding SelectedMathRuntimeRuleStatusBrush}" />
                                                                             <TextBlock Grid.Column="1" FontSize="14" Foreground="#FFE9E1F8" Text="{Binding SelectedMathRuntimeRuleErrorText}" TextWrapping="Wrap" />
                                                                         </Grid>
                                                                     </StackPanel>
                                                                 </Border>
-                                                                <Border Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2" Background="#2A2332" BorderBrush="#5F4D68" BorderThickness="1" CornerRadius="8" Padding="10">
+                                                                <Border Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="2" Background="#2A2332" BorderBrush="#5F4D68" BorderThickness="1" CornerRadius="8" Padding="10">
                                                                     <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
                                                                         <TextBlock Grid.Column="0" FontSize="15" FontWeight="Bold" Text="{Binding SelectedMathRuntimeEvaluatedStatusIcon}" Foreground="{Binding SelectedMathRuntimeEvaluatedStatusBrush}" />
                                                                         <TextBlock Grid.Column="1" FontSize="14" Foreground="#FFE9E1F8" TextWrapping="Wrap" Text="{Binding SelectedMathRuntimeEvaluatedText}" />
@@ -1197,7 +1229,7 @@
                     </Grid>
                 </Grid>
             </TabItem>
-            <TabItem Header="I/O Flow">
+            <TabItem x:Name="IoFlowTab" Header="I/O Flow">
                 <views:IoFlowTabView />
             </TabItem>
             <TabItem x:Name="CanMessagesTab" Header="CAN Messages">
@@ -1578,11 +1610,12 @@
                                             VerticalAlignment="Center"
                                             Text="System current limit" />
                                         <Grid ColumnDefinitions="Auto, Auto">
-                                            <TextBlock
+                                            <controls:SliderValueEditor
                                                 Grid.Column="0"
                                                 Width="35"
                                                 HorizontalAlignment="Right"
                                                 VerticalAlignment="Center"
+                                                Slider="{Binding #slider}"
                                                 Text="{Binding #slider.Value}" />
                                             <Slider
                                                 x:Name="slider"
@@ -2018,7 +2051,3 @@
         </StackPanel>
     </Grid>
 </UserControl>
-
-
-
-

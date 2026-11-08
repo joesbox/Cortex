@@ -898,6 +898,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
 
     private string _customCanStatusMessage = string.Empty;
     private bool _isCanMessagesTabVisible;
+    private bool _isIoFlowTabVisible;
     private int _controllerCustomCanSignalsSignature = int.MinValue;
     private readonly HashSet<CustomCanSignal> _trackedStoredSignalSelectionSubscriptions = [];
 
@@ -915,6 +916,17 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
         }
 
         _isCanMessagesTabVisible = isVisible;
+        UpdateCustomCanStatusPollingSelection();
+    }
+
+    public void SetIoFlowTabVisible(bool isVisible)
+    {
+        if (_isIoFlowTabVisible == isVisible)
+        {
+            return;
+        }
+
+        _isIoFlowTabVisible = isVisible;
         UpdateCustomCanStatusPollingSelection();
     }
 
@@ -1643,7 +1655,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
         {
             foreach (DbcCanSignalDefinition signal in selectedSignals)
             {
-                if (!await SaveSignalToControllerWithRetryAsync(signal, signal.Dlc, timeoutMs: 1000, CustomCanTxOptions.Rx))
+                if (!await SaveSignalToControllerWithRetryAsync(signal, signal.Dlc, timeoutMs: 1000, CustomCanTxOptions.Rx, isDbcImport: true))
                 {
                     break;
                 }
@@ -1668,7 +1680,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
 
                 foreach (DbcCanSignalDefinition signal in selectedSignals)
                 {
-                    if (!await SaveSignalToControllerWithRetryAsync(signal, signal.Dlc, timeoutMs: 1000, CustomCanTxOptions.Rx, batched: true))
+                    if (!await SaveSignalToControllerWithRetryAsync(signal, signal.Dlc, timeoutMs: 1000, CustomCanTxOptions.Rx, batched: true, isDbcImport: true))
                     {
                         break;
                     }
@@ -1880,7 +1892,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
                 signalCount++;
             }
 
-            message.Flags = (byte)(message.Flags & ~0x01);
+            RemoveStoredCanMessageAssignment(message);
             message.IsSelected = false;
         }
 
@@ -1888,6 +1900,12 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
         HasPendingConfigChanges = true;
         CustomCanStatusMessage = $"Queued deletion of {checkedMessages.Count} message(s) and their {signalCount} signal(s). Click SAVE CHANGES to apply.";
         AddLog(CustomCanStatusMessage);
+    }
+
+    private static void RemoveStoredCanMessageAssignment(CustomCanMessage message)
+    {
+        message.Flags = (byte)(message.Flags & 0x02);
+        message.TxTrigger = Constants.CUSTOM_CAN_TX_TRIGGER_ALWAYS;
     }
 
     private async Task<bool> ApplyCustomCanMessageSettingsAsync(CustomCanSignal signal, bool isTx, bool isPeriodic, byte trigger, ushort timeoutMs, byte valueSource)
@@ -2088,123 +2106,65 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
     }
 
     /// <summary>
-    /// Sets a TX message's trigger channel and enabled state (used by the I/O Flow CAN TX node).
+    /// Stages a TX message's trigger channel and enabled state for Save to controller.
     /// </summary>
-    public async Task<bool> SetCustomCanMessageTxStateAsync(int messageIndex, byte trigger, bool enabled)
+    public Task<bool> SetCustomCanMessageTxStateAsync(int messageIndex, byte trigger, bool enabled) =>
+        Task.FromResult(StageCustomCanTxMessageChange(messageIndex, message =>
+        {
+            message.TxTrigger = trigger;
+            message.IsEnabled = enabled;
+        }));
+
+    public Task<bool> SetCustomCanMessageTxModeAsync(int messageIndex, bool isPeriodic, ushort timeoutMs)
     {
-        if (messageIndex < 0 || messageIndex >= SettingsDataView.CustomCanMessagesStaticData.Count)
+        if (isPeriodic && (timeoutMs < Constants.CUSTOM_CAN_TX_PERIOD_MIN_MS ||
+                           timeoutMs > Constants.CUSTOM_CAN_TX_PERIOD_MAX_MS ||
+                           timeoutMs % Constants.CUSTOM_CAN_TX_PERIOD_STEP_MS != 0))
         {
-            return false;
+            CustomCanStatusMessage = "Periodic TX period must be between 100 and 30,000 ms in 100 ms steps.";
+            AddLog(CustomCanStatusMessage);
+            return Task.FromResult(false);
         }
 
-        CustomCanMessage message = SettingsDataView.CustomCanMessagesStaticData[messageIndex];
-        if (!message.IsTx)
+        return Task.FromResult(StageCustomCanTxMessageChange(messageIndex, message =>
         {
-            return false;
-        }
+            message.IsPeriodic = isPeriodic;
+            if (isPeriodic)
+            {
+                message.TimeoutMs = timeoutMs;
+            }
+        }));
+    }
 
-        if (message.TxTrigger == trigger && message.IsEnabled == enabled)
+    private bool StageCustomCanTxMessageChange(int messageIndex, Action<CustomCanMessage> apply)
+    {
+        if (messageIndex < 0 || messageIndex >= SettingsDataView.CustomCanMessagesStaticData.Count ||
+            !SettingsDataView.CustomCanMessagesStaticData[messageIndex].IsTx)
         {
-            return true;
-        }
-
-        if (!CanEditStoredCustomCanSignals() || _portService == null)
-        {
-            CustomCanStatusMessage = "Connect to controller to update stored Custom CAN messages.";
+            CustomCanStatusMessage = "Select a configured TX message from CAN Messages.";
             AddLog(CustomCanStatusMessage);
             return false;
         }
 
-        byte originalTrigger = message.TxTrigger;
+        CustomCanMessage message = SettingsDataView.CustomCanMessagesStaticData[messageIndex];
         byte originalFlags = message.Flags;
-        message.TxTrigger = trigger;
-        message.IsEnabled = enabled;
-
-        void Revert()
-        {
-            message.TxTrigger = originalTrigger;
-            message.Flags = originalFlags;
-        }
+        byte originalTrigger = message.TxTrigger;
+        ushort originalTimeout = message.TimeoutMs;
+        apply(message);
 
         if (!TryValidateCustomCanConfiguration(messageIndex, message, -1, new CustomCanSignal(), out string validationError))
         {
-            Revert();
+            message.Flags = originalFlags;
+            message.TxTrigger = originalTrigger;
+            message.TimeoutMs = originalTimeout;
             CustomCanStatusMessage = validationError;
             AddLog(CustomCanStatusMessage);
             return false;
         }
 
-        IsCustomCanBusy = true;
-        bool sessionStarted = BeginCustomCanConfigSession(out bool previousSuspendLiveRequestPolling);
-        try
-        {
-            bool persisted =
-                await WriteCustomCanMessageRecordAsync(messageIndex, message) &&
-                await _portService.SaveStandaloneChangesAsync();
-            if (!persisted)
-            {
-                Revert();
-                CustomCanStatusMessage = string.IsNullOrWhiteSpace(_portService.LastCustomCanWriteError)
-                    ? "Controller rejected Custom CAN trigger update."
-                    : _portService.LastCustomCanWriteError;
-                AddLog(CustomCanStatusMessage);
-                return false;
-            }
-        }
-        finally
-        {
-            EndCustomCanConfigSession(sessionStarted, previousSuspendLiveRequestPolling);
-            IsCustomCanBusy = false;
-        }
-
-        _portService.RequestCustomCanSnapshot();
+        RecalculatePendingConfigChanges();
         NotifySelectedChannelCanTxChanged();
         return true;
-    }
-
-    public async Task<bool> SetCustomCanMessageTxModeAsync(int messageIndex, bool isPeriodic, ushort timeoutMs)
-    {
-        if (messageIndex < 0 || messageIndex >= SettingsDataView.CustomCanMessagesStaticData.Count)
-        {
-            return false;
-        }
-
-        CustomCanMessage message = SettingsDataView.CustomCanMessagesStaticData[messageIndex];
-        if (!message.IsTx)
-        {
-            return false;
-        }
-
-        CustomCanSignal? signal = SettingsDataView.CustomCanSignalsStaticData
-            .FirstOrDefault(item => item.IsEnabled && item.MessageIndex == messageIndex);
-        if (signal == null)
-        {
-            CustomCanStatusMessage = "No stored signal is linked to this TX message.";
-            AddLog(CustomCanStatusMessage);
-            return false;
-        }
-
-        if (isPeriodic && timeoutMs < 1)
-        {
-            CustomCanStatusMessage = "Periodic TX messages need a transmit period between 1 and 60,000 ms.";
-            AddLog(CustomCanStatusMessage);
-            return false;
-        }
-
-        bool applied = await ApplyCustomCanMessageSettingsAsync(
-            signal,
-            isTx: true,
-            isPeriodic,
-            trigger: message.TxTrigger,
-            timeoutMs,
-            valueSource: signal.ValueSource);
-
-        if (applied)
-        {
-            NotifySelectedChannelCanTxChanged();
-        }
-
-        return applied;
     }
 
     // --- Per-channel CAN TX section (Settings tab) ---
@@ -2224,11 +2184,11 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
         IEnumerable<CustomCanMessage> allMessages = SettingsDataView.CustomCanMessagesStaticData;
         int selectedChannelIndex = SelectedChannelZeroBasedIndex;
 
-        HashSet<int> messageIndexes = ControllerCustomCanSignals
+        HashSet<int> messageIndexes = SettingsDataView.CustomCanSignalsStaticData
+            .Where(signal => signal.IsEnabled)
             .Select(signal => (int)signal.MessageIndex)
-            .Concat(SettingsDataView.CustomCanSignalsStaticData
-                .Where(signal => signal.IsEnabled)
-                .Select(signal => (int)signal.MessageIndex))
+            .Concat(allMessages.Where(message => message.IsEnabled || (message.IsTx && message.Id != 0))
+                .Select(message => message.Index))
             .Concat(selectedChannelIndex >= 0
                 ? ConfiguredTxMessagesForChannel(selectedChannelIndex).Select(message => message.Index)
                 : Enumerable.Empty<int>())
@@ -2236,17 +2196,8 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             .ToHashSet();
 
         List<CustomCanMessage> availableMessages = allMessages
-            .Where(message => messageIndexes.Contains(message.Index))
+            .Where(message => message.IsTx && message.Id != 0 && messageIndexes.Contains(message.Index))
             .ToList();
-
-        if (availableMessages.Count == 0)
-        {
-            CustomCanMessage? fallbackMessage = allMessages.FirstOrDefault();
-            if (fallbackMessage != null)
-            {
-                availableMessages.Add(fallbackMessage);
-            }
-        }
 
         return availableMessages;
     }
@@ -2266,7 +2217,6 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
                 OnPropertyChanged(nameof(HasSelectedChannelCanTxMessage));
                 OnPropertyChanged(nameof(SelectedChannelCanTxControlsEnabled));
                 RefreshSelectedChannelCanTxEditFields();
-                ApplySelectedChannelCanTxSelectionChanges();
             }
         }
     }
@@ -2276,7 +2226,19 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
     public bool HasAvailableChannelCanTxMessage => SelectedChannelCanTxMessages.Count > 0;
 
     public bool SelectedChannelCanTxControlsEnabled =>
-        SelectedChannelCanTxEnabled;
+        SelectedChannelCanTxMessage != null &&
+        SelectedChannelCanTxMessage.IsTx &&
+        SelectedChannelCanTxMessage.TxTrigger == SelectedChannelZeroBasedIndex;
+
+    public ObservableCollection<CustomCanMessage> AssignedChannelCanTxMessages { get; } = [];
+    public bool HasAssignedChannelCanTxMessages => AssignedChannelCanTxMessages.Count > 0;
+
+    private CustomCanMessage? _channelCanTxMessageToAdd;
+    public CustomCanMessage? ChannelCanTxMessageToAdd
+    {
+        get => _channelCanTxMessageToAdd;
+        set => SetProperty(ref _channelCanTxMessageToAdd, value);
+    }
 
     public ObservableCollection<string> ChannelCanTxModeOptions { get; } = ["TX one-shot", "TX periodic"];
 
@@ -2302,9 +2264,8 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
         get => _selectedChannelCanTxTimeoutMs;
         set
         {
-            int clamped = Math.Clamp(value, 100, 30000);
-            int snapped = (int)(Math.Round(clamped / 100.0, MidpointRounding.AwayFromZero) * 100);
-            snapped = Math.Clamp(snapped, 100, 30000);
+            int clamped = Math.Clamp(value, Constants.CUSTOM_CAN_TX_PERIOD_MIN_MS, Constants.CUSTOM_CAN_TX_PERIOD_MAX_MS);
+            int snapped = (int)(Math.Round(clamped / (double)Constants.CUSTOM_CAN_TX_PERIOD_STEP_MS, MidpointRounding.AwayFromZero) * Constants.CUSTOM_CAN_TX_PERIOD_STEP_MS);
 
             if (SetProperty(ref _selectedChannelCanTxTimeoutMs, snapped))
             {
@@ -2366,20 +2327,20 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
         List<CustomCanMessage> availableTxMessages = AvailableCanMessagesForChannelCanTxSettings();
         int? selectedMessageIndex = SelectedChannelCanTxMessage?.Index;
 
-        SelectedChannelCanTxMessages.Clear();
-        foreach (CustomCanMessage message in availableTxMessages)
-        {
-            SelectedChannelCanTxMessages.Add(message);
-        }
+        SyncObservableCollection(SelectedChannelCanTxMessages, availableTxMessages);
+        SyncObservableCollection(AssignedChannelCanTxMessages,
+            ConfiguredTxMessagesForChannel(SelectedChannelZeroBasedIndex));
 
-        if (selectedMessageIndex.HasValue)
-        {
-            SelectedChannelCanTxMessage = SelectedChannelCanTxMessages.FirstOrDefault(message => message.Index == selectedMessageIndex.Value);
-        }
+        SelectedChannelCanTxMessage = AssignedChannelCanTxMessages.FirstOrDefault(message => message.Index == selectedMessageIndex)
+            ?? AssignedChannelCanTxMessages.FirstOrDefault();
 
-        SelectedChannelCanTxMessage ??= SelectedChannelCanTxMessages.FirstOrDefault();
+        if (ChannelCanTxMessageToAdd == null || !availableTxMessages.Contains(ChannelCanTxMessageToAdd))
+        {
+            ChannelCanTxMessageToAdd = availableTxMessages.FirstOrDefault();
+        }
         OnPropertyChanged(nameof(HasAvailableChannelCanTxMessage));
         OnPropertyChanged(nameof(SelectedChannelCanTxControlsEnabled));
+        OnPropertyChanged(nameof(HasAssignedChannelCanTxMessages));
     }
 
     private void RefreshSelectedChannelCanTxEditFields()
@@ -2405,23 +2366,9 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
         }
     }
 
-    private void ApplySelectedChannelCanTxSelectionChanges()
-    {
-        if (_suppressSelectedChannelCanTxEditTracking || !SelectedChannelCanTxEnabled)
-        {
-            return;
-        }
-
-        if (ApplySelectedChannelCanTxStateToMessage())
-        {
-            HasPendingConfigChanges = true;
-            NotifySelectedChannelCanTxChanged();
-        }
-    }
-
     private void ApplySelectedChannelCanTxSettingChanges()
     {
-        if (_suppressSelectedChannelCanTxEditTracking || !SelectedChannelCanTxEnabled)
+        if (_suppressSelectedChannelCanTxEditTracking || !SelectedChannelCanTxControlsEnabled)
         {
             return;
         }
@@ -2433,7 +2380,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
         }
     }
 
-    private bool ApplySelectedChannelCanTxStateToMessage(bool forceEnable = false)
+    private bool ApplySelectedChannelCanTxStateToMessage()
     {
         int channelIndex = SelectedChannelZeroBasedIndex;
         CustomCanMessage? message = SelectedChannelCanTxMessage;
@@ -2447,8 +2394,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
         ushort timeout = message.TimeoutMs;
         if (isPeriodic)
         {
-            int snappedTimeout = (int)(Math.Round(Math.Clamp(SelectedChannelCanTxTimeoutMs, 100, 30000) / 100.0, MidpointRounding.AwayFromZero) * 100);
-            timeout = (ushort)Math.Clamp(snappedTimeout, 100, 30000);
+            timeout = (ushort)SelectedChannelCanTxTimeoutMs;
             if (SelectedChannelCanTxTimeoutMs != timeout)
             {
                 _suppressSelectedChannelCanTxEditTracking = true;
@@ -2488,23 +2434,58 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             changed = true;
         }
 
-        if (forceEnable && !message.IsEnabled)
-        {
-            message.IsEnabled = true;
-            changed = true;
-        }
-
         return changed;
     }
 
     public void NotifySelectedChannelCanTxChanged()
     {
         RefreshSelectedChannelCanTxMessages();
+        RefreshSelectedChannelCanTxEditFields();
         RefreshIoFlowConnections();
         OnPropertyChanged(nameof(SelectedChannelCanTxEnabled));
         OnPropertyChanged(nameof(SelectedChannelCanTxSummary));
         OnPropertyChanged(nameof(HasAvailableChannelCanTxMessage));
         OnPropertyChanged(nameof(SelectedChannelCanTxControlsEnabled));
+    }
+
+    [RelayCommand]
+    private void AddSelectedChannelCanTxMessage()
+    {
+        CustomCanMessage? message = ChannelCanTxMessageToAdd;
+        int channelIndex = SelectedChannelZeroBasedIndex;
+        if (message == null || channelIndex < 0)
+        {
+            CustomCanStatusMessage = "Select a stored CAN message and output channel before adding an assignment.";
+            AddLog(CustomCanStatusMessage);
+            return;
+        }
+
+        if (!message.IsTx || message.Id == 0)
+        {
+            CustomCanStatusMessage = "Select a configured TX message from CAN Messages before adding an assignment.";
+            AddLog(CustomCanStatusMessage);
+            return;
+        }
+
+        message.TxTrigger = (byte)channelIndex;
+        message.IsEnabled = true;
+        RecalculatePendingConfigChanges();
+        NotifySelectedChannelCanTxChanged();
+        SelectedChannelCanTxMessage = message;
+    }
+
+    [RelayCommand]
+    private async Task RemoveSelectedChannelCanTxMessage()
+    {
+        CustomCanMessage? message = SelectedChannelCanTxMessage;
+        if (message == null || !SelectedChannelCanTxControlsEnabled)
+        {
+            CustomCanStatusMessage = "Select a CAN TX assignment to remove.";
+            AddLog(CustomCanStatusMessage);
+            return;
+        }
+
+        await SetCustomCanMessageTxStateAsync(message.Index, Constants.CUSTOM_CAN_TX_TRIGGER_ALWAYS, false);
     }
 
     [RelayCommand]
@@ -2516,54 +2497,22 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             return;
         }
 
+        List<CustomCanMessage> configured = ConfiguredTxMessagesForChannel(channelIndex);
+        if (configured.Count == 0)
+        {
+            CustomCanStatusMessage = "Use Add message to assign a CAN TX message to this channel first.";
+            AddLog(CustomCanStatusMessage);
+            return;
+        }
+
         bool enable = !SelectedChannelCanTxEnabled;
         bool changed = false;
-
-        if (enable)
+        foreach (CustomCanMessage message in configured)
         {
-            SelectedChannelCanTxMessage ??= SelectedChannelCanTxMessages.FirstOrDefault();
-
-            if (SelectedChannelCanTxMessage == null)
+            if (message.IsEnabled != enable)
             {
-                SelectedChannelCanTxMessage = SettingsDataView.CustomCanMessagesStaticData.FirstOrDefault(message =>
-                    message.Id != 0 ||
-                    message.IsTx ||
-                    message.IsEnabled ||
-                    SettingsDataView.CustomCanSignalsStaticData.Any(signal => signal.IsEnabled && signal.MessageIndex == message.Index));
-            }
-
-            SelectedChannelCanTxMessage ??= SettingsDataView.CustomCanMessagesStaticData.FirstOrDefault();
-
-            if (SelectedChannelCanTxMessage == null)
-            {
-                CustomCanStatusMessage = "No TX message is currently configured in CAN Messages.";
-                AddLog(CustomCanStatusMessage);
-                NotifySelectedChannelCanTxChanged();
-                return;
-            }
-
-            changed = ApplySelectedChannelCanTxStateToMessage(forceEnable: true) || changed;
-
-            List<CustomCanMessage> configured = ConfiguredTxMessagesForChannel(channelIndex);
-            foreach (CustomCanMessage message in configured)
-            {
-                if (!message.IsEnabled)
-                {
-                    message.IsEnabled = true;
-                    changed = true;
-                }
-            }
-        }
-        else
-        {
-            List<CustomCanMessage> configured = ConfiguredTxMessagesForChannel(channelIndex);
-            foreach (CustomCanMessage message in configured)
-            {
-                if (message.IsEnabled)
-                {
-                    message.IsEnabled = false;
-                    changed = true;
-                }
+                message.IsEnabled = enable;
+                changed = true;
             }
         }
 
@@ -2748,9 +2697,9 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             signal.IsMarkedForDeletion = false;
         }
 
-        foreach (CustomCanMessage message in SettingsDataView.CustomCanMessagesStaticData.Where(message => message.IsEnabled))
+        foreach (CustomCanMessage message in SettingsDataView.CustomCanMessagesStaticData)
         {
-            message.Flags = (byte)(message.Flags & ~0x01);
+            RemoveStoredCanMessageAssignment(message);
         }
 
         RefreshCustomCanBindings();
@@ -3059,9 +3008,9 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
         _portService.EndCustomCanConfigSession(previousSuspendLiveRequestPolling);
     }
 
-    private async Task<bool> SaveSignalToControllerWithRetryAsync(DbcCanSignalDefinition signalDefinition, byte dlc, ushort timeoutMs, CustomCanTxOptions txOptions, bool batched = false, int? targetMessageSlotIndex = null)
+    private async Task<bool> SaveSignalToControllerWithRetryAsync(DbcCanSignalDefinition signalDefinition, byte dlc, ushort timeoutMs, CustomCanTxOptions txOptions, bool batched = false, int? targetMessageSlotIndex = null, bool isDbcImport = false)
     {
-        bool saved = await SaveSignalToControllerAsync(signalDefinition, dlc, timeoutMs, txOptions, batched, targetMessageSlotIndex);
+        bool saved = await SaveSignalToControllerAsync(signalDefinition, dlc, timeoutMs, txOptions, batched, targetMessageSlotIndex, isDbcImport);
         if (saved || _portService == null || !IsConnected || !CommsEstablished)
         {
             return saved;
@@ -3081,7 +3030,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             ApplyPendingCustomCanSnapshotIfAvailable();
         }
 
-        return await SaveSignalToControllerAsync(signalDefinition, dlc, timeoutMs, txOptions, batched, targetMessageSlotIndex);
+        return await SaveSignalToControllerAsync(signalDefinition, dlc, timeoutMs, txOptions, batched, targetMessageSlotIndex, isDbcImport);
     }
 
     /// <param name="batched">
@@ -3092,7 +3041,10 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
     /// Existing message slot to add the signal to (manual entry). Used when it still holds the same CAN ID;
     /// otherwise a matching or free slot is found as usual.
     /// </param>
-    private async Task<bool> SaveSignalToControllerAsync(DbcCanSignalDefinition signalDefinition, byte dlc, ushort timeoutMs, CustomCanTxOptions txOptions, bool batched = false, int? targetMessageSlotIndex = null)
+    /// <param name="isDbcImport">
+    /// Match the stored frame by name and CAN identity, preserve its configuration, and reject occupied bits.
+    /// </param>
+    private async Task<bool> SaveSignalToControllerAsync(DbcCanSignalDefinition signalDefinition, byte dlc, ushort timeoutMs, CustomCanTxOptions txOptions, bool batched = false, int? targetMessageSlotIndex = null, bool isDbcImport = false)
     {
         if (txOptions is { IsTx: true, IsPeriodic: true } && timeoutMs < 1)
         {
@@ -3142,11 +3094,28 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             return false;
         }
 
-        int messageSlotIndex = IsUsableTargetMessageSlot(targetMessageSlotIndex, signalDefinition.MessageId, isExtended)
-            ? targetMessageSlotIndex!.Value
-            : txOptions.IsTx
-            ? FindOrAllocateTxMessageSlot(signalDefinition.MessageId, isExtended, effectiveDlc, txOptions)
-            : FindOrAllocateMessageSlot(signalDefinition.MessageId, isExtended, effectiveDlc);
+        bool preserveMessageConfiguration = false;
+        int messageSlotIndex;
+        if (isDbcImport)
+        {
+            if (!TryFindDbcMessageSlot(signalDefinition, isExtended, out messageSlotIndex, out preserveMessageConfiguration))
+            {
+                return false;
+            }
+
+            if (preserveMessageConfiguration)
+            {
+                effectiveDlc = SettingsDataView.CustomCanMessagesStaticData[messageSlotIndex].Dlc;
+            }
+        }
+        else
+        {
+            messageSlotIndex = IsUsableTargetMessageSlot(targetMessageSlotIndex, signalDefinition.MessageId, isExtended)
+                ? targetMessageSlotIndex!.Value
+                : txOptions.IsTx
+                    ? FindOrAllocateTxMessageSlot(signalDefinition.MessageId, isExtended, effectiveDlc, txOptions)
+                    : FindOrAllocateMessageSlot(signalDefinition.MessageId, isExtended, effectiveDlc);
+        }
         if (messageSlotIndex < 0)
         {
             CustomCanStatusMessage = "No free Custom CAN message slots are available.";
@@ -3164,7 +3133,15 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             signalFlags |= 0x04;
         }
 
-        int signalSlotIndex = FindMatchingSignalSlot(signalDefinition, messageSlotIndex, signalFlags);
+        int matchingSignalSlotIndex = FindMatchingSignalSlot(signalDefinition, messageSlotIndex, signalFlags);
+        if (isDbcImport && GetDbcSignalPlacementError(signalDefinition, messageSlotIndex, matchingSignalSlotIndex, effectiveDlc) is string placementError)
+        {
+            CustomCanStatusMessage = placementError;
+            AddLog(CustomCanStatusMessage);
+            return false;
+        }
+
+        int signalSlotIndex = matchingSignalSlotIndex;
         if (signalSlotIndex < 0)
         {
             signalSlotIndex = FindOrAllocateSignalSlot();
@@ -3223,11 +3200,14 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             return false;
         }
 
-        message.Id = signalDefinition.MessageId;
-        message.TimeoutMs = timeoutMs;
-        message.Dlc = effectiveDlc;
-        message.Flags = messageFlags;
-        message.TxTrigger = txOptions.TxTrigger;
+        if (!preserveMessageConfiguration)
+        {
+            message.Id = signalDefinition.MessageId;
+            message.TimeoutMs = timeoutMs;
+            message.Dlc = effectiveDlc;
+            message.Flags = messageFlags;
+            message.TxTrigger = txOptions.TxTrigger;
+        }
 
         _customCanMetadataUpsertSuppression++;
         try
@@ -3239,7 +3219,9 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             signal.StartBit = signalDefinition.StartBit;
             signal.BitLength = signalDefinition.BitLength;
             signal.Flags = signalFlags;
-            signal.ValueSource = txOptions.IsTx ? txOptions.ValueSource : Constants.CUSTOM_CAN_VALUE_SOURCE_CONSTANT;
+            signal.ValueSource = preserveMessageConfiguration && matchingSignalSlotIndex >= 0
+                ? originalSignal.ValueSource
+                : txOptions.IsTx ? txOptions.ValueSource : Constants.CUSTOM_CAN_VALUE_SOURCE_CONSTANT;
             signal.Factor = signalDefinition.Factor;
             signal.Offset = signalDefinition.Offset;
             signal.MinValue = signalDefinition.MinValue;
@@ -3785,6 +3767,90 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
         return !commit || await _portService.SaveStandaloneChangesAsync();
     }
 
+    private bool TryFindDbcMessageSlot(DbcCanSignalDefinition definition, bool isExtended, out int slotIndex, out bool reuse)
+    {
+        slotIndex = -1;
+        reuse = false;
+        HashSet<int> occupiedSlots = SettingsDataView.CustomCanSignalsStaticData
+            .Where(signal => signal.IsEnabled)
+            .Select(signal => (int)signal.MessageIndex)
+            .ToHashSet();
+        List<int> sameIdSlots = Enumerable.Range(0, SettingsDataView.CustomCanMessagesStaticData.Count)
+            .Where(index =>
+            {
+                CustomCanMessage message = SettingsDataView.CustomCanMessagesStaticData[index];
+                return (message.IsEnabled || occupiedSlots.Contains(index)) &&
+                    message.Id == definition.MessageId && message.IsExtended == isExtended;
+            })
+            .ToList();
+
+        List<int> matchingSlots = sameIdSlots
+            .Where(index => string.Equals(SettingsDataView.CustomCanMessagesStaticData[index].Name.Trim(),
+                definition.MessageName.Trim(), StringComparison.Ordinal))
+            .ToList();
+        if (matchingSlots.Count == 0)
+        {
+            matchingSlots = sameIdSlots
+                .Where(index => IsPlaceholderMessageName(SettingsDataView.CustomCanMessagesStaticData[index].Name))
+                .ToList();
+        }
+
+        if (matchingSlots.Count == 1)
+        {
+            slotIndex = matchingSlots[0];
+            reuse = true;
+            return true;
+        }
+
+        if (sameIdSlots.Count > 0)
+        {
+            CustomCanStatusMessage = matchingSlots.Count > 1
+                ? $"Cannot import {definition.DisplayLabel}: multiple stored messages match 0x{definition.MessageId:X} and the message name."
+                : $"Cannot import {definition.DisplayLabel}: 0x{definition.MessageId:X} is stored with a different message name.";
+            AddLog(CustomCanStatusMessage);
+            return false;
+        }
+
+        slotIndex = Enumerable.Range(0, SettingsDataView.CustomCanMessagesStaticData.Count)
+            .FirstOrDefault(index => !SettingsDataView.CustomCanMessagesStaticData[index].IsEnabled &&
+                !occupiedSlots.Contains(index), -1);
+        if (slotIndex >= 0)
+        {
+            return true;
+        }
+
+        CustomCanStatusMessage = "No free Custom CAN message slots are available.";
+        AddLog(CustomCanStatusMessage);
+        return false;
+    }
+
+    private string? GetDbcSignalPlacementError(DbcCanSignalDefinition definition, int messageSlotIndex, int matchingSignalSlotIndex, byte dlc)
+    {
+        IReadOnlyList<int> bits = CustomCanBitLayout.GetOccupiedBits(definition.StartBit, definition.BitLength, definition.IsMotorola);
+        if (dlc is < 1 or > 8 || definition.BitLength is < 1 or > 64 ||
+            bits.Count != definition.BitLength || bits.Any(bit => bit >= dlc * 8))
+        {
+            return $"Cannot import {definition.DisplayLabel}: its bit layout does not fit message 0x{definition.MessageId:X} (DLC {dlc}).";
+        }
+
+        HashSet<int> occupiedBits = bits.ToHashSet();
+        for (int index = 0; index < SettingsDataView.CustomCanSignalsStaticData.Count; index++)
+        {
+            CustomCanSignal signal = SettingsDataView.CustomCanSignalsStaticData[index];
+            if (index == matchingSignalSlotIndex || !signal.IsEnabled || signal.MessageIndex != messageSlotIndex)
+            {
+                continue;
+            }
+
+            if (CustomCanBitLayout.GetOccupiedBits(signal.StartBit, signal.BitLength, signal.IsMotorola).Any(occupiedBits.Contains))
+            {
+                return $"Cannot import {definition.DisplayLabel}: it overlaps stored signal {signal.Name} in message 0x{definition.MessageId:X}.";
+            }
+        }
+
+        return null;
+    }
+
     private int FindOrAllocateMessageSlot(uint messageId, bool isExtended, byte dlc)
     {
         for (int i = 0; i < SettingsDataView.CustomCanMessagesStaticData.Count; i++)
@@ -3924,7 +3990,9 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
 
     private void UpdateCustomCanStatusPollingSelection()
     {
-        bool shouldPoll = _isCanMessagesTabVisible && _portService != null && IsConnected && CommsEstablished;
+        bool canPoll = _portService != null && IsConnected && CommsEstablished;
+        _portService?.SetIoFlowStatusPollingEnabled(_isIoFlowTabVisible && canPoll);
+        bool shouldPoll = _isCanMessagesTabVisible && canPoll;
         _portService?.SetCustomCanStatusPollingEnabled(shouldPoll);
 
         if (shouldPoll)
@@ -3971,9 +4039,9 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
 
             CustomCanMessage message = SettingsDataView.CustomCanMessagesStaticData[messageIndex];
             bool anyEnabled = SettingsDataView.CustomCanSignalsStaticData.Any(signal => signal.IsEnabled && signal.MessageIndex == messageIndex);
-            if (!anyEnabled && message.IsEnabled)
+            if (!anyEnabled)
             {
-                message.Flags = (byte)(message.Flags & ~0x01);
+                RemoveStoredCanMessageAssignment(message);
                 changedMessages.Add(message);
             }
         }

@@ -1,6 +1,5 @@
 using Cortex.ViewModels.IoFlow;
 using System;
-using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 
@@ -13,22 +12,36 @@ public sealed class IoFlowGraphStore
         WriteIndented = true,
     };
 
-    private static readonly string SnapshotPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "Cortex",
-        "ioflow-graph.json");
+    private readonly string _snapshotPath;
+
+    public IoFlowGraphStore(string? snapshotPath = null)
+    {
+        _snapshotPath = snapshotPath ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "Cortex",
+            "ioflow-graph.json");
+    }
 
     public void Save(IoFlowGraphSnapshot snapshot)
     {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(SnapshotPath)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(_snapshotPath)!);
             string json = JsonSerializer.Serialize(snapshot, JsonOptions);
-            File.WriteAllText(SnapshotPath, json);
+            string temporaryPath = _snapshotPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(temporaryPath, json);
+                File.Move(temporaryPath, _snapshotPath, overwrite: true);
+            }
+            finally
+            {
+                if (File.Exists(temporaryPath)) File.Delete(temporaryPath);
+            }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
-            Trace.WriteLine($"Failed to save I/O Flow snapshot '{SnapshotPath}': {ex.Message}");
+            LoggingService.AddLog("Could not save the local I/O Flow draft. Unsaved changes may not survive restart.", ex.Message);
         }
     }
 
@@ -38,15 +51,20 @@ public sealed class IoFlowGraphStore
 
         try
         {
-            if (!File.Exists(SnapshotPath))
+            if (!File.Exists(_snapshotPath))
             {
                 return false;
             }
 
-            string json = File.ReadAllText(SnapshotPath);
+            string json = File.ReadAllText(_snapshotPath);
             IoFlowGraphSnapshot? loaded = JsonSerializer.Deserialize<IoFlowGraphSnapshot>(json);
             if (loaded == null)
             {
+                return false;
+            }
+            if (!IoFlowGraphViewModel.IsCanvasLayoutValid(loaded))
+            {
+                LoggingService.AddLog("Could not load the local I/O Flow draft: invalid canvas layout.");
                 return false;
             }
 
@@ -55,7 +73,7 @@ public sealed class IoFlowGraphStore
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
-            Trace.WriteLine($"Failed to load I/O Flow snapshot '{SnapshotPath}': {ex.Message}");
+            LoggingService.AddLog("Could not load the local I/O Flow draft.", ex.Message);
             return false;
         }
     }

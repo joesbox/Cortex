@@ -13,6 +13,76 @@ namespace Cortex.Tests;
 public class SerialPortProtocolTests
 {
     [Fact]
+    public void CustomCanDefinitionsLoadAfterStaticSnapshotWithoutOpeningCanTab()
+    {
+        using var service = new SerialPortService("COM1");
+        service.SetCustomCanStatusPollingEnabled(false);
+        Assert.False((bool)InvokeInstanceMethod(service, "ShouldRequestCustomCanStatus", 10000L, 1500)!);
+
+        SetProperty(service, "HasLoadedStaticSnapshot", true);
+        service.UpdateStaticData = false;
+        Assert.True((bool)InvokeInstanceMethod(service, "ShouldRequestCustomCanStatus", 10000L, 1500)!);
+
+        SetField(service, "_lastCustomCanStatusRequestSentTick", 10000L);
+        Assert.False((bool)InvokeInstanceMethod(service, "ShouldRequestCustomCanStatus", 10200L, 1500)!);
+        Assert.True((bool)InvokeInstanceMethod(service, "ShouldRequestCustomCanStatus", 10500L, 1500)!);
+
+        SetField(service, "_lastCustomCanStatusFrameTick", 10500L);
+        SetProperty(service, "HasLoadedCustomCanSnapshot", true);
+        Assert.False((bool)InvokeInstanceMethod(service, "ShouldRequestCustomCanStatus", 20000L, 1500)!);
+        SetProperty(service, "HasLoadedCustomCanSnapshot", false);
+        Assert.True((bool)InvokeInstanceMethod(service, "ShouldRequestCustomCanStatus", 20000L, 1500)!);
+        SetProperty(service, "HasLoadedCustomCanSnapshot", true);
+        service.SetCustomCanStatusPollingEnabled(true);
+        Assert.True((bool)InvokeInstanceMethod(service, "ShouldRequestCustomCanStatus", 20000L, 1500)!);
+
+        InvokeInstanceMethod(service, "MarkControllerSessionLost", true);
+        Assert.False((bool)InvokeInstanceMethod(service, "ShouldRequestCustomCanStatus", 20000L, 1500)!);
+        service.SetCustomCanStatusPollingEnabled(false);
+        SetProperty(service, "HasLoadedStaticSnapshot", true);
+        service.UpdateStaticData = false;
+        Assert.True((bool)InvokeInstanceMethod(service, "ShouldRequestCustomCanStatus", 20000L, 1500)!);
+    }
+
+    [Fact]
+    public void IoFlowPollingRefreshesLogicAndCanStatusFastWithoutCanTab()
+    {
+        using var service = new SerialPortService("COM1");
+        SetProperty(service, "HasLoadedStaticSnapshot", true);
+        SetProperty(service, "HasLoadedCustomCanSnapshot", true);
+        service.UpdateStaticData = false;
+        service.SetCustomCanStatusPollingEnabled(false);
+        SetField(service, "_customCanStatusSupportState", Enum.Parse(
+            typeof(SerialPortService).GetNestedType("CustomCanStatusSupportState", BindingFlags.NonPublic)!, "Supported"));
+        DataStructures data = GetField<DataStructures>(service, "dataStructures");
+        data.ChannelsLiveData[0].ChanType = OutputChannel.ChannelType.MATH;
+        service.SetMathStatusPollingChannel(0);
+        SetField(service, "_lastMathStatusRequestSentTick", 10000L);
+        SetField(service, "_lastCustomCanStatusRequestSentTick", 10000L);
+
+        Assert.False((bool)InvokeInstanceMethod(service, "ShouldRequestCustomCanStatus", 10250L, 1500)!);
+        Assert.False((bool)InvokeInstanceMethod(service, "ShouldRequestMathStatus", 10250L, 1500)!);
+
+        service.SetIoFlowStatusPollingEnabled(true);
+        Assert.False((bool)InvokeInstanceMethod(service, "ShouldRequestCustomCanStatus", 10150L, 1500)!);
+        Assert.True((bool)InvokeInstanceMethod(service, "ShouldRequestCustomCanStatus", 10250L, 1500)!);
+        Assert.True((bool)InvokeInstanceMethod(service, "ShouldRequestMathStatus", 10250L, 1500)!);
+
+        service.SetIoFlowStatusPollingEnabled(false);
+        Assert.False((bool)InvokeInstanceMethod(service, "ShouldRequestMathStatus", 10250L, 1500)!);
+    }
+
+    [Fact]
+    public void CustomCanBootstrapStopsForUnsupportedFirmware()
+    {
+        using var service = new SerialPortService("COM1");
+        SetProperty(service, "HasLoadedStaticSnapshot", true);
+        service.UpdateStaticData = false;
+        InvokeInstanceMethod(service, "MarkCustomCanStatusUnsupported");
+        Assert.False((bool)InvokeInstanceMethod(service, "ShouldRequestCustomCanStatus", 10000L, 1500)!);
+    }
+
+    [Fact]
     public void CustomCanRecords_MatchFirmwarePackedStructLayout()
     {
         byte[] message = SerialPortService.BuildCustomCanMessageRecord(0x18FF1234, 1000, 8, 0x0B, 3);
@@ -627,6 +697,131 @@ public class SerialPortProtocolTests
         {
             StopProcessTimer(service);
         }
+    }
+
+    [Fact]
+    public void StandaloneReadbackPreservesLoadedControllerSnapshots()
+    {
+        using var service = new SerialPortService("COM1");
+        SetProperty(service, "HasLoadedStaticSnapshot", true);
+        SetProperty(service, "HasLoadedMathSnapshot", true);
+        SetProperty(service, "HasLoadedCustomCanSnapshot", true);
+        service.UpdateStaticData = false;
+
+        InvokeInstanceMethod(service, "ResetStandaloneReceiveState", true);
+        InvokeInstanceMethod(service, "ResetStandaloneReceiveState", false);
+
+        Assert.True(service.HasLoadedStaticSnapshot);
+        Assert.True(service.HasLoadedMathSnapshot);
+        Assert.True(service.HasLoadedCustomCanSnapshot);
+        Assert.False(service.UpdateStaticData);
+        InvokeInstanceMethod(service, "MarkControllerSessionLost", true);
+        Assert.False(service.HasLoadedCustomCanSnapshot);
+    }
+
+    [Fact]
+    public void StandaloneReadbackPreservesPendingFreshMathRefresh()
+    {
+        using var service = new SerialPortService("COM1");
+        SetField(service, "_awaitingStaticMathSnapshot", true);
+        service.UpdateStaticData = true;
+
+        InvokeInstanceMethod(service, "ResetStandaloneReceiveState", true);
+        InvokeInstanceMethod(service, "ResetStandaloneReceiveState", false);
+
+        Assert.True(GetField<bool>(service, "_awaitingStaticMathSnapshot"));
+        Assert.True(service.UpdateStaticData);
+        Assert.False(service.HasLoadedMathSnapshot);
+    }
+
+    [Fact]
+    public void StaticMathRefreshWaitsForAFreshMathPacketInsteadOfReloadingDeletedRules()
+    {
+        using var service = new SerialPortService("COM1");
+        DataStructures data = GetField<DataStructures>(service, "dataStructures");
+        data.ChannelsLiveData[0].MathRuleCount = 3;
+        data.ChannelsLiveData[0].MathRules[1].OperandAConstant = 22;
+        byte[] staticPacket = new byte[ControllerProtocolCapabilities.V010StaticPacketMinimumLength];
+        staticPacket[3] = Constants.NUM_OUTPUT_CHANNELS;
+        staticPacket[4] = (byte)OutputChannel.ChannelType.MATH;
+        SetField(service, "dataBytes", staticPacket);
+        SetField(service, "dataLength", staticPacket.Length);
+
+        Assert.True((bool)InvokeInstanceMethod(service, "ParseStaticStatusPacket")!);
+        Assert.True(service.UpdateStaticData);
+        Assert.False(service.HasLoadedStaticSnapshot);
+        Assert.False(service.HasLoadedMathSnapshot);
+
+        using var stream = new System.IO.MemoryStream();
+        using var writer = new System.IO.BinaryWriter(stream);
+        writer.Write(new byte[] { Constants.SERIAL_HEADER1, Constants.SERIAL_HEADER2, (byte)Constants.COMMAND_ID_MATH_STATUS, Constants.NUM_OUTPUT_CHANNELS });
+        for (int channelIndex = 0; channelIndex < Constants.NUM_OUTPUT_CHANNELS; channelIndex++)
+        {
+            writer.Write((byte)(channelIndex == 0 ? OutputChannel.ChannelType.MATH : OutputChannel.ChannelType.Digital));
+            writer.Write((byte)1);
+            writer.Write((byte)0);
+            writer.Write((byte)0);
+            writer.Write(0f);
+            writer.Write((byte)0);
+            writer.Write((byte)1);
+            for (int ruleIndex = 0; ruleIndex < Constants.NUM_MATH_RULE_SLOTS; ruleIndex++)
+            {
+                writer.Write((byte)OutputChannel.MathOperation.ADD);
+                writer.Write((byte)0);
+                writer.Write(0f);
+                writer.Write(0f);
+                writer.Write((byte)OutputChannel.MathOperandType.Constant);
+                writer.Write((byte)0);
+                writer.Write(channelIndex == 0 && ruleIndex == 0 ? 19f : 0f);
+                writer.Write((byte)OutputChannel.MathOperandType.Constant);
+                writer.Write((byte)0);
+                writer.Write(0f);
+                writer.Write(0f);
+                writer.Write((byte)0);
+                writer.Write((byte)0);
+            }
+        }
+        writer.Write(new byte[4]);
+        byte[] mathPacket = stream.ToArray();
+        SetField(service, "dataBytes", mathPacket);
+        SetField(service, "dataLength", mathPacket.Length);
+        Assert.True((bool)InvokeInstanceMethod(service, "ParseMathStatusPacket")!);
+
+        Assert.True(service.HasLoadedStaticSnapshot);
+        Assert.True(service.HasLoadedMathSnapshot);
+        Assert.False(service.UpdateStaticData);
+        Assert.Equal((byte)1, data.ChannelsStaticData[0].MathRuleCount);
+        Assert.Equal(19, data.ChannelsStaticData[0].MathRules[0].OperandAConstant);
+        Assert.Equal(0, data.ChannelsStaticData[0].MathRules[1].OperandAConstant);
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task DeletedFlowRuleIsEncodedInTheControllerSavePacket()
+    {
+        using var service = new SerialPortService("COM1");
+        var settings = new DataStructures();
+        var channel = settings.ChannelsStaticData[0];
+        channel.ChanType = OutputChannel.ChannelType.MATH;
+        channel.MathRuleCount = 2;
+        var graph = new Cortex.ViewModels.IoFlow.IoFlowGraphViewModel();
+        graph.Build(settings, new DataStructures());
+        graph.PopulateFromCurrentSettings();
+        var rule = graph.MathRuleNodes.Single(node => node.OwnerChannelNumber == channel.ChannelNumber && node.RuleIndex == 1);
+        graph.SelectedNodes.Add(rule);
+        await graph.RemoveSelectedNodesCommand.ExecuteAsync(null);
+        service.UpdateSettingsData(settings);
+        DataStructures data = GetField<DataStructures>(service, "dataStructures");
+        data.ChannelsLiveData[0].MathRuleCount = 2;
+        SetField(service, "_controllerCapabilities", ControllerProtocolCapabilities.V010);
+        SetField(service, "sendingConfig", true);
+        SetField(service, "settingIndex", 0);
+        SetField(service, "parameterIndex", 33);
+        SetField(service, "channelIndex", 0);
+
+        InvokeInstanceMethod(service, "SendConfig");
+
+        Assert.Equal(new byte[] { Constants.SERIAL_HEADER1, Constants.SERIAL_HEADER2, 0, 33, 0, 1 },
+            GetSendBuffer(service).Take(6).ToArray());
     }
 
     [Fact]

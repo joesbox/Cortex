@@ -338,6 +338,7 @@ namespace Cortex.ViewModels
                 SerialPortService portService = _portService;
                 _portService.SetMathStatusPollingChannel(-1);
                 _portService.SetCustomCanStatusPollingEnabled(false);
+                _portService.SetIoFlowStatusPollingEnabled(false);
                 _portService.DataUpdated -= _portService_DataUpdated;
                 _portService.ConfigurationSaved -= ConfigSaved;
                 _portService.ConfigurationSaveCompleted -= ConfigSaveCompleted;

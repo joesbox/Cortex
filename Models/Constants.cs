@@ -195,6 +195,10 @@
 
         public const byte CUSTOM_CAN_TX_TRIGGER_ALWAYS = 255;
 
+        public const int CUSTOM_CAN_TX_PERIOD_MIN_MS = 100;
+        public const int CUSTOM_CAN_TX_PERIOD_MAX_MS = 30000;
+        public const int CUSTOM_CAN_TX_PERIOD_STEP_MS = 100;
+
         public const byte CUSTOM_CAN_VALUE_SOURCE_CONSTANT = 255;
 
         public const byte CUSTOM_CAN_STATUS_VERSION_LEGACY = 1;

@@ -11,3 +11,5 @@ build-warnings.log
 /artifacts/publish
 InnoSetup Script/Output/CortexSetupWindows.zip
 /AGENTS.md
+/tests/Cortex.Ui.Tests/bin
+/tests/Cortex.Ui.Tests/obj

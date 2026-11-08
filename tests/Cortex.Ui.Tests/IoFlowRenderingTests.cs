@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Headless.XUnit;
 using Avalonia.Markup.Xaml.Styling;
+using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using Cortex.Models;
@@ -20,11 +21,16 @@ public sealed class IoFlowTestApplication : Application
 {
 public static AppBuilder BuildAvaloniaApp() =>
     AppBuilder.Configure<IoFlowTestApplication>()
-        .UseHeadless(new AvaloniaHeadlessPlatformOptions());
+        .UseSkia()
+        .UseHeadless(new AvaloniaHeadlessPlatformOptions { UseHeadlessDrawing = false });
 
         public override void Initialize()
         {
         Styles.Add(new Avalonia.Themes.Fluent.FluentTheme());
+        Styles.Add(new StyleInclude(new Uri("avares://Cortex/"))
+        {
+            Source = new Uri("avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml")
+        });
         Styles.Add(new StyleInclude(new Uri("avares://Cortex/"))
         {
         Source = new Uri("avares://Nodify.Avalonia/Themes/Controls.xaml")
@@ -40,17 +46,37 @@ public static AppBuilder BuildAvaloniaApp() =>
         var view = new IoFlowTabView();
         var editor = view.FindControl<NodifyEditor>("IoFlowEditor")!;
             var source = new DigitalInputNodeViewModel(new DigitalInput(1, true), default);
-            var target = new OutputNodeViewModel(new OutputChannel { ChannelNumber = 1 }, default);
+            var target = new OutputNodeViewModel(new OutputChannel { ChannelNumber = 1 }, default, [], []);
             var connection = new IoFlowConnectionViewModel(source.OutputConnector, target.InputConnector, "Test");
             source.OutputConnector.Anchor = new Point(100, 80);
             target.InputConnector.Anchor = new Point(500, 180);
 
             // Exercise the compiled application template, not a test-only replacement.
             Assert.NotNull(editor.ConnectionTemplate);
-            var wire = Assert.IsType<Connection>(editor.ConnectionTemplate.Build(connection));
-                wire.DataContext = connection;
+            var template = Assert.IsType<Grid>(editor.ConnectionTemplate.Build(connection));
+                template.DataContext = connection;
+                var wires = template.GetVisualDescendants().OfType<Connection>().ToArray();
+                var wire = Assert.Single(wires, item => item.StrokeThickness == 4);
+                var hitTarget = Assert.Single(wires, item => item.StrokeThickness == 16);
+                var glow = Assert.Single(wires, item => item.StrokeThickness == 9);
+                Assert.False(glow.IsVisible);
                 Assert.Equal(source.OutputConnector.Anchor, wire.Source);
                 Assert.Equal(target.InputConnector.Anchor, wire.Target);
+                Assert.False(wire.IsHitTestVisible);
+                Assert.True(hitTarget.IsHitTestVisible);
+                Assert.Equal("#FF8254B8", connection.Stroke);
+                connection.IsHovered = true;
+                Assert.Equal("#FFB794EB", connection.Stroke);
+                Assert.Equal(5, wire.StrokeThickness);
+                connection.IsSelected = true;
+                Assert.Equal("#FFE0C8FF", connection.Stroke);
+                Assert.Equal(7, wire.StrokeThickness);
+                Assert.True(glow.IsVisible);
+                Assert.False(glow.IsHitTestVisible);
+                Assert.Equal(Color.Parse("#99C8A7FF"), Assert.IsAssignableFrom<ISolidColorBrush>(glow.Stroke).Color);
+                Assert.Equal(Color.Parse("#FFC8A7FF"), Assert.IsType<DropShadowEffect>(glow.Effect).Color);
+                connection.IsSelected = false;
+                Assert.False(glow.IsVisible);
 
                 source.OutputConnector.Anchor = new Point(130, 90);
                 target.InputConnector.Anchor = new Point(620, 230);
@@ -63,7 +89,7 @@ public static AppBuilder BuildAvaloniaApp() =>
                 {
                 var graph = new IoFlowGraphViewModel();
                 var source = new DigitalInputNodeViewModel(new DigitalInput(1, true), new Point(50, 50));
-                var target = new OutputNodeViewModel(new OutputChannel { ChannelNumber = 1 }, new Point(550, 100));
+                var target = new OutputNodeViewModel(new OutputChannel { ChannelNumber = 1 }, new Point(550, 100), [], []);
                 graph.Nodes.Add(source);
                 graph.Nodes.Add(target);
                 source.OutputConnector.IsConnected = true;
@@ -80,7 +106,7 @@ public static AppBuilder BuildAvaloniaApp() =>
                     window.UpdateLayout();
                     Dispatcher.UIThread.RunJobs();
                     var wire = Assert.Single(view.GetVisualDescendants().OfType<Connection>()
-.Where(item => ReferenceEquals(item.DataContext, connection)));
+.Where(item => ReferenceEquals(item.DataContext, connection) && item.StrokeThickness < 8));
 
                             Assert.NotEqual(default, source.OutputConnector.Anchor);
                             Assert.NotEqual(source.OutputConnector.Anchor, target.InputConnector.Anchor);
@@ -129,7 +155,7 @@ item => ReferenceEquals(item.DataContext, connection));
                                                         window.UpdateLayout();
                                                         Dispatcher.UIThread.RunJobs();
                                                         var restoredWire = Assert.Single(view.GetVisualDescendants().OfType<Connection>()
-.Where(item => ReferenceEquals(item.DataContext, connection)));
+.Where(item => ReferenceEquals(item.DataContext, connection) && item.StrokeThickness < 8));
                                                                 Assert.Equal(source.OutputConnector.Anchor, restoredWire.Source);
                                                                 Assert.Equal(target.InputConnector.Anchor, restoredWire.Target);
                                                                 }

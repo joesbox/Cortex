@@ -111,6 +111,7 @@ public class SerialPortService : IDisposable
     private const int StaticTimeZoneRulePayloadBytes = Constants.TIME_ZONE_RULE_LENGTH;
     private const int StaticCellularPayloadBytes = Constants.CELLULAR_STATIC_PAYLOAD_BYTES;
     private const int StaticSnapshotRetryIntervalMs = 1500;
+    private const int IoFlowStatusPollIntervalMs = 200;
     private const int DigitalInputStatusProbeTimeoutMs = 2500;
     private const int StandaloneCommandDrainDelayMs = 25;
     private const int OpenRemoteProvisioningMaxRequestBytes = 6143;
@@ -191,6 +192,9 @@ public class SerialPortService : IDisposable
     private long _lastDigitalInputStatusFrameTick;
     private long _lastMathStatusRequestSentTick;
     private long _lastMathStatusFrameTick;
+    private bool _awaitingStaticMathSnapshot;
+    private long _staticMathSnapshotStartedTick;
+    private bool _staticMathSnapshotTimeoutReported;
     private long _lastCustomCanStatusRequestSentTick;
     private long _lastCustomCanStatusFrameTick;
     private long _lastStaticRequestSentTick;
@@ -209,6 +213,7 @@ public class SerialPortService : IDisposable
     private bool _finalAnalogueResendActive;
     private int _mathStatusPollingChannelIndex = -1;
     private bool _customCanStatusPollingEnabled;
+    private bool _ioFlowStatusPollingEnabled;
     private ControllerProtocolCapabilities _controllerCapabilities = ControllerProtocolCapabilities.V09;
     private readonly SecureSessionState _secureSession = new SecureSessionState();
     private readonly Dictionary<string, string> _pinnedDeviceKeys = new(StringComparer.OrdinalIgnoreCase);
@@ -224,6 +229,8 @@ public class SerialPortService : IDisposable
     public bool UpdateStaticData = false;
 
     public bool HasLoadedStaticSnapshot { get; private set; }
+    public bool HasLoadedMathSnapshot { get; private set; }
+    public bool HasLoadedCustomCanSnapshot { get; private set; }
 
     public bool IsSecureProtocolEnabled => _secureSession.ProtocolSupported;
 
@@ -1800,6 +1807,7 @@ public class SerialPortService : IDisposable
 
     private void ResetLogReceiveState(bool discardSerialInput)
     {
+        // Standalone reads also use this reset; loaded snapshots belong to the controller session.
         if (discardSerialInput && _serialPort.IsOpen)
         {
             try
@@ -1841,7 +1849,6 @@ public class SerialPortService : IDisposable
         _lastHandshakeAttemptTick = 0;
         _lastSecureStatusRequestTick = 0;
         _lastSecureStatusResponseTick = 0;
-        HasLoadedStaticSnapshot = false;
 
         lock (_logChunkLock)
         {
@@ -1860,6 +1867,9 @@ public class SerialPortService : IDisposable
         _lastDigitalInputStatusFrameTick = 0;
         _lastMathStatusRequestSentTick = 0;
         _lastMathStatusFrameTick = 0;
+        _awaitingStaticMathSnapshot = false;
+        HasLoadedMathSnapshot = false;
+        HasLoadedCustomCanSnapshot = false;
         _lastCustomCanStatusRequestSentTick = 0;
         _lastCustomCanStatusFrameTick = 0;
         _lastStaticRequestSentTick = 0;
@@ -2862,6 +2872,15 @@ public class SerialPortService : IDisposable
             }
         }
 
+        HasLoadedMathSnapshot = true;
+        if (_awaitingStaticMathSnapshot)
+        {
+            CopyLiveDataToStaticSnapshot();
+            _awaitingStaticMathSnapshot = false;
+            HasLoadedStaticSnapshot = true;
+            UpdateStaticData = false;
+        }
+
         return true;
     }
 
@@ -3217,8 +3236,20 @@ public class SerialPortService : IDisposable
         CopyLiveDataToStaticSnapshot();
         _controllerCapabilities = packetCapabilities;
         _lastStaticRequestSentTick = 0;
-        HasLoadedStaticSnapshot = true;
-        UpdateStaticData = false;
+        _awaitingStaticMathSnapshot = packetCapabilities.LastChannelParameterIndex >= 36;
+        if (_awaitingStaticMathSnapshot)
+        {
+            HasLoadedMathSnapshot = false;
+            _lastMathStatusRequestSentTick = 0;
+            _staticMathSnapshotStartedTick = Environment.TickCount64;
+            _staticMathSnapshotTimeoutReported = false;
+            UpdateStaticData = true;
+        }
+        else
+        {
+            HasLoadedStaticSnapshot = true;
+            UpdateStaticData = false;
+        }
         return true;
     }
 
@@ -3289,6 +3320,7 @@ public class SerialPortService : IDisposable
                         _lastCustomCanStatusFrameTick = Environment.TickCount64;
                         if (ParseCustomCanStatusPacket())
                         {
+                            HasLoadedCustomCanSnapshot = true;
                             _customCanStatusSupportState = CustomCanStatusSupportState.Supported;
                             _customCanSnapshotTcs?.TrySetResult(true);
                         }
@@ -3443,6 +3475,10 @@ public class SerialPortService : IDisposable
         if (!sendingConfig && !_suspendLiveRequestPolling)
         {
             SendCommand(Constants.COMMAND_ID_REQUEST);
+            if (_ioFlowStatusPollingEnabled && HasLoadedStaticSnapshot && !UpdateStaticData && !_logTransferSessionActive)
+            {
+                RequestRuntimeStatusPacketsIfDue(Environment.TickCount64, 1500);
+            }
         }
 
 
@@ -5531,6 +5567,7 @@ public class SerialPortService : IDisposable
 
             if (_serialPort.IsOpen)
             {
+                MarkControllerSessionLost(requestStaticSnapshot: true);
                 ResetLogReceiveState(discardSerialInput: true);
                 retVal = true;
             }
@@ -5565,6 +5602,7 @@ public class SerialPortService : IDisposable
             {
                 if (_serialPort.IsOpen)
                 {
+                    MarkControllerSessionLost(requestStaticSnapshot: true);
                     ResetLogReceiveState(discardSerialInput: true);
                     _serialPort.Close();
                 }
@@ -5822,6 +5860,22 @@ public class SerialPortService : IDisposable
 
         if (UpdateStaticData)
         {
+            if (_awaitingStaticMathSnapshot)
+            {
+                if (!_staticMathSnapshotTimeoutReported && now - _staticMathSnapshotStartedTick >= 10000)
+                {
+                    _staticMathSnapshotTimeoutReported = true;
+                    LoggingService.AddLog("Waiting for fresh controller math settings. The settings refresh is incomplete; stale math rules will not be loaded.");
+                }
+
+                if (_lastMathStatusRequestSentTick == 0 || now - _lastMathStatusRequestSentTick >= StaticSnapshotRetryIntervalMs)
+                {
+                    SendCommand(Constants.COMMAND_ID_MATH_STATUS);
+                }
+
+                return;
+            }
+
             // Initial static snapshot hydrates the full settings UI. Keep retries
             // aligned with the comms timer cadence so a missed first request does
             // not add multi-second startup latency.
@@ -5873,29 +5927,54 @@ public class SerialPortService : IDisposable
             }
         }
 
-        if (_mathStatusPollingChannelIndex >= 0 &&
-            _mathStatusPollingChannelIndex < dataStructures.ChannelsLiveData.Count &&
-            dataStructures.ChannelsLiveData[_mathStatusPollingChannelIndex].ChanType == ChannelType.MATH)
+        RequestRuntimeStatusPacketsIfDue(now, idleThresholdMs);
+    }
+
+    private void RequestRuntimeStatusPacketsIfDue(long now, int idleThresholdMs)
+    {
+        if (ShouldRequestMathStatus(now, idleThresholdMs))
         {
-            int mathIdleThresholdMs = Math.Max(idleThresholdMs * 3, idleThresholdMs);
-            if (_lastMathStatusRequestSentTick == 0 || (now - _lastMathStatusRequestSentTick) >= mathIdleThresholdMs)
-            {
-                SendCommand(Constants.COMMAND_ID_MATH_STATUS);
-            }
+            SendCommand(Constants.COMMAND_ID_MATH_STATUS);
         }
 
-        if (_customCanStatusPollingEnabled && _customCanStatusSupportState != CustomCanStatusSupportState.Unsupported)
+        if (ShouldRequestCustomCanStatus(now, idleThresholdMs))
         {
-            int customCanPollIntervalMs = _customCanStatusSupportState == CustomCanStatusSupportState.Supported
-                ? Math.Max(idleThresholdMs * 3, idleThresholdMs)
-                : Math.Min(idleThresholdMs, 500);
-
-            if (_lastCustomCanStatusRequestSentTick == 0 ||
-                (now - _lastCustomCanStatusRequestSentTick) >= customCanPollIntervalMs)
-            {
-                SendCommand(Constants.COMMAND_ID_CUSTOM_CAN_STATUS);
-            }
+            SendCommand(Constants.COMMAND_ID_CUSTOM_CAN_STATUS);
         }
+    }
+
+    private bool ShouldRequestMathStatus(long now, int idleThresholdMs)
+    {
+        if (_mathStatusPollingChannelIndex < 0 ||
+            _mathStatusPollingChannelIndex >= dataStructures.ChannelsLiveData.Count ||
+            dataStructures.ChannelsLiveData[_mathStatusPollingChannelIndex].ChanType != ChannelType.MATH)
+        {
+            return false;
+        }
+
+        int intervalMs = _ioFlowStatusPollingEnabled
+            ? IoFlowStatusPollIntervalMs
+            : Math.Max(idleThresholdMs * 3, idleThresholdMs);
+        return _lastMathStatusRequestSentTick == 0 || (now - _lastMathStatusRequestSentTick) >= intervalMs;
+    }
+
+    private bool ShouldRequestCustomCanStatus(long now, int idleThresholdMs)
+    {
+        // Load stored definitions after static hydration, even when the CAN tab is closed.
+        if (!HasLoadedStaticSnapshot || UpdateStaticData ||
+            (!_customCanStatusPollingEnabled && !_ioFlowStatusPollingEnabled && HasLoadedCustomCanSnapshot) ||
+            _customCanStatusSupportState == CustomCanStatusSupportState.Unsupported)
+        {
+            return false;
+        }
+
+        int intervalMs = _customCanStatusSupportState != CustomCanStatusSupportState.Supported
+            ? Math.Min(idleThresholdMs, 500)
+            : _ioFlowStatusPollingEnabled
+                ? IoFlowStatusPollIntervalMs
+                : Math.Max(idleThresholdMs * 3, idleThresholdMs);
+        return _lastCustomCanStatusRequestSentTick == 0 ||
+               now - _lastCustomCanStatusRequestSentTick >= intervalMs;
     }
 
     public void RequestStaticSnapshot()
@@ -5906,6 +5985,9 @@ public class SerialPortService : IDisposable
         }
 
         UpdateStaticData = true;
+        _awaitingStaticMathSnapshot = false;
+        HasLoadedMathSnapshot = false;
+        HasLoadedCustomCanSnapshot = false;
         SendCommand(Constants.COMMAND_ID_REQUEST_STATIC);
     }
 
@@ -5982,6 +6064,12 @@ public class SerialPortService : IDisposable
     public void SetCustomCanStatusPollingEnabled(bool enabled)
     {
         _customCanStatusPollingEnabled = enabled;
+    }
+
+    // Keeps logic results and CAN RX values in step with the fast live-status stream while I/O Flow is visible.
+    public void SetIoFlowStatusPollingEnabled(bool enabled)
+    {
+        _ioFlowStatusPollingEnabled = enabled;
     }
 
     public bool BeginCustomCanConfigSession()

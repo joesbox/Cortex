@@ -8,19 +8,68 @@
     xmlns:ncon="clr-namespace:Nodify.Avalonia.Connections;assembly=Nodify.Avalonia"
     xmlns:io="using:Cortex.ViewModels.IoFlow"
     xmlns:vm="using:Cortex.ViewModels"
+    xmlns:views="using:Cortex.Views"
+    xmlns:controls="using:Cortex.Controls"
     x:DataType="vm:MainWindowViewModel"
     x:CompileBindings="False"
-    mc:Ignorable="d">
+    mc:Ignorable="d"
+    KeyDown="OnIoFlowUndoKeyDown">
     <UserControl.Styles>
+        <Style Selector="#IoFlowCanvasTabs TabStripItem">
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="Padding" Value="12,5" />
+            <Setter Property="MinHeight" Value="32" />
+            <Setter Property="Margin" Value="0,0,2,0" />
+            <Setter Property="CornerRadius" Value="6,6,0,0" />
+            <Setter Property="BorderThickness" Value="1,1,1,0" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="#FFA99BC2" />
+        </Style>
+        <!-- Hover previews the merged look; only selection adds the accent bar. -->
+        <Style Selector="#IoFlowCanvasTabs TabStripItem:pointerover /template/ Border#PART_LayoutRoot">
+            <Setter Property="Background" Value="#FF1B1E24" />
+            <Setter Property="BorderBrush" Value="#443553" />
+            <Setter Property="TextElement.Foreground" Value="#FFF0E7FF" />
+        </Style>
+        <Style Selector="#IoFlowCanvasTabs TabStripItem:pressed /template/ Border#PART_LayoutRoot">
+            <Setter Property="Background" Value="#FF1B1E24" />
+            <Setter Property="BorderBrush" Value="#443553" />
+            <Setter Property="TextElement.Foreground" Value="#FFF0E7FF" />
+        </Style>
+        <!-- The selected tab shares the canvas background and covers the divider so it joins the canvas. -->
+        <Style Selector="#IoFlowCanvasTabs TabStripItem:selected">
+            <Setter Property="Background" Value="#FF1B1E24" />
+            <Setter Property="BorderBrush" Value="#443553" />
+            <Setter Property="Foreground" Value="#FFF0E7FF" />
+        </Style>
+        <Style Selector="#IoFlowCanvasTabs TabStripItem:selected:pointerover /template/ Border#PART_LayoutRoot">
+            <Setter Property="Background" Value="#FF1B1E24" />
+        </Style>
+        <Style Selector="#IoFlowCanvasTabs TabStripItem:selected:pressed /template/ Border#PART_LayoutRoot">
+            <Setter Property="Background" Value="#FF1B1E24" />
+        </Style>
+        <Style Selector="#IoFlowCanvasTabs TabStripItem:selected /template/ Border#PART_SelectedPipe">
+            <Setter Property="VerticalAlignment" Value="Top" />
+            <Setter Property="Margin" Value="-6,-4,-6,0" />
+            <Setter Property="Background" Value="#FFC8A7FF" />
+        </Style>
+        <Style Selector="Button#IoFlowAddCanvasTab">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="#FFA99BC2" />
+            <Setter Property="FontSize" Value="16" />
+            <Setter Property="Padding" Value="10,2" />
+            <Setter Property="MinHeight" Value="28" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Margin" Value="4,0,0,1" />
+        </Style>
         <Style Selector="Border.ioFlowNode">
-            <Setter Property="Background" Value="#2B213C" />
             <Setter Property="BorderThickness" Value="2" />
             <Setter Property="CornerRadius" Value="8" />
             <Setter Property="Padding" Value="10" />
             <Setter Property="MinWidth" Value="260" />
             <Setter Property="MaxWidth" Value="340" />
-        </Style>
-        <Style Selector="Border.ioFlowOutputNode">
             <Setter Property="Background">
                 <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
                     <GradientStop Color="#FF2E2143" Offset="0" />
@@ -30,14 +79,94 @@
             </Setter>
             <Setter Property="BoxShadow" Value="0 6 16 0 #33000000" />
         </Style>
+        <Style Selector="Border.mathRuleResult">
+            <Setter Property="Background" Value="#2A1F3E" />
+            <Setter Property="BorderBrush" Value="#5A4A78" />
+        </Style>
+        <!-- Segmented choice: one shared track, the selected segment filled with the selection purple. -->
+        <Style Selector="Border.segmentedTrack">
+            <Setter Property="Padding" Value="3" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="BorderBrush" Value="#FF443553" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Background" Value="#33000000" />
+        </Style>
+        <Style Selector="ListBox.segmentedChoice">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Padding" Value="0" />
+        </Style>
+        <Style Selector="ListBox.segmentedChoice ListBoxItem">
+            <Setter Property="Margin" Value="1,0" />
+            <Setter Property="Padding" Value="12,6" />
+            <Setter Property="MinHeight" Value="0" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="#FFA99BC2" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Template">
+                <ControlTemplate>
+                    <Border Name="PART_Segment" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}" Padding="{TemplateBinding Padding}">
+                        <!-- Not named PART_ContentPresenter so Fluent's selected/hover fills cannot apply. -->
+                        <ContentPresenter Name="SegmentContent" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" Foreground="{TemplateBinding Foreground}" HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
+                    </Border>
+                </ControlTemplate>
+            </Setter>
+            <Setter Property="Transitions">
+                <Transitions>
+                    <BrushTransition Property="Background" Duration="0:0:0.12" />
+                </Transitions>
+            </Setter>
+        </Style>
+        <Style Selector="ListBox.segmentedChoice ListBoxItem:pointerover">
+            <Setter Property="Background" Value="#18FFFFFF" />
+            <Setter Property="Foreground" Value="#FFF0E7FF" />
+        </Style>
+        <Style Selector="ListBox.segmentedChoice ListBoxItem:selected">
+            <Setter Property="Background">
+                <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                    <GradientStop Color="#FF5A4280" Offset="0" />
+                    <GradientStop Color="#FF443061" Offset="1" />
+                </LinearGradientBrush>
+            </Setter>
+            <Setter Property="BorderBrush" Value="#88C8A7FF" />
+            <Setter Property="Foreground" Value="#FFF0E7FF" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
         <Style Selector="TextBlock.ioFlowFieldLabel">
             <Setter Property="FontSize" Value="14" />
             <Setter Property="Foreground" Value="#FFD0C3E8" />
         </Style>
+        <!-- Fixed-width readout beside a slider so changing values never resize the slider. -->
+        <!-- Subtle card grouping a parameter's title with its controls and value. -->
+        <Style Selector="Border.settingGroup">
+            <Setter Property="Background" Value="#0DFFFFFF" />
+            <Setter Property="BorderBrush" Value="#1FC8A7FF" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="10,8" />
+        </Style>
+        <!-- Retry count spans the row unless the duty card is shown alongside it. -->
+        <Style Selector="Border.retryCountGroup">
+            <Setter Property="Grid.Column" Value="0" />
+            <Setter Property="Grid.ColumnSpan" Value="2" />
+        </Style>
+        <Style Selector="Border.retryCountGroup.withDuty">
+            <Setter Property="Grid.Column" Value="1" />
+            <Setter Property="Grid.ColumnSpan" Value="1" />
+        </Style>
+        <Style Selector="Grid.sliderWithValue > controls|SliderValueEditor">
+            <Setter Property="Grid.Column" Value="1" />
+            <Setter Property="MinWidth" Value="44" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
         <Style Selector="#IoFlowSurfaceBorder TextBlock">
             <Setter Property="FontSize" Value="14" />
         </Style>
-        <Style Selector="ncon|Connector.ioFlowConnector">
+        <Style Selector=":is(ncon|Connector).ioFlowConnector">
             <Setter Property="Width" Value="18" />
             <Setter Property="Height" Value="18" />
             <Setter Property="Background" Value="#AA7CD4FF" />
@@ -47,14 +176,26 @@
         </Style>
         <Style Selector="ncon|PendingConnection">
             <Setter Property="Stroke" Value="#CC6DA7FF" />
-            <Setter Property="StrokeThickness" Value="2" />
+            <Setter Property="StrokeThickness" Value="4" />
         </Style>
-        <Style Selector="nodify|ItemContainer:selected">
+        <!-- Keep Nodify's content inset identical in both selection states. -->
+        <Style Selector="nodify|ItemContainer">
             <Setter Property="BorderBrush" Value="#00000000" />
             <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Margin" Value="0" />
         </Style>
-        <Style Selector="nodify|ItemContainer:selected Border.ioFlowNode">
-            <Setter Property="BoxShadow" Value="0 0 0 2 #77B45CFF, 0 0 12 0 #99B45CFF" />
+        <Style Selector="nodify|ItemContainer[IsSelected=True]">
+            <Setter Property="BorderBrush" Value="#00000000" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Margin" Value="0" />
+        </Style>
+        <Style Selector="nodify|ItemContainer[IsSelected=True] Border.ioFlowNode">
+            <Setter Property="BoxShadow">
+                <MultiBinding Converter="{x:Static views:IoFlowTabView.NodeSelectionShadowConverter}">
+                    <Binding Path="$parent[nodify:NodifyEditor].ViewportZoom" />
+                    <Binding Path="BorderHex" />
+                </MultiBinding>
+            </Setter>
         </Style>
     </UserControl.Styles>
 
@@ -69,12 +210,13 @@
             </Border.Background>
             <StackPanel Spacing="8">
                 <TextBlock FontSize="16" FontWeight="SemiBold" Text="I/O Flow" />
-                <TextBlock Foreground="#FFD0C3E8" TextWrapping="Wrap" Text="Right-click the canvas for add/import/remove/arrange actions. Drag between connector dots to wire nodes." />
+                <TextBlock Foreground="#FFD0C3E8" TextWrapping="Wrap" Text="Right-click the canvas for add/import/remove/arrange actions. Drag between connector dots to wire nodes. Ctrl+Z for undo." />
                 <Border IsVisible="{Binding IoFlowGraph.HasAddNodeWarning}" Background="#332A1100" BorderBrush="#FFD7B66B" BorderThickness="1" CornerRadius="6" Padding="8,6">
                     <TextBlock Foreground="#FFD7B66B" TextWrapping="Wrap" Text="{Binding IoFlowGraph.AddNodeWarning}" />
                 </Border>
                 <StackPanel Orientation="Horizontal" Spacing="10">
                     <Button Content="Auto arrange" Command="{Binding IoFlowGraph.AutoArrangeNodesCommand}" ToolTip.Tip="Automatically repositions nodes into a clean layout grouped by connected sources." />
+                    <Button x:Name="IoFlowUndoButton" Content="Undo" Command="{Binding IoFlowGraph.UndoCommand}" ToolTip.Tip="Undo the last node move, auto arrange, or connection change (Ctrl+Z). Up to 10 actions are retained." />
                 </StackPanel>
                 <Border IsVisible="{Binding HasIoFlowControllerMismatchWarning}" Background="#332A1100" BorderBrush="#FFD7B66B" BorderThickness="1" CornerRadius="6" Padding="8,6">
                     <TextBlock Foreground="#FFD7B66B" TextWrapping="Wrap" Text="{Binding IoFlowControllerMismatchWarning}" />
@@ -82,28 +224,57 @@
             </StackPanel>
         </Border>
 
-        <Border x:Name="IoFlowSurfaceBorder" Grid.Row="1" BorderBrush="#443553" BorderThickness="1" CornerRadius="10">
+        <Border x:Name="IoFlowCanvasFrame" Grid.Row="1" BorderBrush="#443553" BorderThickness="1" CornerRadius="10" Background="#FF15171D" ClipToBounds="True">
+          <Grid RowDefinitions="Auto,*">
+            <!-- Overlaps the canvas divider by 1px so the selected tab merges into the canvas. -->
+            <ScrollViewer x:Name="IoFlowCanvasTabBar" Grid.Row="0" Margin="8,6,8,-1" ZIndex="1" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                <StackPanel Orientation="Horizontal">
+                    <TabStrip x:Name="IoFlowCanvasTabs" ItemsSource="{Binding IoFlowGraph.Canvases}" SelectedItem="{Binding IoFlowGraph.SelectedCanvas, Mode=TwoWay}">
+                        <TabStrip.ItemTemplate>
+                            <DataTemplate x:DataType="io:IoFlowCanvasViewModel">
+                                <Grid Classes="canvasTabHeader" Background="Transparent" ToolTip.Tip="Right-click this tab to rename it or delete it. Only empty canvases can be deleted." ToolTip.ShowDelay="2000">
+                                    <Grid.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="Rename" Tag="{Binding #CanvasNameEditor}" Click="OnRenameCanvasClick" />
+                                            <MenuItem Header="Delete" Command="{Binding #IoFlowCanvasTabs.DataContext.IoFlowGraph.DeleteCanvasTabCommand}" CommandParameter="{Binding}" />
+                                        </ContextMenu>
+                                    </Grid.ContextMenu>
+                                    <TextBlock Text="{Binding Name}" FontSize="14" VerticalAlignment="Center" />
+                                    <TextBox x:Name="CanvasNameEditor" Classes="canvasNameEditor" FontSize="14" IsVisible="False" MinWidth="120" KeyDown="OnCanvasNameKeyDown" LostFocus="OnCanvasNameLostFocus" />
+                                </Grid>
+                            </DataTemplate>
+                        </TabStrip.ItemTemplate>
+                    </TabStrip>
+                    <Button x:Name="IoFlowAddCanvasTab" Content="+" Command="{Binding IoFlowGraph.AddCanvasCommand}" IsEnabled="{Binding IoFlowGraph.CanAddCanvas}" ToolTip.Tip="Add a canvas (up to 20)." AutomationProperties.Name="Add canvas" />
+                </StackPanel>
+            </ScrollViewer>
+        <Border x:Name="IoFlowSurfaceBorder" Grid.Row="1" BorderBrush="#443553" BorderThickness="0,1,0,0" CornerRadius="0,0,9,9">
             <Border.Background>
                 <SolidColorBrush Color="#FF1B1E24" />
             </Border.Background>
             <Border.ContextMenu>
                 <ContextMenu>
+                    <MenuItem Header="Undo (Ctrl+Z)" Command="{Binding IoFlowGraph.UndoCommand}" />
+                    <Separator />
                     <MenuItem Header="Add digital input node" Command="{Binding IoFlowGraph.AddNextDigitalNodeCommand}" ToolTip.Tip="Add the next available digital input node to the canvas." />
                     <MenuItem Header="Add analogue input node" Command="{Binding IoFlowGraph.AddNextAnalogueNodeCommand}" ToolTip.Tip="Add the next available analogue input node to the canvas." />
                     <MenuItem Header="Add ignition input node" Command="{Binding IoFlowGraph.AddIgnitionNodeCommand}" IsEnabled="{Binding IoFlowGraph.CanAddIgnitionNode}" ToolTip.Tip="{Binding IoFlowGraph.IgnitionNodeAddStatus}" />
                     <MenuItem Header="Add CAN message input node" Command="{Binding IoFlowGraph.AddCanInputNodeCommand}" ToolTip.Tip="Add a CAN input source node for CAN-driven logic." />
+                    <MenuItem Header="Add CAN RX signal node" Command="{Binding IoFlowGraph.AddCanRxNodeCommand}" IsEnabled="{Binding IoFlowGraph.CanAddCanRxNode}" ToolTip.Tip="Add the next enabled decoded receive signal. CAN RX signals connect only to logic rule operands." />
+                    <MenuItem Header="Add system value node" Command="{Binding IoFlowGraph.AddSystemValueNodeCommand}" IsEnabled="{Binding IoFlowGraph.CanAddSystemValueNode}" ToolTip.Tip="Add the next controller system value for use by logic rule operands." />
                     <MenuItem Header="Add CAN TX node" Command="{Binding IoFlowGraph.AddCanTxNodeCommand}" IsEnabled="{Binding IoFlowGraph.CanAddCanTxNode}" ToolTip.Tip="{Binding IoFlowGraph.CanTxNodeAddStatus}" />
                     <MenuItem Header="Add output channel node" Command="{Binding IoFlowGraph.AddNextOutputNodeCommand}" IsEnabled="{Binding IoFlowGraph.CanAddOutputNode}" ToolTip.Tip="{Binding IoFlowGraph.OutputNodeAddStatus}" />
-                    <MenuItem Header="Add logic node" Command="{Binding IoFlowGraph.AddLogicNodeCommand}" ToolTip.Tip="Add a MATH/logic rule node for combining inputs." />
+                    <MenuItem Header="Add logic rule node" Command="{Binding IoFlowGraph.AddLogicNodeCommand}" ToolTip.Tip="Add a logic rule node for combining inputs." />
                     <Separator />
-                    <MenuItem Header="Remove selected nodes" Command="{Binding IoFlowGraph.RemoveSelectedNodesCommand}" ToolTip.Tip="Remove all currently selected nodes from the canvas." />
+                    <MenuItem Header="Remove selected nodes" Command="{Binding IoFlowGraph.RemoveSelectedNodesCommand}" ToolTip.Tip="Remove selected nodes. Removing a CAN TX node also disables its transmission and clears its channel assignment; Save to controller to persist." />
+                    <MenuItem x:Name="IoFlowMoveToCanvasMenu" Header="Move selected nodes to canvas" />
                     <MenuItem Header="Auto arrange" Command="{Binding IoFlowGraph.AutoArrangeNodesCommand}" ToolTip.Tip="Automatically repositions nodes into a clean layout grouped by connected sources." />
                     <MenuItem Header="Restore all nodes" Command="{Binding IoFlowGraph.RestoreAllNodesCommand}" ToolTip.Tip="Restore any hidden or removed nodes back onto the canvas." />
                 </ContextMenu>
             </Border.ContextMenu>
 
             <Grid Margin="8">
-                <nodify:NodifyEditor x:Name="IoFlowEditor" DisplayConnectionsOnTop="True" Background="Transparent" ItemsSource="{Binding IoFlowGraph.Nodes}" Connections="{Binding IoFlowGraph.Connections}" ConnectionCompletedCommand="{Binding IoFlowGraph.ConnectionCompletedCommand}" RemoveConnectionCommand="{Binding IoFlowGraph.RemoveConnectionCommand}" ItemsDragCompletedCommand="{Binding IoFlowGraph.ItemsDragCompletedCommand}" SelectedItems="{Binding IoFlowGraph.SelectedNodes}" KeyDown="OnIoFlowEditorKeyDown">
+                <nodify:NodifyEditor x:Name="IoFlowEditor" ViewportLocation="{Binding IoFlowGraph.SelectedCanvas.ViewportLocation, Mode=TwoWay}" ViewportZoom="{Binding IoFlowGraph.SelectedCanvas.ViewportZoom, Mode=TwoWay}" DisplayConnectionsOnTop="True" Background="Transparent" ItemsSource="{Binding IoFlowGraph.VisibleNodes}" Connections="{Binding IoFlowGraph.VisibleConnections}" ConnectionCompletedCommand="{Binding IoFlowGraph.ConnectionCompletedCommand}" RemoveConnectionCommand="{Binding IoFlowGraph.RemoveConnectionCommand}" ItemsDragStartedCommand="{Binding IoFlowGraph.ItemsDragStartedCommand}" ItemsDragCompletedCommand="{Binding IoFlowGraph.ItemsDragCompletedCommand}" SelectedItems="{Binding IoFlowGraph.SelectedNodes}" ContainerPrepared="OnIoFlowContainerPrepared" ContainerClearing="OnIoFlowContainerClearing" KeyDown="OnIoFlowEditorKeyDown">
                     <nodify:NodifyEditor.Background>
                         <DrawingBrush Stretch="None" TileMode="Tile" DestinationRect="0,0,100,100" AlignmentX="Left" AlignmentY="Top">
                             <DrawingBrush.Drawing>
@@ -128,19 +299,28 @@
                     <nodify:NodifyEditor.ConnectionTemplate>
                         <DataTemplate x:DataType="io:IoFlowConnectionViewModel">
                             <!-- Nodify's default connection template does not bind endpoint coordinates. -->
-                            <ncon:Connection Source="{Binding Source.Anchor}" Target="{Binding Target.Anchor}" Stroke="{Binding Stroke}" StrokeThickness="{Binding StrokeThickness}" PointerPressed="OnConnectionPointerPressed">
-                                <ncon:Connection.ContextMenu>
-                                    <ContextMenu>
-                                        <MenuItem Header="Delete connection" Command="{Binding $parent[UserControl].DataContext.IoFlowGraph.RemoveSelectedConnectionCommand}" ToolTip.Tip="Delete the currently selected connection wire." />
-                                    </ContextMenu>
-                                </ncon:Connection.ContextMenu>
-                            </ncon:Connection>
+                            <Grid>
+                                <ncon:Connection Source="{Binding Source.Anchor}" Target="{Binding Target.Anchor}" Stroke="#99C8A7FF" StrokeThickness="9" IsVisible="{Binding IsSelected}" IsHitTestVisible="False">
+                                    <ncon:Connection.Effect>
+                                        <DropShadowEffect Color="#FFC8A7FF" BlurRadius="12" OffsetX="0" OffsetY="0" />
+                                    </ncon:Connection.Effect>
+                                </ncon:Connection>
+                                <ncon:Connection Source="{Binding Source.Anchor}" Target="{Binding Target.Anchor}" Stroke="{Binding Stroke}" StrokeThickness="{Binding StrokeThickness}" IsHitTestVisible="False" />
+                                <ncon:Connection Source="{Binding Source.Anchor}" Target="{Binding Target.Anchor}" Stroke="#01FFFFFF" StrokeThickness="16" PointerEntered="OnConnectionPointerEntered" PointerExited="OnConnectionPointerExited" PointerPressed="OnConnectionPointerPressed">
+                                    <ncon:Connection.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="Delete connection" Command="{Binding $parent[UserControl].DataContext.IoFlowGraph.RemoveSelectedConnectionCommand}" ToolTip.Tip="Delete the currently selected connection wire." />
+                                        </ContextMenu>
+                                    </ncon:Connection.ContextMenu>
+                                </ncon:Connection>
+                            </Grid>
                         </DataTemplate>
                     </nodify:NodifyEditor.ConnectionTemplate>
                     <nodify:NodifyEditor.ItemContainerTheme>
                         <ControlTheme TargetType="nodify:ItemContainer" BasedOn="{StaticResource {x:Type nodify:ItemContainer}}">
-                            <Setter Property="Location" Value="{Binding DataContext.Location, RelativeSource={RelativeSource Self}, Mode=TwoWay}" />
                             <Setter Property="IsDraggable" Value="True" />
+                            <!-- The selected-node glow renders outside the card bounds. -->
+                            <Setter Property="ClipToBounds" Value="False" />
                         </ControlTheme>
                     </nodify:NodifyEditor.ItemContainerTheme>
                     <nodify:NodifyEditor.DataTemplates>
@@ -149,8 +329,10 @@
                                 <StackPanel Spacing="6">
                                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                                         <TextBlock Grid.Column="0" FontSize="16" FontWeight="SemiBold" Text="{Binding Title}" />
-                                        <ncon:Connector Grid.Column="1" Classes="ioFlowConnector" DataContext="{Binding OutputConnector}" Anchor="{Binding Anchor, Mode=TwoWay}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+                                        <controls:IoFlowConnector Grid.Column="1" Classes="ioFlowConnector" DataContext="{Binding OutputConnector}" WireAnchor="{Binding Anchor, Mode=OneWayToSource}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
                                     </Grid>
+                                    <TextBlock Classes="ioFlowFieldLabel" Text="Digital input channel" />
+                                    <ComboBox Classes="nodeSourceSelector" ItemsSource="{Binding AvailableSources}" DisplayMemberBinding="{Binding Label}" SelectedItem="{Binding SelectedSource, Mode=TwoWay}" ToolTip.Tip="Select the physical input. Existing wires follow this node; channels already on the canvas are excluded." />
                                     <TextBlock Classes="ioFlowFieldLabel" Text="Electrical mode" />
                                     <TextBlock Text="Active high (fixed)" />
                                     <TextBlock Classes="ioFlowFieldLabel" Text="Live state" />
@@ -164,16 +346,18 @@
                                 <StackPanel Spacing="6">
                                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                                         <TextBlock Grid.Column="0" FontSize="16" FontWeight="SemiBold" Text="{Binding Title}" />
-                                        <ncon:Connector Grid.Column="1" Classes="ioFlowConnector" DataContext="{Binding OutputConnector}" Anchor="{Binding Anchor, Mode=TwoWay}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+                                        <controls:IoFlowConnector Grid.Column="1" Classes="ioFlowConnector" DataContext="{Binding OutputConnector}" WireAnchor="{Binding Anchor, Mode=OneWayToSource}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
                                     </Grid>
+                                    <TextBlock Classes="ioFlowFieldLabel" Text="Analogue input channel" />
+                                    <ComboBox Classes="nodeSourceSelector" ItemsSource="{Binding AvailableSources}" DisplayMemberBinding="{Binding Label}" SelectedItem="{Binding SelectedSource, Mode=TwoWay}" ToolTip.Tip="Select the physical input and edit its existing settings. Connected operands and outputs follow this node." />
                                     <TextBlock Classes="ioFlowFieldLabel" Text="Live voltage" />
                                     <TextBlock Text="{Binding LiveVoltageText}" />
                                     <TextBlock Classes="ioFlowFieldLabel" Text="Live value" />
                                     <TextBlock Text="{Binding LiveValueText}" />
                                     <TextBlock Classes="ioFlowFieldLabel" Text="Input type" />
                                     <ComboBox ItemsSource="{Binding $parent[UserControl].DataContext.AnalogueChannelTypes}" DisplayMemberBinding="{Binding Label}" SelectedValueBinding="{Binding Type}" SelectedValue="{Binding Input.ChanType, Mode=TwoWay}" ToolTip.Tip="Select the analogue input mode used to interpret this source signal." />
-                                    <TextBlock Classes="ioFlowFieldLabel" Text="Units" />
-                                    <ComboBox IsEnabled="{Binding Input.IsUnitsSelectable}" ItemsSource="{Binding FilteredAnalogueUnits}" DisplayMemberBinding="{Binding Label}" SelectedValueBinding="{Binding Units}" SelectedValue="{Binding Input.Units, Mode=TwoWay}" ToolTip.Tip="Select engineering units for this analogue input where supported by the selected input type." />
+                                    <TextBlock Classes="ioFlowFieldLabel" IsVisible="{Binding Input.IsUnitsSelectable}" Text="Units" />
+                                    <ComboBox IsVisible="{Binding Input.IsUnitsSelectable}" ItemsSource="{Binding FilteredAnalogueUnits}" DisplayMemberBinding="{Binding Label}" SelectedValueBinding="{Binding Units}" SelectedValue="{Binding Input.Units, Mode=TwoWay}" ToolTip.Tip="Select engineering units for this analogue input." />
                                     <TextBlock Classes="ioFlowFieldLabel" IsVisible="{Binding Input.IsCalibrationMode}" Text="Calibration points" />
                                     <ComboBox IsVisible="{Binding Input.IsCalibrationMode}" ItemsSource="{Binding AnalogueCalibrationPointOptions}" SelectedItem="{Binding Input.CalibrationPoints, Mode=TwoWay}" ToolTip.Tip="Choose whether this analogue input uses two-point or three-point calibration." />
                                     <Grid IsVisible="{Binding Input.IsCalibrationMode}" ColumnDefinitions="Auto,Auto,Auto" ColumnSpacing="8" RowDefinitions="Auto,Auto,Auto,Auto">
@@ -190,10 +374,22 @@
                                         <TextBox Grid.Row="3" Grid.Column="1" Width="80" Text="{Binding Input.CalibrationVolt3, Mode=TwoWay}" IsVisible="{Binding Input.IsThreePointCalibration}" ToolTip.Tip="Voltage at calibration point 3 for three-point calibration." />
                                         <TextBox Grid.Row="3" Grid.Column="2" Width="80" Text="{Binding Input.CalibrationValue3, Mode=TwoWay}" IsVisible="{Binding Input.IsThreePointCalibration}" ToolTip.Tip="Scaled value at calibration point 3 for three-point calibration." />
                                     </Grid>
-                                    <TextBlock Classes="ioFlowFieldLabel" Text="Pull-up resistor" />
-                                    <ToggleSwitch IsEnabled="{Binding Input.AllowPullResistors}" IsChecked="{Binding Input.PullUpEnable, Mode=TwoWay}" OffContent="Off" OnContent="On" ToolTip.Tip="Enable an internal pull-up resistor for this input when supported by the hardware mode." />
-                                    <TextBlock Classes="ioFlowFieldLabel" Text="Pull-down resistor" />
-                                    <ToggleSwitch IsEnabled="{Binding Input.AllowPullResistors}" IsChecked="{Binding Input.PullDownEnable, Mode=TwoWay}" OffContent="Off" OnContent="On" ToolTip.Tip="Enable an internal pull-down resistor for this input when supported by the hardware mode." />
+                                    <Grid IsVisible="{Binding Input.IsCalibrationMode}" ColumnDefinitions="*,*" ColumnSpacing="8" RowDefinitions="Auto,Auto">
+                                        <TextBlock Classes="ioFlowFieldLabel" Text="Range minimum" />
+                                        <TextBlock Grid.Column="1" Classes="ioFlowFieldLabel" Text="Range maximum" />
+                                        <TextBox Classes="analogueRangeMin" Grid.Row="1" Text="{Binding Input.ConfigRangeMin, Mode=TwoWay}" />
+                                        <TextBox Classes="analogueRangeMax" Grid.Row="1" Grid.Column="1" Text="{Binding Input.ConfigRangeMax, Mode=TwoWay}" />
+                                    </Grid>
+                                    <StackPanel IsVisible="{Binding Input.IsNtcMode}" Spacing="6">
+                                        <TextBlock Classes="ioFlowFieldLabel" Text="NTC Beta" />
+                                        <TextBox Classes="analogueNtcBeta" Text="{Binding Input.NtcBeta, Mode=TwoWay}" />
+                                        <TextBlock Classes="ioFlowFieldLabel" Text="NTC resistance at 25&#176;C (ohms)" />
+                                        <TextBox Classes="analogueNtcResistance" Text="{Binding Input.NtcNominalResistance, Mode=TwoWay}" />
+                                    </StackPanel>
+                                    <TextBlock Classes="ioFlowFieldLabel" IsVisible="{Binding Input.AllowPullResistors}" Text="Pull-up resistor" />
+                                    <ToggleSwitch IsVisible="{Binding Input.AllowPullResistors}" IsChecked="{Binding Input.PullUpEnable, Mode=TwoWay}" OffContent="Off" OnContent="On" ToolTip.Tip="Enable an internal pull-up resistor for this input." />
+                                    <TextBlock Classes="ioFlowFieldLabel" IsVisible="{Binding Input.AllowPullResistors}" Text="Pull-down resistor" />
+                                    <ToggleSwitch IsVisible="{Binding Input.AllowPullResistors}" IsChecked="{Binding Input.PullDownEnable, Mode=TwoWay}" OffContent="Off" OnContent="On" ToolTip.Tip="Enable an internal pull-down resistor for this input." />
                                 </StackPanel>
                             </Border>
                         </DataTemplate>
@@ -203,10 +399,10 @@
                                 <StackPanel Spacing="6">
                                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                                         <TextBlock Grid.Column="0" FontSize="16" FontWeight="SemiBold" Text="{Binding Title}" />
-                                        <ncon:Connector Grid.Column="1" Classes="ioFlowConnector" DataContext="{Binding OutputConnector}" Anchor="{Binding Anchor, Mode=TwoWay}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+                                        <controls:IoFlowConnector Grid.Column="1" Classes="ioFlowConnector" DataContext="{Binding OutputConnector}" WireAnchor="{Binding Anchor, Mode=OneWayToSource}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
                                     </Grid>
                                     <TextBlock Foreground="#FFD0C3E8" TextWrapping="Wrap" Text="System CAN input. Connect this node to output channels." />
-                                    <TextBlock Foreground="#FFD0C3E8" TextWrapping="Wrap" Text="For Custom CAN, use CAN signal operands in logic nodes." />
+                                    <TextBlock Foreground="#FFD0C3E8" TextWrapping="Wrap" Text="For Custom CAN logic rule inputs, add decoded CAN RX signal nodes." />
                                 </StackPanel>
                             </Border>
                         </DataTemplate>
@@ -215,7 +411,7 @@
                             <Border Classes="ioFlowNode" BorderBrush="{Binding BorderHex}" BorderThickness="{Binding BorderThickness}" MinWidth="360" MaxWidth="420">
                                 <StackPanel Spacing="8">
                                     <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
-                                        <ncon:Connector Grid.Column="0" Classes="ioFlowConnector" DataContext="{Binding InputConnector}" Anchor="{Binding Anchor, Mode=TwoWay}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+                                        <controls:IoFlowConnector Grid.Column="0" Classes="ioFlowConnector" DataContext="{Binding InputConnector}" WireAnchor="{Binding Anchor, Mode=OneWayToSource}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
                                         <TextBlock Grid.Column="1" FontSize="16" FontWeight="SemiBold" Text="{Binding Title}" />
                                     </Grid>
 
@@ -224,12 +420,12 @@
                                             <TextBlock Grid.Row="0" Grid.Column="0" Classes="ioFlowFieldLabel" VerticalAlignment="Center" Text="Current mode" />
                                             <TextBlock Grid.Row="0" Grid.Column="1" TextWrapping="Wrap" Text="{Binding ModeText}" />
                                             <TextBlock Grid.Row="1" Grid.Column="0" Classes="ioFlowFieldLabel" VerticalAlignment="Center" Text="State" />
-                                            <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding StatusText}" />
+                                            <ToggleSwitch Classes="canTxEnabled" Grid.Row="1" Grid.Column="1" IsChecked="{Binding Message.IsEnabled, Mode=TwoWay}" OffContent="Disabled" OnContent="Enabled" ToolTip.Tip="Enable or disable this stored TX message without deleting its output-channel assignment. Save to controller to apply." />
                                         </Grid>
                                     </Border>
 
                                     <Border Padding="8" CornerRadius="6" BorderBrush="#554B627A" BorderThickness="1" Background="#1A000000">
-                                        <Grid ColumnDefinitions="140,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="6">
+                                        <Grid ColumnDefinitions="140,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="6">
                                             <TextBlock Grid.Row="0" Grid.Column="0" Classes="ioFlowFieldLabel" VerticalAlignment="Center" Text="Stored TX message" />
                                             <ComboBox Grid.Row="0" Grid.Column="1"
                                                       ItemsSource="{Binding AvailableMessages}"
@@ -243,17 +439,21 @@
                                             </ComboBox>
                                             <TextBlock Grid.Row="1" Grid.Column="0" Classes="ioFlowFieldLabel" VerticalAlignment="Center" Text="TX mode" />
                                             <ToggleSwitch Grid.Row="1" Grid.Column="1" Width="150" HorizontalAlignment="Left" IsChecked="{Binding EditIsPeriodic, Mode=TwoWay}" OffContent="One-shot" OnContent="Periodic" ToolTip.Tip="One-shot transmits once when triggered; periodic repeats at the configured interval while active." />
-                                            <TextBlock Grid.Row="2" Grid.Column="0" Classes="ioFlowFieldLabel" VerticalAlignment="Center" Text="{Binding EditTimeoutLabel}" />
-                                            <Grid Grid.Row="2" Grid.Column="1" ColumnDefinitions="110,Auto" ColumnSpacing="8">
-                                                <TextBox Grid.Column="0" Text="{Binding EditTimeoutMs, Mode=TwoWay}" ToolTip.Tip="Interval or timeout in milliseconds used by the selected TX mode." />
-                                                <Button Grid.Column="1" HorizontalAlignment="Left" Padding="12,6" Content="Apply" ToolTip.Tip="Apply the edited TX mode and timing values to this CAN TX node."
-                                                        Command="{Binding $parent[UserControl].DataContext.IoFlowGraph.ApplyCanTxNodeSettingsCommand}"
-                                                        CommandParameter="{Binding}" />
+                                            <TextBlock Grid.Row="2" Grid.Column="0" Classes="ioFlowFieldLabel" VerticalAlignment="Center" Text="Period (ms)" IsVisible="{Binding EditIsPeriodic}" />
+                                            <Grid Classes="sliderWithValue" Grid.Row="2" Grid.Column="1" IsVisible="{Binding EditIsPeriodic}" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                <Slider Minimum="{Binding PeriodMinimum}" Maximum="{Binding PeriodMaximum}"
+                                                        TickFrequency="{Binding PeriodStep}" SmallChange="{Binding PeriodStep}" LargeChange="{Binding PeriodStep}"
+                                                        IsSnapToTickEnabled="True" Value="{Binding EditTimeoutMs, Mode=TwoWay}"
+                                                        ToolTip.Tip="Periodic TX: 100 to 30,000 ms in 100 ms steps." />
+                                                <controls:SliderValueEditor MinWidth="62" Text="{Binding EditTimeoutMs, StringFormat='{}{0} ms'}" />
                                             </Grid>
-                                            <TextBlock Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2" Foreground="#FFD7B66B" TextWrapping="Wrap"
+                                            <Button Grid.Row="3" Grid.Column="1" HorizontalAlignment="Left" Padding="12,6" Content="Apply" ToolTip.Tip="Stage the TX mode and period. Use Save to controller to persist changes."
+                                                    Command="{Binding $parent[UserControl].DataContext.IoFlowGraph.ApplyCanTxNodeSettingsCommand}"
+                                                    CommandParameter="{Binding}" />
+                                            <TextBlock Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="2" Foreground="#FFD7B66B" TextWrapping="Wrap"
                                                        Text="{Binding ValidationMessage}" IsVisible="{Binding HasValidationMessage}" />
-                                            <TextBlock Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="2" Foreground="#FFD0C3E8" TextWrapping="Wrap"
-                                                       Text="Connect an output channel to transmit this message while that output is active. Use channel settings for channel assignment and CAN Messages only for TX/RX role." />
+                                            <TextBlock Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="2" Foreground="#FFD0C3E8" TextWrapping="Wrap"
+                                                       Text="Connect an output channel to assign its trigger. Configure the stored message in CAN Messages. Save to controller to persist changes." />
                                         </Grid>
                                     </Border>
                                 </StackPanel>
@@ -265,7 +465,7 @@
                                 <StackPanel Spacing="6">
                                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                                         <TextBlock Grid.Column="0" FontSize="16" FontWeight="SemiBold" Text="{Binding Title}" />
-                                        <ncon:Connector Grid.Column="1" Classes="ioFlowConnector" DataContext="{Binding OutputConnector}" Anchor="{Binding Anchor, Mode=TwoWay}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+                                        <controls:IoFlowConnector Grid.Column="1" Classes="ioFlowConnector" DataContext="{Binding OutputConnector}" WireAnchor="{Binding Anchor, Mode=OneWayToSource}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
                                     </Grid>
                                     <TextBlock Foreground="#FFD0C3E8" TextWrapping="Wrap" Text="Ignition input source. Connect this node to output channels." />
                                 </StackPanel>
@@ -276,11 +476,22 @@
                             <Border Classes="ioFlowNode ioFlowOutputNode" BorderBrush="{Binding BorderHex}" BorderThickness="{Binding BorderThickness}" MinWidth="420" MaxWidth="560">
                                 <StackPanel Spacing="10">
                                     <Border Padding="8" CornerRadius="6" BorderBrush="#554B627A" BorderThickness="1" Background="#22000000">
-                                        <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
-                                            <ncon:Connector Grid.Column="0" Classes="ioFlowConnector" DataContext="{Binding InputConnector}" Anchor="{Binding Anchor, Mode=TwoWay}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+                                        <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
+                                            <controls:IoFlowConnector Grid.Column="0" Classes="ioFlowConnector" DataContext="{Binding InputConnector}" WireAnchor="{Binding Anchor, Mode=OneWayToSource}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
                                             <TextBlock Grid.Column="1" FontSize="20" FontWeight="Bold" Text="{Binding Title}" />
-                                            <ncon:Connector Grid.Column="2" Classes="ioFlowConnector" DataContext="{Binding OutputConnector}" Anchor="{Binding Anchor, Mode=TwoWay}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+                                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" ToolTip.Tip="{Binding OutputActiveToolTip}">
+                                                <TextBlock Classes="ioFlowFieldLabel" VerticalAlignment="Center" Text="Active:" />
+                                                <Ellipse Classes="outputActiveLed" Width="14" Height="14" VerticalAlignment="Center" Fill="{Binding OutputLedBrush}" />
+                                            </StackPanel>
+                                            <controls:IoFlowConnector Grid.Column="3" Classes="ioFlowConnector" DataContext="{Binding OutputConnector}" WireAnchor="{Binding Anchor, Mode=OneWayToSource}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
                                         </Grid>
+                                    </Border>
+                                    <StackPanel Spacing="10">
+                                    <Border Padding="8" CornerRadius="6" BorderBrush="#554B627A" BorderThickness="1" Background="#1A000000" IsVisible="{Binding IsMathChannel}">
+                                        <StackPanel Spacing="6">
+                                            <TextBlock Classes="ioFlowFieldLabel" Text="Output behaviour" />
+                                            <ComboBox Classes="mathOutputMode" ItemsSource="{Binding $parent[UserControl].DataContext.MathOutputModes}" SelectedIndex="{Binding Channel.MathOutputMode, Mode=TwoWay}" ToolTip.Tip="Digital: zero is OFF and nonzero is ON. PWM: the connected logic result sets duty, clamped to 0-100%." />
+                                        </StackPanel>
                                     </Border>
                                     <Border Padding="8" CornerRadius="6" BorderBrush="#554B627A" BorderThickness="1" Background="#1A000000">
                                         <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="6">
@@ -296,9 +507,9 @@
                                     </Border>
 
                                     <Grid IsVisible="{Binding ShowInputChannelTypeOptions}" ColumnDefinitions="Auto,*" ColumnSpacing="10" RowDefinitions="Auto,Auto" RowSpacing="6">
-                                        <TextBlock Grid.Row="0" Grid.Column="0" Classes="ioFlowFieldLabel" VerticalAlignment="Center" Text="Input type" />
-                                        <Border Grid.Row="0" Grid.Column="1" Padding="4" CornerRadius="6" BorderBrush="#553E5D" BorderThickness="1" Background="#22000000">
-                                            <ListBox ItemsSource="{Binding AvailableInputChannelTypes}" SelectedItem="{Binding SelectedInputChannelTypeOption, Mode=TwoWay}" SelectionMode="Single" BorderThickness="0" Background="Transparent" ToolTip.Tip="Choose how this channel is controlled: digital, analogue threshold, analogue scaled PWM, CAN-controlled, or intermittent.">
+                                        <TextBlock Grid.Row="0" Grid.Column="0" Classes="ioFlowFieldLabel" VerticalAlignment="Center" Text="Output behaviour" />
+                                        <Border Grid.Row="0" Grid.Column="1" Classes="segmentedTrack">
+                                            <ListBox Classes="segmentedChoice" ItemsSource="{Binding AvailableInputChannelTypes}" SelectedItem="{Binding SelectedInputChannelTypeOption, Mode=TwoWay}" SelectionMode="Single" ToolTip.Tip="Choose how this channel is controlled: digital, analogue threshold, analogue scaled PWM, CAN-controlled, or intermittent.">
                                                 <ListBox.ItemsPanel>
                                                     <ItemsPanelTemplate>
                                                         <UniformGrid Columns="{Binding AvailableInputChannelTypes.Count}" />
@@ -306,131 +517,292 @@
                                                 </ListBox.ItemsPanel>
                                                 <ListBox.ItemTemplate>
                                                     <DataTemplate>
-                                                        <Border Padding="10,6" CornerRadius="5" BorderBrush="#775F75" BorderThickness="1" Background="#331A1A1A" MinWidth="0" HorizontalAlignment="Stretch">
-                                                            <TextBlock HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" Text="{Binding Label}" />
-                                                        </Border>
+                                                        <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" Text="{Binding Label}" />
                                                     </DataTemplate>
                                                 </ListBox.ItemTemplate>
                                             </ListBox>
                                         </Border>
                                     </Grid>
 
-                                    <TextBlock IsVisible="{Binding ShowConnectInputHint}" Foreground="#FFAF9FC8" TextWrapping="Wrap" Text="Connect a Digital or Ana/Dig input node to configure output mode." />
                                     <TextBlock IsVisible="{Binding IsInputChannelTypeSelectionRequired}" Foreground="#FFD7B66B" TextWrapping="Wrap" Text="{Binding InputChannelTypeSelectionHint}" />
 
-                                    <Grid IsVisible="{Binding ShowInputDependentConfiguration}" ColumnDefinitions="*,*" ColumnSpacing="12" RowDefinitions="Auto,Auto,Auto" RowSpacing="4">
-                                        <TextBlock Grid.Row="0" Grid.Column="0" IsVisible="{Binding ShowDutyConfiguration}" Classes="ioFlowFieldLabel" Text="Duty (%)" />
-                                        <TextBlock Grid.Row="0" Grid.Column="1" Classes="ioFlowFieldLabel" Text="Retry count" />
-                                        <Slider Grid.Row="1" Grid.Column="0" IsVisible="{Binding ShowDutyConfiguration}" Minimum="0" Maximum="100" TickFrequency="1" Value="{Binding DutyValue, Mode=TwoWay}" ToolTip.Tip="Set fixed PWM duty cycle percentage for compatible output modes." />
-                                        <Slider Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="10" TickFrequency="1" Value="{Binding RetryCountValue, Mode=TwoWay}" ToolTip.Tip="Number of automatic restart attempts after a channel fault before lockout." />
-                                        <TextBlock Grid.Row="2" Grid.Column="0" IsVisible="{Binding ShowDutyConfiguration}" Text="{Binding DutyValue, StringFormat='{}{0:F0}%'}" />
-                                        <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding RetryCountValue, StringFormat='{}{0:F0}'}" />
+                                    <Grid IsVisible="{Binding ShowInputDependentConfiguration}" ColumnDefinitions="*,*" ColumnSpacing="8" RowDefinitions="Auto" RowSpacing="8">
+                                        <Border Classes="settingGroup" Grid.Row="0" Grid.Column="0" IsVisible="{Binding ShowDutyConfiguration}">
+                                            <StackPanel Spacing="6">
+                                                <TextBlock Classes="ioFlowFieldLabel" Text="Duty (%)" />
+                                                <Grid Classes="sliderWithValue" IsVisible="{Binding ShowDutyConfiguration}" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                    <Slider Minimum="0" Maximum="100" TickFrequency="1" Value="{Binding DutyValue, Mode=TwoWay}" ToolTip.Tip="Set fixed PWM duty cycle percentage for compatible output modes." />
+                                                    <controls:SliderValueEditor Text="{Binding DutyValue, StringFormat='{}{0:F0}%'}" />
+                                                </Grid>
+                                            </StackPanel>
+                                        </Border>
+                                        <Border Classes="settingGroup retryCountGroup" Classes.withDuty="{Binding ShowDutyConfiguration}">
+                                            <StackPanel Spacing="6">
+                                                <TextBlock Classes="ioFlowFieldLabel" Text="Retry count" />
+                                                <Grid Classes="sliderWithValue" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                    <Slider Minimum="0" Maximum="10" TickFrequency="1" Value="{Binding RetryCountValue, Mode=TwoWay}" ToolTip.Tip="Number of automatic restart attempts after a channel fault before lockout." />
+                                                    <controls:SliderValueEditor MinWidth="20" Text="{Binding RetryCountValue, StringFormat='{}{0:F0}'}" />
+                                                </Grid>
+                                            </StackPanel>
+                                        </Border>
                                     </Grid>
 
                                     <Border IsVisible="{Binding ShowInputDependentConfiguration}" Padding="8" CornerRadius="6" BorderBrush="#554B627A" BorderThickness="1" Background="#16000000">
                                         <TabControl TabStripPlacement="Top">
                                             <TabItem Header="Current" IsVisible="{Binding ShowCurrentInrushConfiguration}">
-                                                <Grid Margin="0,8,0,0" ColumnDefinitions="*,*" ColumnSpacing="12" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="4">
-                                                    <TextBlock Grid.Row="0" Grid.Column="0" Classes="ioFlowFieldLabel" Text="Threshold low" />
-                                                    <TextBlock Grid.Row="0" Grid.Column="1" Classes="ioFlowFieldLabel" Text="Threshold high" />
-                                                    <Slider Grid.Row="1" Grid.Column="0" Minimum="0" Maximum="17" TickFrequency="0.1" Value="{Binding CurrentThresholdLowValue, Mode=TwoWay}" ToolTip.Tip="Turn off threshold low (open circuit detection)" />
-                                                    <Slider Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="17" TickFrequency="0.1" Value="{Binding CurrentThresholdHighValue, Mode=TwoWay}" ToolTip.Tip="Turn off threshold high" />
-                                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding CurrentThresholdLowValue, StringFormat='{}{0:F2} A'}" />
-                                                    <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding CurrentThresholdHighValue, StringFormat='{}{0:F2} A'}" />
-                                                    <TextBlock Grid.Row="3" Grid.Column="0" Classes="ioFlowFieldLabel" Text="Inrush delay" />
-                                                    <TextBlock Grid.Row="3" Grid.Column="1" Classes="ioFlowFieldLabel" Text="Inrush limit" />
-                                                    <Slider Grid.Row="4" Grid.Column="0" Minimum="0" Maximum="2" TickFrequency="0.1" Value="{Binding InrushDelayValue, Mode=TwoWay}" ToolTip.Tip="Time after turn-on during which the inrush current limit is used instead of the normal high current limit." />
-                                                    <Slider Grid.Row="4" Grid.Column="1" Minimum="0" Maximum="50" TickFrequency="0.1" Value="{Binding InrushCurrentLimitValue, Mode=TwoWay}" ToolTip.Tip="Temporary higher current limit allowed during the inrush delay period after the channel turns on." />
-                                                    <TextBlock Grid.Row="5" Grid.Column="0" Text="{Binding InrushDelayValue, StringFormat='{}{0:F2} s'}" />
-                                                    <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding InrushCurrentLimitValue, StringFormat='{}{0:F2} A'}" />
+                                                <Grid Margin="0,8,0,0" ColumnDefinitions="*,*" ColumnSpacing="8" RowDefinitions="Auto,Auto" RowSpacing="8">
+                                                    <Border Classes="settingGroup" Grid.Row="0" Grid.Column="0">
+                                                        <StackPanel Spacing="6">
+                                                            <TextBlock Classes="ioFlowFieldLabel" Text="Threshold low" />
+                                                            <Grid Classes="sliderWithValue" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                                <Slider Minimum="0" Maximum="17" TickFrequency="0.1" IsSnapToTickEnabled="True" Value="{Binding CurrentThresholdLowValue, Mode=TwoWay}" ToolTip.Tip="Turn off threshold low (open circuit detection)" />
+                                                                <controls:SliderValueEditor Text="{Binding CurrentThresholdLowValue, StringFormat='{}{0:F1} A'}" />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Classes="settingGroup" Grid.Row="0" Grid.Column="1">
+                                                        <StackPanel Spacing="6">
+                                                            <TextBlock Classes="ioFlowFieldLabel" Text="Threshold high" />
+                                                            <Grid Classes="sliderWithValue" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                                <Slider Minimum="0" Maximum="17" TickFrequency="0.1" IsSnapToTickEnabled="True" Value="{Binding CurrentThresholdHighValue, Mode=TwoWay}" ToolTip.Tip="Turn off threshold high" />
+                                                                <controls:SliderValueEditor Text="{Binding CurrentThresholdHighValue, StringFormat='{}{0:F1} A'}" />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Classes="settingGroup" Grid.Row="1" Grid.Column="0">
+                                                        <StackPanel Spacing="6">
+                                                            <TextBlock Classes="ioFlowFieldLabel" Text="Inrush delay" />
+                                                            <Grid Classes="sliderWithValue" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                                <Slider Minimum="0" Maximum="2" TickFrequency="0.1" Value="{Binding InrushDelayValue, Mode=TwoWay}" ToolTip.Tip="Time after turn-on during which the inrush current limit is used instead of the normal high current limit." />
+                                                                <controls:SliderValueEditor Text="{Binding InrushDelayValue, StringFormat='{}{0:F1} s'}" />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Classes="settingGroup" Grid.Row="1" Grid.Column="1">
+                                                        <StackPanel Spacing="6">
+                                                            <TextBlock Classes="ioFlowFieldLabel" Text="Inrush limit" />
+                                                            <Grid Classes="sliderWithValue" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                                <Slider Minimum="0" Maximum="50" TickFrequency="0.1" IsSnapToTickEnabled="True" Value="{Binding InrushCurrentLimitValue, Mode=TwoWay}" ToolTip.Tip="Temporary higher current limit allowed during the inrush delay period after the channel turns on." />
+                                                                <controls:SliderValueEditor Text="{Binding InrushCurrentLimitValue, StringFormat='{}{0:F1} A'}" />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
                                                 </Grid>
                                             </TabItem>
 
                                             <TabItem Header="Analogue" IsVisible="{Binding ShowAnalogueConfiguration}">
-                                                <Grid Margin="0,8,0,0" ColumnDefinitions="*,*" ColumnSpacing="12" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="4">
-                                                    <TextBlock Grid.Row="0" Grid.Column="0" IsVisible="{Binding ShowAnalogueThresholdConfiguration}" Classes="ioFlowFieldLabel" Text="On threshold" />
-                                                    <TextBlock Grid.Row="0" Grid.Column="1" IsVisible="{Binding ShowAnalogueThresholdConfiguration}" Classes="ioFlowFieldLabel" Text="Off threshold" />
-                                                    <Slider Grid.Row="1" Grid.Column="0" IsVisible="{Binding ShowAnalogueThresholdConfiguration}" Minimum="{Binding OnThresholdMinimum}" Maximum="{Binding OnThresholdMaximum}" TickFrequency="0.1" Value="{Binding OnThresholdValue, Mode=TwoWay}" ToolTip.Tip="{Binding OnThresholdTooltip}" />
-                                                    <Slider Grid.Row="1" Grid.Column="1" IsVisible="{Binding ShowAnalogueThresholdConfiguration}" Minimum="{Binding OffThresholdMinimum}" Maximum="{Binding OffThresholdMaximum}" TickFrequency="0.1" Value="{Binding OffThresholdValue, Mode=TwoWay}" ToolTip.Tip="{Binding OffThresholdTooltip}" />
-                                                    <TextBlock Grid.Row="2" Grid.Column="0" IsVisible="{Binding ShowAnalogueThresholdConfiguration}" Text="{Binding OnThresholdValue, StringFormat='{}{0:F2}'}" />
-                                                    <TextBlock Grid.Row="2" Grid.Column="1" IsVisible="{Binding ShowAnalogueThresholdConfiguration}" Text="{Binding OffThresholdValue, StringFormat='{}{0:F2}'}" />
-                                                    <TextBlock Grid.Row="3" Grid.Column="0" IsVisible="{Binding ShowAnalogueScaledConfiguration}" Classes="ioFlowFieldLabel" Text="Scale min" />
-                                                    <TextBlock Grid.Row="3" Grid.Column="1" IsVisible="{Binding ShowAnalogueScaledConfiguration}" Classes="ioFlowFieldLabel" Text="Scale max" />
-                                                    <Slider Grid.Row="4" Grid.Column="0" IsVisible="{Binding ShowAnalogueScaledConfiguration}" Minimum="{Binding InputMinimum}" Maximum="{Binding InputMaximum}" TickFrequency="0.1" Value="{Binding ScaleMinValue, Mode=TwoWay}" ToolTip.Tip="Input range that is mapped across the PWM output range for analogue scaled channels." />
-                                                    <Slider Grid.Row="4" Grid.Column="1" IsVisible="{Binding ShowAnalogueScaledConfiguration}" Minimum="{Binding InputMinimum}" Maximum="{Binding InputMaximum}" TickFrequency="0.1" Value="{Binding ScaleMaxValue, Mode=TwoWay}" ToolTip.Tip="Input range that is mapped across the PWM output range for analogue scaled channels." />
-                                                    <TextBlock Grid.Row="5" Grid.Column="0" IsVisible="{Binding ShowAnalogueScaledConfiguration}" Text="{Binding ScaleMinValue, StringFormat='{}{0:F2}'}" />
-                                                    <TextBlock Grid.Row="5" Grid.Column="1" IsVisible="{Binding ShowAnalogueScaledConfiguration}" Text="{Binding ScaleMaxValue, StringFormat='{}{0:F2}'}" />
+                                                <StackPanel Spacing="8">
+                                                <ToggleSwitch Classes="analogueThresholdDirection" IsVisible="{Binding ShowAnalogueThresholdConfiguration}" IsChecked="{Binding UsesNegativeGoingThresholds, Mode=TwoWay}" OffContent="ON above / OFF below" OnContent="ON below / OFF above" />
+                                                <Grid Margin="0,8,0,0" ColumnDefinitions="*,*" ColumnSpacing="8" RowDefinitions="Auto,Auto" RowSpacing="8">
+                                                    <Border Classes="settingGroup" Grid.Row="0" Grid.Column="0" IsVisible="{Binding ShowAnalogueThresholdConfiguration}">
+                                                        <StackPanel Spacing="6">
+                                                            <TextBlock Classes="ioFlowFieldLabel" Text="On threshold" />
+                                                            <Grid Classes="sliderWithValue" IsVisible="{Binding ShowAnalogueThresholdConfiguration}" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                                <Slider Minimum="{Binding OnThresholdMinimum}" Maximum="{Binding OnThresholdMaximum}" TickFrequency="0.1" Value="{Binding OnThresholdValue, Mode=TwoWay}" ToolTip.Tip="{Binding OnThresholdTooltip}" />
+                                                                <controls:SliderValueEditor MinWidth="56" Text="{Binding OnThresholdValue, StringFormat='{}{0:F2}'}" />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Classes="settingGroup" Grid.Row="0" Grid.Column="1" IsVisible="{Binding ShowAnalogueThresholdConfiguration}">
+                                                        <StackPanel Spacing="6">
+                                                            <TextBlock Classes="ioFlowFieldLabel" Text="Off threshold" />
+                                                            <Grid Classes="sliderWithValue" IsVisible="{Binding ShowAnalogueThresholdConfiguration}" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                                <Slider Minimum="{Binding OffThresholdMinimum}" Maximum="{Binding OffThresholdMaximum}" TickFrequency="0.1" Value="{Binding OffThresholdValue, Mode=TwoWay}" ToolTip.Tip="{Binding OffThresholdTooltip}" />
+                                                                <controls:SliderValueEditor MinWidth="56" Text="{Binding OffThresholdValue, StringFormat='{}{0:F2}'}" />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Classes="settingGroup" Grid.Row="1" Grid.Column="0" IsVisible="{Binding ShowAnalogueScaledConfiguration}">
+                                                        <StackPanel Spacing="6">
+                                                            <TextBlock Classes="ioFlowFieldLabel" Text="Scale min" />
+                                                            <Grid Classes="sliderWithValue" IsVisible="{Binding ShowAnalogueScaledConfiguration}" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                                <Slider Minimum="{Binding InputMinimum}" Maximum="{Binding ScaleMaxValue}" TickFrequency="0.1" Value="{Binding ScaleMinValue, Mode=TwoWay}" ToolTip.Tip="Input range that is mapped across the PWM output range for analogue scaled channels." />
+                                                                <controls:SliderValueEditor MinWidth="56" Text="{Binding ScaleMinValue, StringFormat='{}{0:F2}'}" />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Classes="settingGroup" Grid.Row="1" Grid.Column="1" IsVisible="{Binding ShowAnalogueScaledConfiguration}">
+                                                        <StackPanel Spacing="6">
+                                                            <TextBlock Classes="ioFlowFieldLabel" Text="Scale max" />
+                                                            <Grid Classes="sliderWithValue" IsVisible="{Binding ShowAnalogueScaledConfiguration}" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                                <Slider Minimum="{Binding ScaleMinValue}" Maximum="{Binding InputMaximum}" TickFrequency="0.1" Value="{Binding ScaleMaxValue, Mode=TwoWay}" ToolTip.Tip="Input range that is mapped across the PWM output range for analogue scaled channels." />
+                                                                <controls:SliderValueEditor MinWidth="56" Text="{Binding ScaleMaxValue, StringFormat='{}{0:F2}'}" />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
                                                 </Grid>
+                                                <Grid IsVisible="{Binding ShowAnalogueScaledConfiguration}" ColumnDefinitions="*,*" ColumnSpacing="8" RowDefinitions="Auto" RowSpacing="8">
+                                                    <Border Classes="settingGroup" Grid.Row="0" Grid.Column="0">
+                                                        <StackPanel Spacing="6">
+                                                            <TextBlock Classes="ioFlowFieldLabel" Text="PWM minimum (%)" />
+                                                            <Grid Classes="sliderWithValue" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                                <Slider Classes="outputPwmMin" Minimum="0" Maximum="{Binding PwmMaxValue}" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding PwmMinValue, Mode=TwoWay}" />
+                                                                <controls:SliderValueEditor Text="{Binding PwmMinValue, StringFormat='{}{0:F0}%'}" />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Classes="settingGroup" Grid.Row="0" Grid.Column="1">
+                                                        <StackPanel Spacing="6">
+                                                            <TextBlock Classes="ioFlowFieldLabel" Text="PWM maximum (%)" />
+                                                            <Grid Classes="sliderWithValue" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                                <Slider Classes="outputPwmMax" Minimum="{Binding PwmMinValue}" Maximum="100" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding PwmMaxValue, Mode=TwoWay}" />
+                                                                <controls:SliderValueEditor Text="{Binding PwmMaxValue, StringFormat='{}{0:F0}%'}" />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
+                                                </Grid>
+                                                </StackPanel>
                                             </TabItem>
 
 
                                             <TabItem Header="Timing" IsVisible="{Binding ShowTimingConfiguration}">
-                                                <Grid Margin="0,8,0,0" ColumnDefinitions="*,*" ColumnSpacing="12" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="4">
-                                                    <TextBlock Grid.Row="0" Grid.Column="0" IsVisible="{Binding IsIntermittentChannelSelected}" Classes="ioFlowFieldLabel" Text="Intermittent ON" />
-                                                    <TextBlock Grid.Row="0" Grid.Column="1" IsVisible="{Binding IsIntermittentChannelSelected}" Classes="ioFlowFieldLabel" Text="Intermittent OFF" />
-                                                    <Slider Grid.Row="1" Grid.Column="0" IsVisible="{Binding IsIntermittentChannelSelected}" Minimum="0" Maximum="10" TickFrequency="0.1" Value="{Binding IntermittentOnTimeValue, Mode=TwoWay}" ToolTip.Tip="Time in seconds the output stays ON during each intermittent cycle." />
-                                                    <Slider Grid.Row="1" Grid.Column="1" IsVisible="{Binding IsIntermittentChannelSelected}" Minimum="0" Maximum="10" TickFrequency="0.1" Value="{Binding IntermittentOffTimeValue, Mode=TwoWay}" ToolTip.Tip="Time in seconds the output stays OFF during each intermittent cycle." />
-                                                    <TextBlock Grid.Row="2" Grid.Column="0" IsVisible="{Binding IsIntermittentChannelSelected}" Text="{Binding IntermittentOnTimeValue, StringFormat='{}{0:F1} s'}" />
-                                                    <TextBlock Grid.Row="2" Grid.Column="1" IsVisible="{Binding IsIntermittentChannelSelected}" Text="{Binding IntermittentOffTimeValue, StringFormat='{}{0:F1} s'}" />
-
-                                                    <TextBlock Grid.Row="3" Grid.Column="0" Classes="ioFlowFieldLabel" Text="Delayed ON" />
-                                                    <TextBlock Grid.Row="3" Grid.Column="1" Classes="ioFlowFieldLabel" Text="Delayed OFF" />
-                                                    <ToggleSwitch Grid.Row="4" Grid.Column="0" IsChecked="{Binding Channel.IsDelayedOnEnabled, Mode=TwoWay}" OffContent="Off" OnContent="On" ToolTip.Tip="Wait for the selected time after the input turns on before enabling the output." />
-                                                    <ToggleSwitch Grid.Row="4" Grid.Column="1" IsChecked="{Binding Channel.IsDelayedOffEnabled, Mode=TwoWay}" OffContent="Off" OnContent="On" ToolTip.Tip="Keep the output on for the selected time after the delayed OFF start condition occurs." />
-                                                    <ComboBox Grid.Row="5" Grid.Column="0" IsEnabled="{Binding IsDelayedOnTimingEnabled}" SelectedIndex="{Binding Channel.DelayedOnTimeUnitIndex, Mode=TwoWay}" ToolTip.Tip="Choose the units used for the delayed ON duration slider.">
-                                                        <ComboBoxItem Content="ms" />
-                                                        <ComboBoxItem Content="s" />
-                                                        <ComboBoxItem Content="min" />
-                                                    </ComboBox>
-                                                    <ComboBox Grid.Row="5" Grid.Column="1" IsEnabled="{Binding IsDelayedOffTimingEnabled}" SelectedIndex="{Binding Channel.DelayedOffTimeUnitIndex, Mode=TwoWay}" ToolTip.Tip="Choose the units used for the delayed OFF duration slider.">
-                                                        <ComboBoxItem Content="ms" />
-                                                        <ComboBoxItem Content="s" />
-                                                        <ComboBoxItem Content="min" />
-                                                    </ComboBox>
-                                                    <Slider Grid.Row="6" Grid.Column="0" IsEnabled="{Binding IsDelayedOnTimingEnabled}" Minimum="{Binding Channel.DelayedOnSliderMinimum}" Maximum="{Binding Channel.DelayedOnSliderMaximum}" TickFrequency="{Binding Channel.DelayedOnSliderTickFrequency}" Value="{Binding Channel.DelayedOnSliderValue, Mode=TwoWay}" ToolTip.Tip="Set how long to wait before turning the output on once delayed ON is enabled." />
-                                                    <Slider Grid.Row="6" Grid.Column="1" IsEnabled="{Binding IsDelayedOffTimingEnabled}" Minimum="{Binding Channel.DelayedOffSliderMinimum}" Maximum="{Binding Channel.DelayedOffSliderMaximum}" TickFrequency="{Binding Channel.DelayedOffSliderTickFrequency}" Value="{Binding Channel.DelayedOffSliderValue, Mode=TwoWay}" ToolTip.Tip="Set how long to keep the output on before turning it off once delayed OFF is triggered." />
-                                                    <TextBlock Grid.Row="7" Grid.Column="0" Text="{Binding Channel.DelayedOnSliderText}" />
-                                                    <TextBlock Grid.Row="7" Grid.Column="1" Text="{Binding Channel.DelayedOffSliderText}" />
-
-                                                    <TextBlock Grid.Row="8" Grid.Column="0" Classes="ioFlowFieldLabel" Text="Delayed OFF trigger" />
-                                                    <ToggleSwitch Grid.Row="9" Grid.Column="0" IsEnabled="{Binding IsDelayedOffTimingEnabled}" IsChecked="{Binding Channel.DelayedOffUsesAssignedInputTrigger, Mode=TwoWay}" OffContent="Ignition" OnContent="Assigned input" ToolTip.Tip="Select what starts the delayed OFF timer: Ignition off starts the timer when IGN turns off. Assigned input starts the timer when the configured input turns off." />
-
-                                                    <TextBlock Grid.Row="10" Grid.Column="0" Classes="ioFlowFieldLabel" Text="Soft start" />
-                                                    <TextBlock Grid.Row="10" Grid.Column="1" Classes="ioFlowFieldLabel" Text="Soft stop" />
-                                                    <ToggleSwitch Grid.Row="11" Grid.Column="0" IsChecked="{Binding Channel.SoftStartEnabled, Mode=TwoWay}" OffContent="Off" OnContent="On" ToolTip.Tip="Ramp the output up from 0 to its target duty when the channel turns on." />
-                                                    <ToggleSwitch Grid.Row="11" Grid.Column="1" IsChecked="{Binding Channel.SoftStopEnabled, Mode=TwoWay}" OffContent="Off" OnContent="On" ToolTip.Tip="Ramp the output down instead of turning it off immediately when the channel is disabled." />
-                                                    <Slider Grid.Row="12" Grid.Column="0" IsEnabled="{Binding IsSoftStartTimingEnabled}" Minimum="0" Maximum="5" TickFrequency="0.1" Value="{Binding SoftStartTimeValue, Mode=TwoWay}" ToolTip.Tip="Duration of the soft-start ramp in seconds." />
-                                                    <Slider Grid.Row="12" Grid.Column="1" IsEnabled="{Binding IsSoftStopTimingEnabled}" Minimum="0" Maximum="5" TickFrequency="0.1" Value="{Binding SoftStopTimeValue, Mode=TwoWay}" ToolTip.Tip="Duration of the soft-stop ramp in seconds." />
-                                                    <TextBlock Grid.Row="13" Grid.Column="0" Text="{Binding SoftStartTimeValue, StringFormat='{}{0:F1} s'}" />
-                                                    <TextBlock Grid.Row="13" Grid.Column="1" Text="{Binding SoftStopTimeValue, StringFormat='{}{0:F1} s'}" />
+                                                <Grid Margin="0,8,0,0" ColumnDefinitions="*,*" ColumnSpacing="8" RowDefinitions="Auto,Auto,Auto" RowSpacing="8">
+                                                    <Border Classes="settingGroup" Grid.Row="0" Grid.Column="0" IsVisible="{Binding IsIntermittentChannelSelected}">
+                                                        <StackPanel Spacing="6">
+                                                            <TextBlock Classes="ioFlowFieldLabel" Text="Intermittent ON" />
+                                                            <Grid Classes="sliderWithValue" IsVisible="{Binding IsIntermittentChannelSelected}" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                                <Slider Minimum="0" Maximum="10" TickFrequency="0.1" Value="{Binding IntermittentOnTimeValue, Mode=TwoWay}" ToolTip.Tip="Time in seconds the output stays ON during each intermittent cycle." />
+                                                                <controls:SliderValueEditor Text="{Binding IntermittentOnTimeValue, StringFormat='{}{0:F1} s'}" />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Classes="settingGroup" Grid.Row="0" Grid.Column="1" IsVisible="{Binding IsIntermittentChannelSelected}">
+                                                        <StackPanel Spacing="6">
+                                                            <TextBlock Classes="ioFlowFieldLabel" Text="Intermittent OFF" />
+                                                            <Grid Classes="sliderWithValue" IsVisible="{Binding IsIntermittentChannelSelected}" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                                <Slider Minimum="0" Maximum="10" TickFrequency="0.1" Value="{Binding IntermittentOffTimeValue, Mode=TwoWay}" ToolTip.Tip="Time in seconds the output stays OFF during each intermittent cycle." />
+                                                                <controls:SliderValueEditor Text="{Binding IntermittentOffTimeValue, StringFormat='{}{0:F1} s'}" />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Classes="settingGroup" Grid.Row="1" Grid.Column="0">
+                                                        <StackPanel Spacing="6">
+                                                            <TextBlock Classes="ioFlowFieldLabel" Text="Delayed ON" />
+                                                            <ToggleSwitch IsChecked="{Binding Channel.IsDelayedOnEnabled, Mode=TwoWay}" OffContent="Off" OnContent="On" ToolTip.Tip="Wait for the selected time after the input turns on before enabling the output." />
+                                                            <ComboBox IsVisible="{Binding IsDelayedOnTimingEnabled}" SelectedIndex="{Binding Channel.DelayedOnTimeUnitIndex, Mode=TwoWay}" ToolTip.Tip="Choose the units used for the delayed ON duration slider.">
+                                                                <ComboBoxItem Content="ms" />
+                                                                <ComboBoxItem Content="s" />
+                                                                <ComboBoxItem Content="min" />
+                                                            </ComboBox>
+                                                            <Grid Classes="sliderWithValue" IsVisible="{Binding IsDelayedOnTimingEnabled}" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                                <Slider Minimum="{Binding Channel.DelayedOnSliderMinimum}" Maximum="{Binding Channel.DelayedOnSliderMaximum}" TickFrequency="{Binding Channel.DelayedOnSliderTickFrequency}" Value="{Binding Channel.DelayedOnSliderValue, Mode=TwoWay}" ToolTip.Tip="Set how long to wait before turning the output on once delayed ON is enabled." />
+                                                                <controls:SliderValueEditor Text="{Binding Channel.DelayedOnSliderText}" />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Classes="settingGroup" Grid.Row="1" Grid.Column="1">
+                                                        <StackPanel Spacing="6">
+                                                            <TextBlock Classes="ioFlowFieldLabel" Text="Delayed OFF" />
+                                                            <ToggleSwitch IsChecked="{Binding Channel.IsDelayedOffEnabled, Mode=TwoWay}" OffContent="Off" OnContent="On" ToolTip.Tip="Keep the output on for the selected time after the delayed OFF start condition occurs." />
+                                                            <ComboBox IsVisible="{Binding IsDelayedOffTimingEnabled}" SelectedIndex="{Binding Channel.DelayedOffTimeUnitIndex, Mode=TwoWay}" ToolTip.Tip="Choose the units used for the delayed OFF duration slider.">
+                                                                <ComboBoxItem Content="ms" />
+                                                                <ComboBoxItem Content="s" />
+                                                                <ComboBoxItem Content="min" />
+                                                            </ComboBox>
+                                                            <Grid Classes="sliderWithValue" IsVisible="{Binding IsDelayedOffTimingEnabled}" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                                <Slider Minimum="{Binding Channel.DelayedOffSliderMinimum}" Maximum="{Binding Channel.DelayedOffSliderMaximum}" TickFrequency="{Binding Channel.DelayedOffSliderTickFrequency}" Value="{Binding Channel.DelayedOffSliderValue, Mode=TwoWay}" ToolTip.Tip="Set how long to keep the output on before turning it off once delayed OFF is triggered." />
+                                                                <controls:SliderValueEditor Text="{Binding Channel.DelayedOffSliderText}" />
+                                                            </Grid>
+                                                            <TextBlock IsVisible="{Binding IsDelayedOffTimingEnabled}" Classes="ioFlowFieldLabel" Text="Delayed OFF trigger" />
+                                                            <ToggleSwitch IsVisible="{Binding IsDelayedOffTimingEnabled}" IsChecked="{Binding Channel.DelayedOffUsesAssignedInputTrigger, Mode=TwoWay}" OffContent="Ignition" OnContent="Assigned input" ToolTip.Tip="Select what starts the delayed OFF timer: Ignition off starts the timer when IGN turns off. Assigned input starts the timer when the configured input turns off." />
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Classes="settingGroup" Grid.Row="2" Grid.Column="0">
+                                                        <StackPanel Spacing="6">
+                                                            <TextBlock Classes="ioFlowFieldLabel" Text="Soft start" />
+                                                            <ToggleSwitch IsChecked="{Binding Channel.SoftStartEnabled, Mode=TwoWay}" OffContent="Off" OnContent="On" ToolTip.Tip="Ramp the output up from 0 to its target duty when the channel turns on." />
+                                                            <Grid Classes="sliderWithValue" IsVisible="{Binding IsSoftStartTimingEnabled}" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                                <Slider Minimum="0" Maximum="5" TickFrequency="0.1" Value="{Binding SoftStartTimeValue, Mode=TwoWay}" ToolTip.Tip="Duration of the soft-start ramp in seconds." />
+                                                                <controls:SliderValueEditor Text="{Binding SoftStartTimeValue, StringFormat='{}{0:F1} s'}" />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Classes="settingGroup" Grid.Row="2" Grid.Column="1">
+                                                        <StackPanel Spacing="6">
+                                                            <TextBlock Classes="ioFlowFieldLabel" Text="Soft stop" />
+                                                            <ToggleSwitch IsChecked="{Binding Channel.SoftStopEnabled, Mode=TwoWay}" OffContent="Off" OnContent="On" ToolTip.Tip="Ramp the output down instead of turning it off immediately when the channel is disabled." />
+                                                            <Grid Classes="sliderWithValue" IsVisible="{Binding IsSoftStopTimingEnabled}" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                                <Slider Minimum="0" Maximum="5" TickFrequency="0.1" Value="{Binding SoftStopTimeValue, Mode=TwoWay}" ToolTip.Tip="Duration of the soft-stop ramp in seconds." />
+                                                                <controls:SliderValueEditor Text="{Binding SoftStopTimeValue, StringFormat='{}{0:F1} s'}" />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
                                                 </Grid>
                                             </TabItem>
                                         </TabControl>
                                     </Border>
+                                    </StackPanel>
                                 </StackPanel>
                             </Border>
                         </DataTemplate>
 
+                        <DataTemplate x:DataType="io:MathSourceNodeViewModel">
+                            <Border Classes="ioFlowNode" Width="340" BorderBrush="{Binding BorderHex}" BorderThickness="{Binding BorderThickness}">
+                                <StackPanel Spacing="8">
+                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                        <TextBlock FontSize="16" FontWeight="Bold" Text="{Binding Title}" TextWrapping="Wrap" />
+                                        <controls:IoFlowConnector Grid.Column="1" Classes="ioFlowConnector" IsEnabled="{Binding $parent[Border].DataContext.IsAvailable}" DataContext="{Binding OutputConnector}" WireAnchor="{Binding Anchor, Mode=OneWayToSource}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+                                    </Grid>
+                                    <TextBlock Classes="ioFlowFieldLabel" Text="{Binding SourceDescription}" TextWrapping="Wrap" />
+                                    <TextBlock Classes="ioFlowFieldLabel" Text="Source assignment" />
+                                    <ComboBox Classes="nodeSourceSelector" ItemsSource="{Binding AvailableSources}" DisplayMemberBinding="{Binding Label}" SelectedItem="{Binding SelectedSource, Mode=TwoWay}" ToolTip.Tip="Select the decoded CAN RX signal or system value. Connected operands follow this node." />
+                                    <TextBlock FontSize="16" Text="{Binding LiveValueText}" TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
                         <DataTemplate x:DataType="io:MathRuleNodeViewModel">
-                            <Border Classes="ioFlowNode" BorderBrush="{Binding BorderHex}" BorderThickness="{Binding BorderThickness}">
+                            <Border Classes="ioFlowNode" Width="340" BorderBrush="{Binding BorderHex}" BorderThickness="{Binding BorderThickness}">
                                 <StackPanel Spacing="6">
                                     <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
-                                        <ncon:Connector Grid.Column="0" Classes="ioFlowConnector" DataContext="{Binding InputConnector}" Anchor="{Binding Anchor, Mode=TwoWay}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
                                         <TextBlock Grid.Column="1" FontSize="16" FontWeight="Bold" Text="{Binding Title}" />
-                                        <ncon:Connector Grid.Column="2" Classes="ioFlowConnector" DataContext="{Binding OutputConnector}" Anchor="{Binding Anchor, Mode=TwoWay}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+                                        <controls:IoFlowConnector Grid.Column="2" Classes="ioFlowConnector" DataContext="{Binding OutputConnector}" WireAnchor="{Binding Anchor, Mode=OneWayToSource}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
                                     </Grid>
+                                    <Border Padding="10" MinHeight="80" CornerRadius="6" BorderBrush="#554B627A" BorderThickness="1" Background="#1A000000">
+                                        <StackPanel Spacing="6">
+                                            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+                                                <controls:IoFlowConnector Classes="ioFlowConnector mathOperandA" DataContext="{Binding OperandAConnector}" WireAnchor="{Binding Anchor, Mode=OneWayToSource}" IsConnected="{Binding IsConnected, Mode=TwoWay}" ToolTip.Tip="Wire a source to operand A. Reconnecting replaces only operand A." />
+                                                <TextBlock Grid.Column="1" FontSize="14" Foreground="#FFD0C3E8" Text="Operand A - live value" />
+                                            </Grid>
+                                            <TextBlock Classes="mathLiveValue" FontSize="16" FontWeight="SemiBold" Foreground="#FFE9E1F8" Text="{Binding LiveOperandAText}" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Border IsVisible="{Binding ShowOperandB}" Padding="10" MinHeight="80" CornerRadius="6" BorderBrush="#554B627A" BorderThickness="1" Background="#1A000000">
+                                        <StackPanel Spacing="6">
+                                            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+                                                <controls:IoFlowConnector Classes="ioFlowConnector mathOperandB" DataContext="{Binding OperandBConnector}" WireAnchor="{Binding Anchor, Mode=OneWayToSource}" IsConnected="{Binding IsConnected, Mode=TwoWay}" ToolTip.Tip="Wire a source to operand B. Reconnecting replaces only operand B." />
+                                                <TextBlock Grid.Column="1" FontSize="14" Foreground="#FFD0C3E8" Text="Operand B - live value" />
+                                            </Grid>
+                                            <TextBlock Classes="mathLiveValue" FontSize="16" FontWeight="SemiBold" Foreground="#FFE9E1F8" Text="{Binding LiveOperandBText}" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Classes="mathRuleResult" Padding="10" MinHeight="80" CornerRadius="6" BorderThickness="1">
+                                        <StackPanel Spacing="6">
+                                            <TextBlock FontSize="14" Foreground="#FFD0C3E8" Text="Rule result" />
+                                            <TextBlock Classes="mathLiveValue" FontSize="18" FontWeight="SemiBold" Foreground="#FFE9E1F8" Text="{Binding LiveRuleResultText}" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Padding="10" MinHeight="100" CornerRadius="6" BorderBrush="#554B627A" BorderThickness="1" Background="#1A000000">
+                                        <StackPanel Spacing="6">
+                                            <TextBlock FontSize="14" Foreground="#FFD0C3E8" Text="Output / rule usage" />
+                                            <TextBlock FontSize="15" Foreground="#FFE9E1F8" Text="{Binding LiveResultText}" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </Border>
                                     <TextBlock Classes="ioFlowFieldLabel" Text="Operation" />
                                     <ComboBox ItemsSource="{Binding $parent[UserControl].DataContext.MathOperations}" SelectedIndex="{Binding Rule.Operation, Mode=TwoWay}" ToolTip.Tip="Select the logic or arithmetic operation this rule will perform." />
-                                    <TextBlock Classes="ioFlowFieldLabel" Text="Operand A type" />
-                                    <ComboBox ItemsSource="{Binding $parent[UserControl].DataContext.MathOperandTypes}" SelectedIndex="{Binding Rule.OperandAType, Mode=TwoWay}" ToolTip.Tip="Choose whether operand A comes from a constant, output channel, analogue input, system value, or another rule." />
-                                    <TextBlock IsVisible="{Binding ShowOperandAIndex}" Classes="ioFlowFieldLabel" Text="Operand A index" />
-                                    <ComboBox IsVisible="{Binding ShowOperandAIndex}" ItemsSource="{Binding OperandAIndexOptions}" DisplayMemberBinding="{Binding Label}" SelectedItem="{Binding SelectedOperandAIndexOption, Mode=TwoWay}" ToolTip.Tip="Choose the specific source used for operand A." />
+                                    <TextBlock Classes="ioFlowFieldLabel" IsVisible="{Binding SupportsHysteresis}" Text="Hysteresis" />
+                                    <ToggleSwitch Classes="mathHysteresis" IsVisible="{Binding SupportsHysteresis}" IsChecked="{Binding Rule.IsHysteresisEnabled, Mode=TwoWay}" OffContent="Disabled" OnContent="Enabled" ToolTip.Tip="Use separate ON and OFF thresholds for comparison rules to reduce chatter." />
+                                    <Grid ColumnDefinitions="*,*" ColumnSpacing="8" RowDefinitions="Auto,Auto" IsVisible="{Binding IsHysteresisConfigurationEnabled}">
+                                        <TextBlock Classes="ioFlowFieldLabel" Text="ON threshold" />
+                                        <TextBlock Grid.Column="1" Classes="ioFlowFieldLabel" Text="OFF threshold" />
+                                        <TextBox Classes="mathOnThreshold" Grid.Row="1" Text="{Binding Rule.OnThreshold, Mode=TwoWay}" />
+                                        <TextBox Classes="mathOffThreshold" Grid.Row="1" Grid.Column="1" Text="{Binding Rule.OffThreshold, Mode=TwoWay}" />
+                                    </Grid>
+                                    <TextBlock Classes="ioFlowFieldLabel" Text="Operand A source" />
+                                    <ComboBox Classes="mathOperandASource" ItemsSource="{Binding ConnectedSourceOptions}" DisplayMemberBinding="{Binding Label}" SelectedItem="{Binding SelectedOperandASource, Mode=TwoWay}" ToolTip.Tip="Choose a connected source or a constant. Wire other sources to the A/B connectors to use them." />
                                     <TextBlock IsVisible="{Binding ShowOperandAConstant}" Classes="ioFlowFieldLabel" Text="Operand A constant" />
                                     <TextBox IsVisible="{Binding ShowOperandAConstant}" Text="{Binding Rule.OperandAConstant, Mode=TwoWay}" ToolTip.Tip="Numeric constant used for operand A." />
-                                    <TextBlock IsVisible="{Binding ShowOperandB}" Classes="ioFlowFieldLabel" Text="Operand B type" />
-                                    <ComboBox IsVisible="{Binding ShowOperandB}" ItemsSource="{Binding $parent[UserControl].DataContext.MathOperandTypes}" SelectedIndex="{Binding Rule.OperandBType, Mode=TwoWay}" ToolTip.Tip="Choose whether operand B comes from a constant, output channel, analogue input, system value, or another rule." />
-                                    <TextBlock IsVisible="{Binding ShowOperandBIndex}" Classes="ioFlowFieldLabel" Text="Operand B index" />
-                                    <ComboBox IsVisible="{Binding ShowOperandBIndex}" ItemsSource="{Binding OperandBIndexOptions}" DisplayMemberBinding="{Binding Label}" SelectedItem="{Binding SelectedOperandBIndexOption, Mode=TwoWay}" ToolTip.Tip="Choose the specific source used for operand B." />
+                                    <TextBlock IsVisible="{Binding ShowOperandB}" Classes="ioFlowFieldLabel" Text="Operand B source" />
+                                    <ComboBox Classes="mathOperandBSource" IsVisible="{Binding ShowOperandB}" ItemsSource="{Binding ConnectedSourceOptions}" DisplayMemberBinding="{Binding Label}" SelectedItem="{Binding SelectedOperandBSource, Mode=TwoWay}" ToolTip.Tip="Choose a connected source or a constant. Reassigning B does not change A." />
                                     <TextBlock IsVisible="{Binding ShowOperandBConstant}" Classes="ioFlowFieldLabel" Text="Operand B constant" />
                                     <TextBox IsVisible="{Binding ShowOperandBConstant}" Text="{Binding Rule.OperandBConstant, Mode=TwoWay}" ToolTip.Tip="Numeric constant used for operand B." />
                                 </StackPanel>
@@ -439,6 +811,8 @@
                     </nodify:NodifyEditor.DataTemplates>
                 </nodify:NodifyEditor>
             </Grid>
+        </Border>
+          </Grid>
         </Border>
     </Grid>
 </UserControl>

@@ -1,9 +1,34 @@
 using CommunityToolkit.Mvvm.ComponentModel;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Text.Json.Serialization;
 
 namespace Cortex.Models
 {
+    public static class CustomCanBitLayout
+    {
+        /// <summary>
+        /// Walks Intel or Motorola sawtooth bit positions, stopping at the 64-bit frame boundary.
+        /// </summary>
+        public static IReadOnlyList<int> GetOccupiedBits(int startBit, int bitLength, bool isMotorola)
+        {
+            List<int> bits = new();
+            int bit = startBit;
+            for (int i = 0; i < bitLength; i++)
+            {
+                if (bit < 0 || bit >= 64)
+                {
+                    break;
+                }
+
+                bits.Add(bit);
+                bit = isMotorola ? ((bit % 8 == 0) ? bit + 15 : bit - 1) : bit + 1;
+            }
+
+            return bits;
+        }
+    }
+
     public enum CustomCanStatus : byte
     {
         Valid = 0,

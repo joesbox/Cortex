@@ -27,7 +27,7 @@ public sealed class CanTxNodeViewModel : IoFlowNodeViewModel
         Avalonia.Point location,
         IReadOnlyList<CustomCanMessage> availableMessages,
         Action<CanTxNodeViewModel, int, int>? messageSelectionChangedAction)
-        : base(BuildTitle(message), location, ConnectorPinPalette.OutputCanPwm)
+        : base(BuildTitle(message), location, IoFlowNodePalette.CanTx)
     {
         _message = message;
         _availableMessages = availableMessages;
@@ -61,7 +61,6 @@ public sealed class CanTxNodeViewModel : IoFlowNodeViewModel
 
             _editIsPeriodic = value;
             OnPropertyChanged(nameof(EditIsPeriodic));
-            OnPropertyChanged(nameof(EditTimeoutLabel));
         }
     }
 
@@ -80,7 +79,9 @@ public sealed class CanTxNodeViewModel : IoFlowNodeViewModel
         }
     }
 
-    public string EditTimeoutLabel => "Timeout / Period (ms)";
+    public int PeriodMinimum => Constants.CUSTOM_CAN_TX_PERIOD_MIN_MS;
+    public int PeriodMaximum => Constants.CUSTOM_CAN_TX_PERIOD_MAX_MS;
+    public int PeriodStep => Constants.CUSTOM_CAN_TX_PERIOD_STEP_MS;
 
     public string ValidationMessage
     {

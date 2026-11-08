@@ -1,23 +1,47 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
+using Avalonia.Data;
+using Avalonia.Data.Converters;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
+using Avalonia.Media;
+using Avalonia.VisualTree;
+using CommunityToolkit.Mvvm.Input;
 using Cortex.ViewModels;
+using Cortex.ViewModels.IoFlow;
 using Nodify.Avalonia;
 using Nodify.Avalonia.Connections;
+using System;
+using System.Linq;
+using Avalonia.Threading;
 
 namespace Cortex.Views
 {
     public partial class IoFlowTabView : UserControl
     {
+        public static FuncMultiValueConverter<object, BoxShadows> NodeSelectionShadowConverter { get; } = new(values =>
+        {
+            var inputs = values.ToArray();
+            if (inputs.Length != 2 || inputs[0] is not double zoom || inputs[1] is not string borderHex)
+                return default;
+            Color color = Color.Parse(borderHex);
+            // Zero spread preserves the rounded silhouette; blur fades the glow in screen space.
+            return new BoxShadows(
+                new BoxShadow { Blur = 16 / zoom, Color = Color.FromArgb(255, color.R, color.G, color.B) },
+                [new BoxShadow { Blur = 36 / zoom, Color = Color.FromArgb(170, color.R, color.G, color.B) }]);
+        });
+
         private Border? _ioFlowSurfaceBorder;
         private ItemContainer? _dragSuppressedContainer;
+        private readonly Button? _undoButton;
 
         public IoFlowTabView()
         {
             AvaloniaXamlLoader.Load(this);
 
+            _undoButton = this.FindControl<Button>("IoFlowUndoButton");
             _ioFlowSurfaceBorder = this.FindControl<Border>("IoFlowSurfaceBorder");
             var editor = this.FindControl<Control>("IoFlowEditor");
             editor?.AddHandler(
@@ -35,6 +59,103 @@ namespace Cortex.Views
                 OnIoFlowEditorPointerCaptureLost,
                 RoutingStrategies.Tunnel,
                 handledEventsToo: true);
+            AttachedToVisualTree += (_, _) => NotifyIoFlowVisibility();
+            DetachedFromVisualTree += (_, _) => NotifyIoFlowVisibility(false);
+        }
+
+        protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
+        {
+            base.OnPropertyChanged(change);
+            if (change.Property == IsVisibleProperty || change.Property == DataContextProperty)
+            {
+                NotifyIoFlowVisibility();
+            }
+        }
+
+        private void NotifyIoFlowVisibility(bool? visibilityOverride = null)
+        {
+            if (DataContext is MainWindowViewModel viewModel)
+            {
+                viewModel.SetIoFlowTabVisible(visibilityOverride ?? (IsVisible && this.GetVisualRoot() != null));
+            }
+        }
+
+        private void OnRenameCanvasClick(object? sender, RoutedEventArgs e)
+        {
+            if (sender is MenuItem { Tag: TextBox editor } && editor.DataContext is IoFlowCanvasViewModel canvas)
+            {
+                editor.Text = canvas.Name;
+                editor.IsVisible = true;
+                if (editor.Parent is Grid header)
+                    header.Children.OfType<TextBlock>().Single().IsVisible = false;
+                Dispatcher.UIThread.Post(() =>
+                {
+                    if (editor.IsVisible)
+                    {
+                        editor.Focus();
+                        editor.SelectAll();
+                    }
+
+                });
+            }
+        }
+
+        private void OnCanvasNameKeyDown(object? sender, KeyEventArgs e)
+        {
+            if (sender is TextBox editor && e.Key is Key.Enter or Key.Escape)
+            {
+                FinishCanvasRename(editor, commit: e.Key == Key.Enter);
+                this.FindControl<TabStrip>("IoFlowCanvasTabs")?.Focus();
+                e.Handled = true;
+            }
+        }
+
+        private void OnCanvasNameLostFocus(object? sender, RoutedEventArgs e)
+        {
+            if (sender is TextBox editor)
+                FinishCanvasRename(editor, commit: true);
+        }
+
+        private static void FinishCanvasRename(TextBox editor, bool commit)
+        {
+            if (!editor.IsVisible)
+                return;
+            if (commit && editor.DataContext is IoFlowCanvasViewModel canvas)
+                canvas.Name = string.IsNullOrWhiteSpace(editor.Text) ? canvas.Name : editor.Text.Trim();
+            editor.IsVisible = false;
+            if (editor.Parent is Grid header)
+                header.Children.OfType<TextBlock>().Single().IsVisible = true;
+        }
+
+        private void OnIoFlowContainerPrepared(object? sender, ContainerPreparedEventArgs e)
+        {
+            if (e.Container is ItemContainer container)
+            {
+                // Nodify writes local Location values during drags, which override theme bindings.
+                container.Bind(ItemContainer.LocationProperty, new Binding(nameof(IoFlowNodeViewModel.Location))
+                {
+                    Mode = BindingMode.TwoWay,
+                });
+                container.SizeChanged += OnIoFlowContainerSizeChanged;
+            }
+        }
+
+        private void OnIoFlowContainerClearing(object? sender, ContainerClearingEventArgs e)
+        {
+            if (e.Container is ItemContainer container)
+            {
+                container.SizeChanged -= OnIoFlowContainerSizeChanged;
+                BindingOperations.GetBindingExpressionBase(container, ItemContainer.LocationProperty)?.Dispose();
+                container.ClearValue(ItemContainer.LocationProperty);
+            }
+        }
+
+        private static void OnIoFlowContainerSizeChanged(object? sender, SizeChangedEventArgs e)
+        {
+            if (sender is ItemContainer { DataContext: IoFlowNodeViewModel node })
+            {
+                node.MeasuredSize = e.NewSize;
+            }
         }
 
         private void OnIoFlowEditorPointerPressed(object? sender, PointerPressedEventArgs e)
@@ -44,6 +165,14 @@ namespace Cortex.Views
             if (properties.PointerUpdateKind == PointerUpdateKind.LeftButtonPressed)
             {
                 SuppressDragForInteractiveControlPress(e.Source as StyledElement);
+                if (e.KeyModifiers == KeyModifiers.None
+                    && FindAncestor<ItemContainer>(e.Source as StyledElement) == null
+                    && FindAncestor<Connection>(e.Source as StyledElement) == null
+                    && FindAncestor<Connector>(e.Source as StyledElement) == null
+                    && DataContext is MainWindowViewModel selectionViewModel)
+                {
+                    selectionViewModel.IoFlowGraph.ClearSelection();
+                }
             }
 
             if (_ioFlowSurfaceBorder?.ContextMenu == null)
@@ -56,6 +185,11 @@ namespace Cortex.Views
                 return;
             }
 
+            if (FindAncestor<Connection>(e.Source as StyledElement) != null)
+            {
+                return;
+            }
+
             if (_ioFlowSurfaceBorder.ContextMenu.IsOpen)
             {
                 return;
@@ -63,6 +197,26 @@ namespace Cortex.Views
 
             if (DataContext is MainWindowViewModel viewModel && sender is NodifyEditor editor)
             {
+                var graph = viewModel.IoFlowGraph;
+                if (FindAncestor<ItemContainer>(e.Source as StyledElement) is { DataContext: IoFlowNodeViewModel node }
+                    && !graph.SelectedNodes.Contains(node))
+                {
+                    graph.ClearSelection();
+                    graph.SelectedNodes.Add(node);
+                }
+                if (this.FindControl<MenuItem>("IoFlowMoveToCanvasMenu") is { } moveMenu)
+                {
+                    moveMenu.Items.Clear();
+                    foreach (var canvas in graph.Canvases)
+                        moveMenu.Items.Add(new MenuItem
+                        {
+                            Header = canvas.Name,
+                            IsEnabled = graph.SelectedNodes.Count > 0 && canvas != graph.SelectedCanvas,
+                            Command = graph.MoveSelectedNodesToCanvasCommand,
+                            CommandParameter = canvas,
+                        });
+                    moveMenu.IsEnabled = graph.SelectedNodes.Count > 0 && graph.Canvases.Count > 1;
+                }
                 double viewportZoom = editor.ViewportZoom > 0 ? editor.ViewportZoom : 1;
                 Point spawnPoint = editor.MouseLocation;
                 Point viewportOrigin = editor.ViewportLocation;
@@ -120,7 +274,7 @@ namespace Cortex.Views
         {
             for (StyledElement? current = source; current != null; current = current.Parent)
             {
-                if (current is ComboBox or TextBox or ToggleSwitch or Expander)
+                if (current is ComboBox or TextBox or ToggleSwitch or Expander or Cortex.Controls.SliderValueEditor)
                 {
                     return true;
                 }
@@ -144,12 +298,55 @@ namespace Cortex.Views
             if (DataContext is MainWindowViewModel mainViewModel)
             {
                 mainViewModel.IoFlowGraph.SelectConnectionCommand.Execute(connection.DataContext);
+                PointerPointProperties properties = e.GetCurrentPoint(connection).Properties;
+                if (properties.IsLeftButtonPressed)
+                {
+                    this.FindControl<NodifyEditor>("IoFlowEditor")?.Focus();
+                    e.Handled = true;
+                }
+                else if (properties.IsRightButtonPressed && connection.ContextMenu is { } menu)
+                {
+                    menu.Open(connection);
+                    e.Handled = true;
+                }
             }
         }
 
-        private void OnIoFlowEditorKeyDown(object? sender, KeyEventArgs e)
+        private static void OnConnectionPointerEntered(object? sender, PointerEventArgs e)
         {
-            if (e.Key != Key.Delete || DataContext is not MainWindowViewModel mainViewModel)
+            if (sender is Connection { DataContext: IoFlowConnectionViewModel connection })
+            {
+                connection.IsHovered = true;
+            }
+        }
+
+        private static void OnConnectionPointerExited(object? sender, PointerEventArgs e)
+        {
+            if (sender is Connection { DataContext: IoFlowConnectionViewModel connection })
+            {
+                connection.IsHovered = false;
+            }
+        }
+
+        private async void OnIoFlowUndoKeyDown(object? sender, KeyEventArgs e)
+        {
+            if (e.Key != Key.Z || e.KeyModifiers != KeyModifiers.Control ||
+                FindAncestor<TextBox>(e.Source as StyledElement) != null)
+            {
+                return;
+            }
+
+            if (_undoButton?.Command is IAsyncRelayCommand command && command.CanExecute(null))
+            {
+                e.Handled = true;
+                await command.ExecuteAsync(null);
+            }
+        }
+
+        private async void OnIoFlowEditorKeyDown(object? sender, KeyEventArgs e)
+        {
+            if (e.Key != Key.Delete || DataContext is not MainWindowViewModel mainViewModel ||
+                FindAncestor<TextBox>(e.Source as StyledElement) != null)
             {
                 return;
             }
@@ -163,8 +360,8 @@ namespace Cortex.Views
 
             if (mainViewModel.IoFlowGraph.SelectedConnection != null && mainViewModel.IoFlowGraph.RemoveSelectedConnectionCommand.CanExecute(null))
             {
-                mainViewModel.IoFlowGraph.RemoveSelectedConnectionCommand.Execute(null);
                 e.Handled = true;
+                await mainViewModel.IoFlowGraph.RemoveSelectedConnectionCommand.ExecuteAsync(null);
             }
         }
 

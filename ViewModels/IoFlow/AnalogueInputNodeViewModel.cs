@@ -34,7 +34,19 @@ public sealed partial class AnalogueInputNodeViewModel : IoFlowNodeViewModel
         _liveValueText = "-";
     }
 
-    public AnalogueInput Input { get; }
+    public AnalogueInput Input { get; private set; }
+
+    public void AssignInput(AnalogueInput input)
+    {
+        Input.PropertyChanged -= OnInputPropertyChanged;
+        Input = input;
+        Input.PropertyChanged += OnInputPropertyChanged;
+        Title = $"Analogue Input {input.InputNumber}";
+        OnPropertyChanged(nameof(Input));
+        OnPropertyChanged(nameof(InputNumber));
+        OnPropertyChanged(nameof(FilteredAnalogueUnits));
+        UpdateLiveState(null);
+    }
 
     public int InputNumber => Input.InputNumber;
 
@@ -57,11 +69,11 @@ public sealed partial class AnalogueInputNodeViewModel : IoFlowNodeViewModel
     public void UpdateLiveState(AnalogueInput? liveInput)
     {
         LiveVoltageText = liveInput?.InputVoltage is float voltage
-            ? $"{voltage.ToString("F2", CultureInfo.InvariantCulture)} V"
+            ? $"{voltage.ToString("F1", CultureInfo.InvariantCulture)} V"
             : "-";
 
         LiveValueText = liveInput?.InputValue is float value
-            ? value.ToString("F2", CultureInfo.InvariantCulture)
+            ? value.ToString("F1", CultureInfo.InvariantCulture)
             : "-";
     }
 

@@ -38,7 +38,7 @@ namespace Cortex.Models
         public void SetCurrentValue(double? value)
         {
             string nextValue = value.HasValue
-                ? value.Value.ToString("F2", CultureInfo.InvariantCulture)
+                ? value.Value.ToString("F1", CultureInfo.InvariantCulture)
                 : "--";
 
             if (string.Equals(_currentValueText, nextValue, StringComparison.Ordinal))

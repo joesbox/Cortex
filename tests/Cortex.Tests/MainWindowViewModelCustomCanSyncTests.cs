@@ -1103,6 +1103,346 @@ public class MainWindowViewModelCustomCanSyncTests
         await InvokeNonPublicTaskMethod(viewModel, "ImportSelectedDbcSignalToController");
     }
 
+    [Theory]
+    [InlineData(8, 0x01)]
+    [InlineData(8, 0x05)]
+    [InlineData(8, 0x0D)]
+    [InlineData(6, 0x0D)]
+    [InlineData(8, 0x0C)]
+    public async Task DbcImport_AdditionalSignalReusesFrameAndPreservesSettings(byte dlc, byte flags)
+    {
+        MainWindowViewModel viewModel = CreateViewModel();
+        try
+        {
+            var initial = Enumerable.Range(0, 4)
+                .Select(index => DbcSignal($"Signal{index}", (byte)(index * 8)))
+                .ToArray();
+            await ImportAsync(viewModel, initial);
+            CustomCanMessage message = Assert.Single(viewModel.ControllerCustomCanMessages);
+            message.Dlc = dlc;
+            message.Flags = flags;
+            message.TimeoutMs = 750;
+            message.TxTrigger = 2;
+
+            await ImportAsync(viewModel, DbcSignal("Additional", 32));
+
+            Assert.Same(message, Assert.Single(viewModel.ControllerCustomCanMessages));
+            Assert.Equal(5, message.SignalCount);
+            Assert.All(viewModel.ControllerCustomCanSignals, signal => Assert.Same(message, signal.OwnerMessage));
+            Assert.Equal(dlc, message.Dlc);
+            Assert.Equal(flags, message.Flags);
+            Assert.Equal(750, message.TimeoutMs);
+            Assert.Equal(2, message.TxTrigger);
+        }
+        finally
+        {
+            StopUiUpdateTimer(viewModel);
+        }
+    }
+
+    [Theory]
+    [InlineData(0, 8, false, 4, 8, false)]
+    [InlineData(0, 2, true, 8, 8, false)]
+    [InlineData(8, 8, false, 0, 2, true)]
+    public async Task DbcImport_OverlappingSignalIsRejectedWithoutChangingFrame(
+        byte start, byte length, bool motorola, byte newStart, byte newLength, bool newMotorola)
+    {
+        MainWindowViewModel viewModel = CreateViewModel();
+        try
+        {
+            await ImportAsync(viewModel, DbcSignal("Existing", start, length, motorola));
+            CustomCanMessage message = Assert.Single(viewModel.ControllerCustomCanMessages);
+            message.TimeoutMs = 750;
+
+            await ImportAsync(viewModel, DbcSignal("Overlap", newStart, newLength, newMotorola));
+
+            Assert.Single(viewModel.ControllerCustomCanMessages);
+            Assert.Equal("Existing", Assert.Single(viewModel.ControllerCustomCanSignals).Name);
+            Assert.Equal(750, message.TimeoutMs);
+            Assert.Contains("overlaps", viewModel.CustomCanStatusMessage);
+            Assert.Contains("Existing", viewModel.CustomCanStatusMessage);
+            Assert.Contains("0x97", viewModel.CustomCanStatusMessage);
+        }
+        finally
+        {
+            StopUiUpdateTimer(viewModel);
+        }
+    }
+
+    [Fact]
+    public async Task DbcImport_DeletedSignalBitsAreAvailable()
+    {
+        MainWindowViewModel viewModel = CreateViewModel();
+        try
+        {
+            await ImportAsync(viewModel, DbcSignal("Existing", 0), DbcSignal("Deleted", 8));
+            CustomCanMessage message = Assert.Single(viewModel.ControllerCustomCanMessages);
+            viewModel.ControllerCustomCanSignals.Single(signal => signal.Name == "Deleted").IsEnabled = false;
+
+            await ImportAsync(viewModel, DbcSignal("Replacement", 8));
+
+            Assert.Same(message, Assert.Single(viewModel.ControllerCustomCanMessages));
+            Assert.Equal(2, message.SignalCount);
+            Assert.Contains(viewModel.ControllerCustomCanSignals, signal => signal.Name == "Replacement");
+        }
+        finally
+        {
+            StopUiUpdateTimer(viewModel);
+        }
+    }
+
+    [Fact]
+    public async Task DbcImport_DifferentNamedFrameWithSameIdIsRejected()
+    {
+        MainWindowViewModel viewModel = CreateViewModel();
+        try
+        {
+            await ImportAsync(viewModel, DbcSignal("Existing", 0));
+            var different = DbcSignal("Additional", 8);
+            different.MessageName = "OtherFrame";
+
+            await ImportAsync(viewModel, different);
+
+            Assert.Single(viewModel.ControllerCustomCanSignals);
+            Assert.Equal("BMS", Assert.Single(viewModel.ControllerCustomCanMessages).Name);
+            Assert.Contains("name", viewModel.CustomCanStatusMessage);
+        }
+        finally
+        {
+            StopUiUpdateTimer(viewModel);
+        }
+    }
+
+    [Fact]
+    public async Task DbcImport_StandardAndExtendedFramesWithSameIdRemainSeparate()
+    {
+        MainWindowViewModel viewModel = CreateViewModel();
+        try
+        {
+            var extended = DbcSignal("Extended", 0);
+            extended.IsExtended = true;
+            await ImportAsync(viewModel, DbcSignal("Standard", 0), extended);
+            Assert.Equal(2, viewModel.ControllerCustomCanMessages.Count);
+
+            extended = DbcSignal("Additional", 8);
+            extended.IsExtended = true;
+            await ImportAsync(viewModel, extended);
+
+            Assert.Equal(2, viewModel.ControllerCustomCanMessages.Count);
+            Assert.Equal(2, viewModel.ControllerCustomCanMessages.Single(message => message.IsExtended).SignalCount);
+            Assert.Equal(1, viewModel.ControllerCustomCanMessages.Single(message => !message.IsExtended).SignalCount);
+        }
+        finally
+        {
+            StopUiUpdateTimer(viewModel);
+        }
+    }
+
+    [Fact]
+    public async Task DbcImport_ReimportingSameSignalKeepsExistingTxValueSource()
+    {
+        MainWindowViewModel viewModel = CreateViewModel();
+        try
+        {
+            var definition = DbcSignal("Existing", 0);
+            await ImportAsync(viewModel, definition);
+            CustomCanSignal signal = Assert.Single(viewModel.ControllerCustomCanSignals);
+            CustomCanMessage message = Assert.Single(viewModel.ControllerCustomCanMessages);
+            message.Flags = 0x0D;
+            message.TxTrigger = 2;
+            signal.ValueSource = 3;
+
+            await ImportAsync(viewModel, definition);
+
+            Assert.Same(signal, Assert.Single(viewModel.ControllerCustomCanSignals));
+            Assert.Same(message, Assert.Single(viewModel.ControllerCustomCanMessages));
+            Assert.Equal(0x0D, message.Flags);
+            Assert.Equal(3, signal.ValueSource);
+        }
+        finally
+        {
+            StopUiUpdateTimer(viewModel);
+        }
+    }
+
+    [Fact]
+    public async Task DbcImport_SignalOutsideExistingDlcIsRejectedInsteadOfCreatingFrame()
+    {
+        MainWindowViewModel viewModel = CreateViewModel();
+        try
+        {
+            await ImportAsync(viewModel, DbcSignal("Existing", 0));
+            CustomCanMessage message = Assert.Single(viewModel.ControllerCustomCanMessages);
+            message.Dlc = 1;
+
+            await ImportAsync(viewModel, DbcSignal("Additional", 8));
+
+            Assert.Single(viewModel.ControllerCustomCanSignals);
+            Assert.Single(viewModel.ControllerCustomCanMessages);
+            Assert.Equal(1, message.Dlc);
+            Assert.Contains("DLC", viewModel.CustomCanStatusMessage);
+        }
+        finally
+        {
+            StopUiUpdateTimer(viewModel);
+        }
+    }
+
+    [Theory]
+    [InlineData(63, 2, false)]
+    [InlineData(56, 2, true)]
+    [InlineData(0, 0, false)]
+    [InlineData(0, 65, false)]
+    public async Task DbcImport_InvalidBitLayoutDoesNotCreateFrame(byte start, byte length, bool motorola)
+    {
+        MainWindowViewModel viewModel = CreateViewModel();
+        try
+        {
+            await ImportAsync(viewModel, DbcSignal("Invalid", start, length, motorola));
+
+            Assert.Empty(viewModel.ControllerCustomCanMessages);
+            Assert.Empty(viewModel.ControllerCustomCanSignals);
+            Assert.Contains("bit layout", viewModel.CustomCanStatusMessage);
+        }
+        finally
+        {
+            StopUiUpdateTimer(viewModel);
+        }
+    }
+
+    [Fact]
+    public async Task DbcImport_PlaceholderFrameNameCanBeRecoveredWithMotorolaLayout()
+    {
+        MainWindowViewModel viewModel = CreateViewModel();
+        try
+        {
+            CustomCanMessage message = viewModel.SettingsDataView.CustomCanMessagesStaticData[0];
+            message.Id = 0x97;
+            message.Name = "Message 1";
+            message.Dlc = 1;
+            message.TimeoutMs = 750;
+            message.Flags = 0x01;
+
+            await ImportAsync(viewModel, DbcSignal("Motorola", 7, 8, true));
+
+            Assert.Same(message, Assert.Single(viewModel.ControllerCustomCanMessages));
+            Assert.Equal("BMS", message.Name);
+            Assert.Equal(1, message.Dlc);
+            Assert.Equal(750, message.TimeoutMs);
+            Assert.True(Assert.Single(viewModel.ControllerCustomCanSignals).IsMotorola);
+        }
+        finally
+        {
+            StopUiUpdateTimer(viewModel);
+        }
+    }
+
+    [Fact]
+    public async Task DbcImport_AmbiguousMatchingFramesAreRejected()
+    {
+        MainWindowViewModel viewModel = CreateViewModel();
+        try
+        {
+            await ImportAsync(viewModel, DbcSignal("Existing", 0));
+            CustomCanMessage first = Assert.Single(viewModel.ControllerCustomCanMessages);
+            first.Flags = 0x05;
+            CustomCanMessage second = viewModel.SettingsDataView.CustomCanMessagesStaticData[1];
+            second.Id = first.Id;
+            second.Dlc = first.Dlc;
+            second.Flags = 0x05;
+            second.Name = first.Name;
+
+            await ImportAsync(viewModel, DbcSignal("Additional", 8));
+
+            Assert.Single(viewModel.ControllerCustomCanSignals);
+            Assert.Contains("multiple stored messages", viewModel.CustomCanStatusMessage);
+        }
+        finally
+        {
+            StopUiUpdateTimer(viewModel);
+        }
+    }
+
+    [Fact]
+    public async Task DbcImport_NewFrameDoesNotOverwriteDisabledFrameWithSignals()
+    {
+        MainWindowViewModel viewModel = CreateViewModel();
+        try
+        {
+            await ImportAsync(viewModel, DbcSignal("Existing", 0));
+            CustomCanMessage existing = Assert.Single(viewModel.ControllerCustomCanMessages);
+            existing.Flags = 0x0C;
+            var newFrame = DbcSignal("New", 0);
+            newFrame.MessageId = 0x98;
+            newFrame.MessageName = "Different";
+
+            await ImportAsync(viewModel, newFrame);
+
+            Assert.Equal(2, viewModel.ControllerCustomCanMessages.Count);
+            Assert.Equal(0x97u, existing.Id);
+            Assert.Equal(0x0C, existing.Flags);
+            Assert.Same(existing, viewModel.ControllerCustomCanSignals.Single(signal => signal.Name == "Existing").OwnerMessage);
+        }
+        finally
+        {
+            StopUiUpdateTimer(viewModel);
+        }
+    }
+
+    [Fact]
+    public async Task DbcImport_AdditionalSignalMatchesLocalNameAfterControllerSnapshot()
+    {
+        MainWindowViewModel viewModel = CreateViewModel();
+        try
+        {
+            await ImportAsync(viewModel, DbcSignal("Existing", 0));
+            DataStructures snapshot = new();
+            CustomCanMessage frame = snapshot.CustomCanMessagesStaticData[0];
+            frame.Id = 0x97;
+            frame.Dlc = 6;
+            frame.TimeoutMs = 750;
+            frame.Flags = 0x0D;
+            frame.TxTrigger = 2;
+            CustomCanSignal signal = snapshot.CustomCanSignalsStaticData[0];
+            signal.Name = "Signal A";
+            signal.MessageName = "Message 1";
+            signal.MessageIndex = 0;
+            signal.StartBit = 0;
+            signal.BitLength = 8;
+            signal.Flags = 0x01;
+            signal.Factor = 1.0f;
+            InvokeUpdateLiveDataInPlace(viewModel, snapshot);
+            Assert.Equal("BMS", Assert.Single(viewModel.ControllerCustomCanMessages).Name);
+
+            await ImportAsync(viewModel, DbcSignal("Additional", 8));
+
+            CustomCanMessage stored = Assert.Single(viewModel.ControllerCustomCanMessages);
+            Assert.Equal(2, stored.SignalCount);
+            Assert.Equal("BMS", stored.Name);
+            Assert.Equal(6, stored.Dlc);
+            Assert.Equal(0x0D, stored.Flags);
+            Assert.Equal(750, stored.TimeoutMs);
+            Assert.Equal(2, stored.TxTrigger);
+        }
+        finally
+        {
+            StopUiUpdateTimer(viewModel);
+        }
+    }
+
+    private static DbcCanSignalDefinition DbcSignal(string name, byte start, byte length = 8, bool motorola = false) =>
+        new()
+        {
+            Name = name,
+            MessageName = "BMS",
+            MessageId = 0x97,
+            Dlc = 8,
+            StartBit = start,
+            BitLength = length,
+            IsMotorola = motorola,
+            Factor = 1.0f,
+        };
+
     [Fact]
     public async Task StoredDirectionScopeSummary_ListsEveryCheckedMessageAndItsSignalCount()
     {

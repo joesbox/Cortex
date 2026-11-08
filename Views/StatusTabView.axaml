@@ -10,6 +10,9 @@
     xmlns:vm="using:Cortex.ViewModels"
     x:DataType="vm:MainWindowViewModel"
     mc:Ignorable="d">
+    <UserControl.Styles>
+        <StyleInclude Source="avares://Cortex/Views/PanelSplitterStyles.axaml" />
+    </UserControl.Styles>
     <UserControl.Resources>
         <converters:OneDecimalConverter x:Key="OneDecimalConverter" />
         <converters:CharArrayToStringConverter x:Key="CharArrayConverter" />
@@ -20,40 +23,13 @@
         <converters:ByteToBackgroundConverter x:Key="ByteToBackgroundConverter" />
         <converters:BoolToOverrideStatusConverter x:Key="BoolToOverrideStatusConverter" />
     </UserControl.Resources>
-    <Grid>
+    <Grid x:Name="LiveDataLayoutGrid">
         <Grid.RowDefinitions>
             <RowDefinition Height="*" MinHeight="300" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="1.4*" />
         </Grid.RowDefinitions>
-        <Grid.Styles>
-            <!--  Style for pointer over  -->
-            <Style Selector="GridSplitter:pointerover">
-                <Setter Property="Background" Value="#2A213B" />
-            </Style>
-
-            <!--  Full template with handle  -->
-            <Style Selector="GridSplitter">
-                <Setter Property="Template">
-                    <ControlTemplate>
-                        <Border Height="5" Background="#30303b">
-                            <!--  Handle: three horizontal bars  -->
-                            <StackPanel
-                                HorizontalAlignment="Center"
-                                VerticalAlignment="Center"
-                                Orientation="Vertical">
-                                <Rectangle
-                                    Width="12"
-                                    Height="2"
-                                    Margin="2,2"
-                                    Fill="#AAAAAA" />
-                            </StackPanel>
-                        </Border>
-                    </ControlTemplate>
-                </Setter>
-            </Style>
-        </Grid.Styles>
-        <Grid ColumnDefinitions="*, 4*">
+        <Grid x:Name="LiveDataTopContainer" ColumnDefinitions="*, 4*">
             <Grid Grid.Row="0" Grid.Column="0">
                 <Border
                     Margin="5"
@@ -563,8 +539,12 @@
                 </Border>
             </Grid>
         </Grid>
-        <GridSplitter Grid.Row="1" ResizeDirection="Rows" />
-        <Grid Grid.Row="2">
+        <GridSplitter x:Name="LiveDataSplitter" Classes="panel-splitter" Grid.Row="1"
+            ResizeDirection="Rows" ResizeBehavior="PreviousAndNext"
+            HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Focusable="True"
+            AutomationProperties.Name="Resize Live Data sections"
+            ToolTip.Tip="Drag to resize the sections, or focus here and use the Up/Down keys. The proportions are saved locally." />
+        <Grid x:Name="LiveDataBottomContainer" Grid.Row="2">
             <Border
                 Margin="5"
                 BorderBrush="#443553"

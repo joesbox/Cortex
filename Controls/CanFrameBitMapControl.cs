@@ -93,22 +93,7 @@ namespace Cortex.Controls
         /// bits outside the 64-bit frame are dropped.
         /// </summary>
         public static IReadOnlyList<int> GetOccupiedBits(int startBit, int bitLength, bool isMotorola)
-        {
-            List<int> bits = new();
-            int bit = startBit;
-            for (int i = 0; i < bitLength; i++)
-            {
-                if (bit < 0 || bit >= Bytes * BitsPerByte)
-                {
-                    break;
-                }
-
-                bits.Add(bit);
-                bit = isMotorola ? ((bit % 8 == 0) ? bit + 15 : bit - 1) : bit + 1;
-            }
-
-            return bits;
-        }
+            => CustomCanBitLayout.GetOccupiedBits(startBit, bitLength, isMotorola);
 
         protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
         {

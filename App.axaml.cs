@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using Avalonia.Threading;
+using Cortex.Controls;
 using Cortex.Services;
 using Cortex.Views;
 using Cortex.ViewModels;
@@ -15,15 +16,19 @@ namespace Cortex;
 
 public partial class App : Application
 {
+        private StationaryToolTipService? _stationaryToolTips;
+
         public override void Initialize()
         {
             AvaloniaXamlLoader.Load(this);
+            _stationaryToolTips = new StationaryToolTipService();
         }
 
         public override void OnFrameworkInitializationCompleted()
         {
             if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
             {
+                desktop.Exit += (_, _) => _stationaryToolTips?.Dispose();
                 // Avoid duplicate validations from both Avalonia and the CommunityToolkit.
                 // More info: https://docs.avaloniaui.net/docs/guides/development-guides/data-validation#manage-validationplugins
                 DisableAvaloniaDataAnnotationValidation();

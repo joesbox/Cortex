@@ -361,7 +361,7 @@ namespace Cortex.Models
                     ? "-"
                     : string.Format(
                         CultureInfo.InvariantCulture,
-                        "{0:0.00} A / {1}%",
+                        "{0:0.0} A / {1}%",
                         _liveChannel.CurrentValue,
                         _liveChannel.PWMSetDuty),
                 ConnectorPinRole.DigitalInput => _liveDigitalInput?.LiveElectricalState switch
@@ -440,13 +440,13 @@ namespace Cortex.Models
             {
                 return string.Format(
                     CultureInfo.InvariantCulture,
-                    "{0:0.00} {1}",
+                    "{0:0.0} {1}",
                     value,
                     FormatAnalogueUnits(_settingsAnalogueInput.Units));
             }
 
             return _liveAnalogueInput.InputVoltage is float voltage
-                ? string.Format(CultureInfo.InvariantCulture, "{0:0.00} V", voltage)
+                ? string.Format(CultureInfo.InvariantCulture, "{0:0.0} V", voltage)
                 : "-";
         }
 

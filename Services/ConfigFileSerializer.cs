@@ -783,6 +783,10 @@ namespace Cortex.Services
 
     public sealed class IoFlowGraphConfigSnapshot
     {
+        public List<IoFlowCanvasConfigSnapshot> Canvases { get; set; } = [];
+
+        public int SelectedCanvasId { get; set; } = 1;
+
         public string ControllerSettingsSignature { get; set; } = string.Empty;
 
         public List<IoFlowNodeConfigSnapshot> Nodes { get; set; } = [];
@@ -794,6 +798,7 @@ namespace Cortex.Services
 
     public sealed class IoFlowNodeConfigSnapshot
     {
+        public int CanvasId { get; set; } = 1;
         public string Kind { get; set; } = string.Empty;
 
         public int Id { get; set; }
@@ -805,6 +810,15 @@ namespace Cortex.Services
         public byte Option { get; set; }
 
         public byte Option2 { get; set; }
+    }
+
+    public sealed class IoFlowCanvasConfigSnapshot
+    {
+        public int Id { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public double ViewportX { get; set; }
+        public double ViewportY { get; set; }
+        public double ViewportZoom { get; set; } = 1;
     }
 
     public sealed class IoFlowStandaloneLogicRuleConfigSnapshot

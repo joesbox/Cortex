@@ -11,6 +11,7 @@ namespace Cortex.Views
         public SettingsTabView()
         {
             AvaloniaXamlLoader.Load(this);
+            this.FindControl<TabControl>("SettingsTabs")!.SelectedItem = this.FindControl<TabItem>("IoFlowTab");
             DataContextChanged += (_, _) => UpdateViewModelSubscription();
         }
 

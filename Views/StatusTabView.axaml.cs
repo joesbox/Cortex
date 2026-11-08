@@ -2,7 +2,9 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Markup.Xaml;
+using Cortex.Controls;
 using Cortex.Models;
+using Cortex.Services;
 using Cortex.ViewModels;
 using LiveChartsCore.SkiaSharpView.Avalonia;
 using System;
@@ -17,9 +19,16 @@ namespace Cortex.Views
         private CancellationTokenSource? _holdCts;
         private bool _holdCompleted;
 
-        public StatusTabView()
+        public StatusTabView() : this(new PanelLayoutStore("live-data-layout.json", 1.0 / 2.4))
+        {
+        }
+
+        public StatusTabView(PanelLayoutStore layoutStore)
         {
             AvaloniaXamlLoader.Load(this);
+            Grid layoutGrid = this.FindControl<Grid>("LiveDataLayoutGrid")!;
+            GridSplitter splitter = this.FindControl<GridSplitter>("LiveDataSplitter")!;
+            VerticalPanelLayout.RestoreAndTrack(layoutGrid, splitter, layoutStore);
             _channelChart = this.FindControl<CartesianChart>("ChannelChart");
             if (_channelChart == null)
             {

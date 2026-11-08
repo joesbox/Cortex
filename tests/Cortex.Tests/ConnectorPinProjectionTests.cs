@@ -42,6 +42,30 @@ public class ConnectorPinProjectionTests
         }
     }
 
+    [Theory]
+    [InlineData(OutputChannel.ChannelType.Digital, "#BDA5FF")]
+    [InlineData(OutputChannel.ChannelType.PWM, "#83B7F1")]
+    [InlineData(OutputChannel.ChannelType.Intermittent, "#EAA3CD")]
+    [InlineData(OutputChannel.ChannelType.Analogue, "#68C579")]
+    [InlineData(OutputChannel.ChannelType.AnalogueScaled, "#BB8AD9")]
+    public void ConnectorOutputPalette_UsesNonOrangeColorsAcrossPinAndLegend(OutputChannel.ChannelType type, string expected)
+    {
+        MainWindowViewModel viewModel = CreateViewModel();
+        try
+        {
+            viewModel.SettingsDataView.ChannelsStaticData[2].ChanType = type;
+            ConnectorPinDisplayItem pin = viewModel.ConnectorPins.Single(item => item.PinNumber == 1);
+            ConnectorLegendItem legend = viewModel.ConnectorLegendItems.Single(item =>
+                item.Text == ConnectorPinDisplayItem.FormatOutputChannelType(type));
+            Assert.Equal(Color.Parse(expected), Assert.IsType<SolidColorBrush>(pin.PinBrush).Color);
+            Assert.Equal(Color.Parse(expected), Assert.IsType<SolidColorBrush>(legend.Background).Color);
+        }
+        finally
+        {
+            StopUiUpdateTimer(viewModel);
+        }
+    }
+
     [Fact]
     public void ConnectorPins_ProjectOutputSettingsAndLiveValues()
     {
@@ -70,7 +94,7 @@ public class ConnectorPinProjectionTests
             Assert.Equal("OUT 3", pin.BadgeText);
             Assert.Equal("PWM output", pin.ConfiguredType);
             Assert.Equal("Active", pin.ActiveState);
-            Assert.Equal("2.50 A / 45%", pin.LiveValue);
+            Assert.Equal("2.5 A / 45%", pin.LiveValue);
             Assert.Contains("Name: FUL", pin.SettingsSummary);
             Assert.Contains("Control input: Digital 1", pin.SettingsSummary);
             Assert.Contains("PWM 20-95%", pin.LimitsSummary);
@@ -131,7 +155,7 @@ public class ConnectorPinProjectionTests
 
             Assert.Equal("AIN 1", analoguePin.BadgeText);
             Assert.Equal("Active sensor input", analoguePin.ConfiguredType);
-            Assert.Equal("42.50 psi", analoguePin.LiveValue);
+            Assert.Equal("42.5 psi", analoguePin.LiveValue);
             Assert.Contains("Range 10.00 to 80.00", analoguePin.LimitsSummary);
 
             Assert.Equal("DIN 1", digitalPin.BadgeText);

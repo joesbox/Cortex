@@ -1,15 +1,21 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using Cortex.Models;
+using Avalonia.Media;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Globalization;
 using System.Linq;
 
 namespace Cortex.ViewModels.IoFlow;
 
 public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
 {
+    private static readonly IBrush ActiveOutputLedBrush = new SolidColorBrush(Color.Parse("#FF52E08A"));
+    private static readonly IBrush InactiveOutputLedBrush = new SolidColorBrush(Color.Parse("#FF68717D"));
+    private static readonly IBrush UnknownOutputLedBrush = new SolidColorBrush(Color.Parse("#FFB78A4A"));
+
     private static readonly OutputChannelTypeOption[] DigitalTypeOptions =
     [
         new OutputChannelTypeOption(OutputChannel.ChannelType.Digital, "Digital"),
@@ -60,6 +66,8 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
     public OutputChannel Channel => _channel;
 
     public int ChannelNumber => Channel.ChannelNumber;
+
+    public bool IsMathChannel => Channel.ChanType == OutputChannel.ChannelType.MATH;
 
     public IReadOnlyList<int> OutputChannelNumbers => _availableChannels.Select(channel => channel.ChannelNumber).OrderBy(channelNumber => channelNumber).ToList();
 
@@ -117,7 +125,7 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
     [ObservableProperty]
     private string _inputChannelTypeSelectionHint = string.Empty;
 
-    private string _liveCurrentText = "0.00 A";
+    private string _liveCurrentText = "0.0 A";
 
     public string LiveCurrentText
     {
@@ -125,19 +133,47 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
         private set => SetProperty(ref _liveCurrentText, value);
     }
 
-    public bool ShowConnectInputHint => !HasConnectedInput;
+    private bool? _isOutputActive;
+
+    public bool? IsOutputActive => _isOutputActive;
+
+    public string OutputActiveToolTip => _isOutputActive switch
+    {
+        true => "Output is on",
+        false => "Output is off",
+        null => "Waiting for controller status",
+    };
+
+    public IBrush OutputLedBrush => _isOutputActive switch
+    {
+        true => ActiveOutputLedBrush,
+        false => InactiveOutputLedBrush,
+        null => UnknownOutputLedBrush,
+    };
+
+    public void UpdateLiveState(OutputChannel? liveChannel)
+    {
+        bool? isOutputActive = liveChannel is null ? null : liveChannel.Enabled != 0;
+        if (_isOutputActive != isOutputActive)
+        {
+            _isOutputActive = isOutputActive;
+            OnPropertyChanged(nameof(IsOutputActive));
+            OnPropertyChanged(nameof(OutputActiveToolTip));
+            OnPropertyChanged(nameof(OutputLedBrush));
+        }
+    }
 
     public bool ShowInputChannelTypeOptions => HasConnectedInput && AvailableInputChannelTypes.Count > 0;
 
-    public bool ShowInputDependentConfiguration => ShowInputChannelTypeOptions && !IsInputChannelTypeSelectionRequired;
+    public bool ShowInputDependentConfiguration => true;
 
     public bool ShowDigitalConfiguration => ShowInputDependentConfiguration && IsDigitalType(Channel.ChanType);
 
     public bool SupportsAnalogueChannelTypes => AvailableInputChannelTypes.Any(option => option.ChannelType is OutputChannel.ChannelType.Analogue or OutputChannel.ChannelType.AnalogueScaled);
 
-    public bool ShowAnalogueThresholdConfiguration => ShowInputDependentConfiguration && SupportsAnalogueChannelTypes && Channel.ChanType == OutputChannel.ChannelType.Analogue;
+    public bool ShowAnalogueThresholdConfiguration => Channel.ChanType == OutputChannel.ChannelType.Analogue;
 
-    public bool ShowAnalogueScaledConfiguration => ShowInputDependentConfiguration && SupportsAnalogueChannelTypes && Channel.ChanType == OutputChannel.ChannelType.AnalogueScaled;
+    public bool ShowAnalogueScaledConfiguration => Channel.ChanType == OutputChannel.ChannelType.AnalogueScaled;
 
     public bool SupportsIntermittentChannelType => AvailableInputChannelTypes.Any(option => option.ChannelType == OutputChannel.ChannelType.Intermittent);
 
@@ -147,11 +183,11 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
 
     public bool ShowIntermittentConfiguration => ShowInputDependentConfiguration && SupportsIntermittentChannelType;
 
-    public bool ShowDutyConfiguration => ShowInputDependentConfiguration && Channel.ChanType == OutputChannel.ChannelType.PWM;
+    public bool ShowDutyConfiguration => Channel.ChanType is OutputChannel.ChannelType.PWM or OutputChannel.ChannelType.CAN_PWM;
 
     public bool ShowCurrentInrushConfiguration => ShowInputDependentConfiguration;
 
-    public bool ShowAnalogueConfiguration => ShowInputDependentConfiguration && SupportsAnalogueChannelTypes;
+    public bool ShowAnalogueConfiguration => ShowAnalogueThresholdConfiguration || ShowAnalogueScaledConfiguration;
 
     public bool ShowTimingConfiguration => ShowInputDependentConfiguration;
 
@@ -163,7 +199,19 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
 
     public bool IsSoftStopTimingEnabled => Channel.SoftStopEnabled != 0;
 
-    public bool UsesNegativeGoingThresholds => Channel.OnThreshold < Channel.OffThreshold;
+    public bool UsesNegativeGoingThresholds
+    {
+        get => Channel.OnThreshold < Channel.OffThreshold;
+        set
+        {
+            if (value != UsesNegativeGoingThresholds)
+            {
+                float previousOnThreshold = Channel.OnThreshold;
+                Channel.OnThreshold = Channel.OffThreshold;
+                Channel.OffThreshold = previousOnThreshold;
+            }
+        }
+    }
 
     public string OnThresholdTooltip => UsesNegativeGoingThresholds
         ? "Channel turns ON below this value"
@@ -200,13 +248,13 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
     public double CurrentThresholdLowValue
     {
         get => Channel.CurrentThresholdLow;
-        set => Channel.CurrentThresholdLow = (float)Math.Clamp(value, 0.0, 17.0);
+        set => Channel.CurrentThresholdLow = RoundToCurrentStep(Math.Clamp(value, 0.0, 17.0));
     }
 
     public double CurrentThresholdHighValue
     {
         get => Channel.CurrentThresholdHigh;
-        set => Channel.CurrentThresholdHigh = (float)Math.Clamp(value, 0.0, 17.0);
+        set => Channel.CurrentThresholdHigh = RoundToCurrentStep(Math.Clamp(value, 0.0, 17.0));
     }
 
     public double InrushDelayValue
@@ -218,7 +266,7 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
     public double InrushCurrentLimitValue
     {
         get => Channel.InrushCurrentLimit;
-        set => Channel.InrushCurrentLimit = (float)Math.Clamp(value, 0.0, 50.0);
+        set => Channel.InrushCurrentLimit = RoundToCurrentStep(Math.Clamp(value, 0.0, 50.0));
     }
 
     public double OnThresholdValue
@@ -281,9 +329,12 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
         set => Channel.SoftStopTime = (float)Math.Clamp(value, 0.0, 5.0);
     }
 
+    // Current setpoints are configured in 100 mA steps.
+    private static float RoundToCurrentStep(double amps) => (float)(Math.Round(amps * 10, MidpointRounding.AwayFromZero) / 10);
+
     public void UpdateLiveCurrent(double value)
     {
-        LiveCurrentText = $"{value:0.00} A";
+        LiveCurrentText = $"{value.ToString("F1", CultureInfo.InvariantCulture)} A";
     }
 
     public void AssignChannel(OutputChannel channel)
@@ -302,6 +353,7 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
 
         OnPropertyChanged(nameof(Channel));
         OnPropertyChanged(nameof(ChannelNumber));
+        OnPropertyChanged(nameof(IsMathChannel));
         OnPropertyChanged(nameof(SelectedOutputChannelNumber));
         OnPropertyChanged(nameof(ChannelName));
 
@@ -369,27 +421,71 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
         RefreshInputContext();
     }
 
+    public bool IsInputTypeCompatible(byte inputPin, OutputChannel.ChannelType channelType)
+    {
+        return IsInputTypeCompatible(inputPin, channelType, _analogueInputs);
+    }
+
+    public static bool IsInputTypeCompatible(
+        byte inputPin,
+        OutputChannel.ChannelType channelType,
+        IReadOnlyList<AnalogueInput> analogueInputs)
+    {
+        return ResolveInputCompatibleChannelTypes(inputPin, analogueInputs)
+            .Any(option => option.ChannelType == channelType);
+    }
+
+    public bool ConfigureInputPin(byte inputPin)
+    {
+        OutputChannelTypeOption[] options = ResolveInputCompatibleChannelTypes(inputPin);
+        if (options.Length == 0)
+        {
+            return false;
+        }
+
+        if (!options.Any(option => option.ChannelType == Channel.ChanType))
+        {
+            Channel.ChanType = options[0].ChannelType;
+        }
+
+        Channel.InputControlPin = inputPin;
+        return true;
+    }
+
     private OutputChannelTypeOption[] ResolveInputCompatibleChannelTypes()
     {
-        if (Channel.InputControlPin == 0)
+        if (Channel.InputControlPin == 0
+            && Channel.ChanType is not (OutputChannel.ChannelType.CAN or OutputChannel.ChannelType.CAN_PWM))
         {
-            if (Channel.ChanType is not (OutputChannel.ChannelType.CAN or OutputChannel.ChannelType.CAN_PWM))
-            {
-                return [];
-            }
+            return [];
+        }
 
+        return ResolveInputCompatibleChannelTypes(Channel.InputControlPin);
+    }
+
+    private OutputChannelTypeOption[] ResolveInputCompatibleChannelTypes(byte inputPin)
+    {
+        return ResolveInputCompatibleChannelTypes(inputPin, _analogueInputs);
+    }
+
+    private static OutputChannelTypeOption[] ResolveInputCompatibleChannelTypes(
+        byte inputPin,
+        IReadOnlyList<AnalogueInput> analogueInputs)
+    {
+        if (inputPin == 0)
+        {
             return CanTypeOptions;
         }
 
-        if (InputPinCatalog.DIChannelInputPins.Contains(Channel.InputControlPin) || Channel.InputControlPin == InputPinCatalog.IgnitionInputPin)
+        if (InputPinCatalog.DIChannelInputPins.Contains(inputPin) || inputPin == InputPinCatalog.IgnitionInputPin)
         {
             return DigitalTypeOptions;
         }
 
-        int analogueInputIndex = Array.IndexOf(InputPinCatalog.ANAChannelInputPins, Channel.InputControlPin);
-        if (analogueInputIndex >= 0 && analogueInputIndex < _analogueInputs.Count)
+        int analogueInputIndex = Array.IndexOf(InputPinCatalog.ANAChannelInputPins, inputPin);
+        if (analogueInputIndex >= 0 && analogueInputIndex < analogueInputs.Count)
         {
-            return _analogueInputs[analogueInputIndex].ChanType == AnalogueInput.AnalogueChannelType.Digital
+            return analogueInputs[analogueInputIndex].ChanType == AnalogueInput.AnalogueChannelType.Digital
                 ? DigitalTypeOptions
                 : AnalogueTypeOptions;
         }
@@ -465,7 +561,6 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
 
     private void RaiseInputUiStateChanged()
     {
-        OnPropertyChanged(nameof(ShowConnectInputHint));
         OnPropertyChanged(nameof(ShowInputChannelTypeOptions));
         OnPropertyChanged(nameof(ShowInputDependentConfiguration));
         OnPropertyChanged(nameof(ShowDigitalConfiguration));
@@ -498,6 +593,7 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
             RefreshInputContext();
             RaiseInputUiStateChanged();
             RaiseAnalogueRangeUiStateChanged();
+            OnPropertyChanged(nameof(IsMathChannel));
         }
 
         if (e.PropertyName == nameof(OutputChannel.InputControlPin))
