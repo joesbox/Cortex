@@ -87,6 +87,12 @@ public sealed class MathRuleNodeViewModel : IoFlowNodeViewModel
 
     public OutputChannel.MathRule Rule { get; }
 
+    public string OperationSummary => ((OutputChannel.MathOperation)Rule.Operation).ToString();
+
+    public double? LiveChartValue { get; private set; }
+
+    private bool _hasChartResult;
+
     public bool SupportsHysteresis => Rule.Operation >= (byte)OutputChannel.MathOperation.GREATER_THAN
         && Rule.Operation <= (byte)OutputChannel.MathOperation.LESS_EQUAL;
 
@@ -195,6 +201,8 @@ public sealed class MathRuleNodeViewModel : IoFlowNodeViewModel
 
     public void ClearLiveResults()
     {
+        LiveChartValue = null;
+        _hasChartResult = false;
         _pendingControllerConfiguration = false;
         _liveResultsByChannel.Clear();
         _liveEvaluationsByChannel.Clear();
@@ -206,6 +214,7 @@ public sealed class MathRuleNodeViewModel : IoFlowNodeViewModel
 
     public void MarkPendingControllerConfiguration()
     {
+        LiveChartValue = null;
         _pendingControllerConfiguration = true;
         OnPropertyChanged(nameof(LiveResultText));
         RaiseLiveOperandPropertiesChanged();
@@ -224,6 +233,11 @@ public sealed class MathRuleNodeViewModel : IoFlowNodeViewModel
         string operandBText,
         DataStructures? liveData = null)
     {
+        if (!_hasChartResult && !_pendingControllerConfiguration)
+        {
+            LiveChartValue = liveRule.RuntimeError == 0 && liveRule.IsEvaluated ? liveRule.RuntimeValue : null;
+            _hasChartResult = true;
+        }
         string resultText = liveRule.RuntimeError != 0
             ? MathRuntimeDisplayFormatter.FormatRuleError(Rule, liveRule.RuntimeError, liveData)
             : liveRule.Evaluated == 0
@@ -443,6 +457,8 @@ public sealed class MathRuleNodeViewModel : IoFlowNodeViewModel
     {
         if (e.PropertyName == nameof(OutputChannel.MathRule.Operation))
         {
+            OnPropertyChanged(nameof(OperationSummary));
+            LiveHistory.Clear();
             OnPropertyChanged(nameof(SupportsHysteresis));
             OnPropertyChanged(nameof(IsHysteresisConfigurationEnabled));
             OnPropertyChanged(nameof(IsUnaryOperation));

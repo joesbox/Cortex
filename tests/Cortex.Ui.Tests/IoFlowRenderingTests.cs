@@ -64,17 +64,22 @@ public static AppBuilder BuildAvaloniaApp() =>
                 Assert.Equal(target.InputConnector.Anchor, wire.Target);
                 Assert.False(wire.IsHitTestVisible);
                 Assert.True(hitTarget.IsHitTestVisible);
-                Assert.Equal("#FF8254B8", connection.Stroke);
+                Assert.Equal("#FF78638F", connection.Stroke);
+                Assert.Equal(Color.Parse(connection.Stroke), Assert.IsAssignableFrom<ISolidColorBrush>(wire.Fill).Color);
+                Assert.Equal(Colors.Transparent, Assert.IsAssignableFrom<ISolidColorBrush>(hitTarget.Fill).Color);
                 connection.IsHovered = true;
-                Assert.Equal("#FFB794EB", connection.Stroke);
+                Assert.Equal("#FF9580AD", connection.Stroke);
+                Assert.Equal(Color.Parse(connection.Stroke), Assert.IsAssignableFrom<ISolidColorBrush>(wire.Fill).Color);
                 Assert.Equal(5, wire.StrokeThickness);
                 connection.IsSelected = true;
-                Assert.Equal("#FFE0C8FF", connection.Stroke);
+                Assert.Equal("#FFB29ACB", connection.Stroke);
+                Assert.Equal(Color.Parse(connection.Stroke), Assert.IsAssignableFrom<ISolidColorBrush>(wire.Fill).Color);
                 Assert.Equal(7, wire.StrokeThickness);
                 Assert.True(glow.IsVisible);
                 Assert.False(glow.IsHitTestVisible);
-                Assert.Equal(Color.Parse("#99C8A7FF"), Assert.IsAssignableFrom<ISolidColorBrush>(glow.Stroke).Color);
-                Assert.Equal(Color.Parse("#FFC8A7FF"), Assert.IsType<DropShadowEffect>(glow.Effect).Color);
+                Assert.Equal(Color.Parse("#6678638F"), Assert.IsAssignableFrom<ISolidColorBrush>(glow.Stroke).Color);
+                Assert.Equal(Color.Parse("#6678638F"), Assert.IsAssignableFrom<ISolidColorBrush>(glow.Fill).Color);
+                Assert.Equal(Color.Parse("#FF9580AD"), Assert.IsType<DropShadowEffect>(glow.Effect).Color);
                 connection.IsSelected = false;
                 Assert.False(glow.IsVisible);
 

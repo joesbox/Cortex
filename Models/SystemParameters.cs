@@ -16,6 +16,52 @@ namespace Cortex.Models
         public float _IMUTemp;                  // BMI270 temperature
 
         [ObservableProperty]
+        private float? _accelerationX;
+
+        [ObservableProperty]
+        private float? _accelerationY;
+
+        [ObservableProperty]
+        private float? _accelerationZ;
+
+        [ObservableProperty]
+        private float? _gyroscopeX;
+
+        [ObservableProperty]
+        private float? _gyroscopeY;
+
+        [ObservableProperty]
+        private float? _gyroscopeZ;
+
+        [ObservableProperty]
+        private float? _magneticFieldX;
+
+        [ObservableProperty]
+        private float? _magneticFieldY;
+
+        [ObservableProperty]
+        private float? _magneticFieldZ;
+
+        public float? GetMathSystemValue(OutputChannel.MathSystemValue value) => value switch
+        {
+            OutputChannel.MathSystemValue.SystemTemperature => SystemTemperature,
+            OutputChannel.MathSystemValue.SIMModuleTemperature => SIMModuleTemp,
+            OutputChannel.MathSystemValue.IMUTemperature => IMUTemp,
+            OutputChannel.MathSystemValue.BatteryVoltage => VBatt,
+            OutputChannel.MathSystemValue.SystemCurrent => SystemCurrent,
+            OutputChannel.MathSystemValue.AccelerationX => AccelerationX,
+            OutputChannel.MathSystemValue.AccelerationY => AccelerationY,
+            OutputChannel.MathSystemValue.AccelerationZ => AccelerationZ,
+            OutputChannel.MathSystemValue.GyroscopeX => GyroscopeX,
+            OutputChannel.MathSystemValue.GyroscopeY => GyroscopeY,
+            OutputChannel.MathSystemValue.GyroscopeZ => GyroscopeZ,
+            OutputChannel.MathSystemValue.MagneticFieldX => MagneticFieldX,
+            OutputChannel.MathSystemValue.MagneticFieldY => MagneticFieldY,
+            OutputChannel.MathSystemValue.MagneticFieldZ => MagneticFieldZ,
+            _ => throw new ArgumentOutOfRangeException(nameof(value), value, "Unknown system value"),
+        };
+
+        [ObservableProperty]
         public bool _CANResEnabled;             // CAN bus termination resistor enableda
 
         [ObservableProperty]

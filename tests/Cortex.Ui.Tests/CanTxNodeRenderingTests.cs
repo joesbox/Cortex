@@ -78,10 +78,23 @@ public sealed class CanTxNodeRenderingTests
     [AvaloniaFact]
     public void PeriodSliderAndLabelAreHiddenForOneShotAndUseHundredMillisecondSteps()
     {
-        var message = new CustomCanMessage { Index = 0, Id = 0x123, Flags = 0x04, TimeoutMs = 1000 };
-        var node = new CanTxNodeViewModel(message, default, [message], null);
+        var settings = new DataStructures();
+        var message = settings.CustomCanMessagesStaticData[0];
+        message.Id = 0x123;
+        message.Flags = 0x04;
+        message.TimeoutMs = 1000;
         var graph = new IoFlowGraphViewModel();
-        graph.Nodes.Add(node);
+        graph.Build(settings, new DataStructures());
+        graph.SetCustomCanTxModeAction = (_, periodic, period) =>
+        {
+            message.IsPeriodic = periodic;
+            if (periodic)
+                message.TimeoutMs = period;
+            return true;
+        };
+        graph.AddCanTxNodeCommand.Execute(null);
+        var node = Assert.Single(graph.CanTxNodes);
+        graph.SelectedNodes.Add(node);
         var view = new IoFlowTabView { DataContext = new { IoFlowGraph = graph } };
         var window = new Window { Width = 1200, Height = 900, Content = view };
         try
@@ -93,12 +106,11 @@ public sealed class CanTxNodeRenderingTests
                 .Where(control => ReferenceEquals(control.DataContext, node)));
             var label = Assert.Single(view.GetVisualDescendants().OfType<TextBlock>()
                 .Where(control => ReferenceEquals(control.DataContext, node) && control.Text == "Period (ms)"));
-            var apply = Assert.Single(view.GetVisualDescendants().OfType<Button>()
-                .Where(control => ReferenceEquals(control.DataContext, node) && Equals(control.Content, "Apply")));
+            Assert.DoesNotContain(view.GetVisualDescendants().OfType<Button>(),
+                control => ReferenceEquals(control.DataContext, node) && Equals(control.Content, "Apply"));
 
             Assert.False(slider.IsEffectivelyVisible);
             Assert.False(label.IsEffectivelyVisible);
-            Assert.True(apply.IsEffectivelyVisible);
             Assert.Equal(100, slider.Minimum);
             Assert.Equal(30000, slider.Maximum);
             Assert.Equal(100, slider.TickFrequency);
@@ -128,8 +140,8 @@ public sealed class CanTxNodeRenderingTests
             Dispatcher.UIThread.RunJobs();
             Assert.False(slider.IsEffectivelyVisible);
             Assert.False(label.IsEffectivelyVisible);
-            Assert.True(apply.IsEffectivelyVisible);
-            Assert.Equal(1000, message.TimeoutMs);
+            Assert.Equal(30000, message.TimeoutMs);
+            Assert.False(message.IsPeriodic);
         }
         finally
         {

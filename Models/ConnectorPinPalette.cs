@@ -2,16 +2,17 @@ namespace Cortex.Models
 {
     public static class ConnectorPinPalette
     {
-        public const string OutputDigital = "#BDA5FF";
-        public const string OutputPwm = "#83B7F1";
-        public const string OutputIntermittent = "#EAA3CD";
-        public const string OutputAnalogueThreshold = "#68C579";
-        public const string OutputAnalogueScaled = "#BB8AD9";
-        public const string OutputCanDigital = "#43C6AC";
-        public const string OutputCanPwm = "#2FA7C4";
-        public const string OutputMath = "#BA64FF";
+        public const string Output = "#68C579";
+        public const string OutputDigital = Output;
+        public const string OutputPwm = Output;
+        public const string OutputIntermittent = Output;
+        public const string OutputAnalogueThreshold = Output;
+        public const string OutputAnalogueScaled = Output;
+        public const string OutputCanDigital = Output;
+        public const string OutputCanPwm = Output;
+        public const string OutputMath = Output;
         public const string DigitalInput = "#4DA3FF";
-        public const string AnalogueInput = "#5ED9FF";
+        public const string AnalogueInput = "#E3C85C";
         public const string Ignition = "#7C83FD";
         public const string CanLow = "#2EC4B6";
         public const string CanHigh = "#00B894";

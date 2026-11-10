@@ -11,6 +11,48 @@ namespace Cortex.Tests;
 public class MainWindowViewModelMathHydrationTests
 {
     [Fact]
+    public void LiveImuValuesPropagateToAllSystemNodeChartsWithoutEditingSettings()
+    {
+        var viewModel = CreateViewModel();
+        try
+        {
+            var incoming = new Models.DataStructures();
+            var system = incoming.SystemParams;
+            system.AccelerationX = 1;
+            system.AccelerationY = 2;
+            system.AccelerationZ = 3;
+            system.GyroscopeX = 4;
+            system.GyroscopeY = 5;
+            system.GyroscopeZ = 6;
+            system.MagneticFieldX = 7;
+            system.MagneticFieldY = 8;
+            system.MagneticFieldZ = 9;
+            for (int i = 0; i < 14; i++)
+                viewModel.IoFlowGraph.AddSystemValueNodeCommand.Execute(null);
+
+            var update = typeof(MainWindowViewModel).GetMethod("UpdateLiveDataInPlace", BindingFlags.NonPublic | BindingFlags.Instance)!;
+            update.Invoke(viewModel, [incoming]);
+            viewModel.IoFlowGraph.UpdateLiveChannelSamples(viewModel.LiveDataView.ChannelsLiveData);
+            foreach (var value in System.Enum.GetValues<Models.OutputChannel.MathSystemValue>().Skip(5))
+            {
+                var node = viewModel.IoFlowGraph.MathSourceNodes.Single(node => node.SourceIndex == (byte)value);
+                Assert.Equal((int)value - 4, node.GetLiveChartValue(viewModel.LiveDataView));
+                Assert.Equal((int)value - 4, node.LiveHistory.Samples[^1].Value);
+                Assert.DoesNotContain("--", node.LiveValueText);
+                Assert.Null(viewModel.SettingsDataView.SystemParamsStaticData.GetMathSystemValue(value));
+            }
+
+            update.Invoke(viewModel, [new Models.DataStructures()]);
+            foreach (var value in System.Enum.GetValues<Models.OutputChannel.MathSystemValue>().Skip(5))
+                Assert.Null(viewModel.LiveDataView.SystemParams.GetMathSystemValue(value));
+        }
+        finally
+        {
+            StopUiUpdateTimer(viewModel);
+        }
+    }
+
+    [Fact]
     public void SelectedMathRuleRootToggleTracksTheRuleBeingEdited()
     {
         MainWindowViewModel viewModel = CreateViewModel();

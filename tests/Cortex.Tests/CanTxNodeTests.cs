@@ -7,6 +7,21 @@ namespace Cortex.Tests;
 public sealed class CanTxNodeTests
 {
     [Fact]
+    public void FailedAutomaticStagingRestoresFieldsAndReportsFailure()
+    {
+        var (graph, node) = CreateGraph();
+        node.Message.TimeoutMs = 1000;
+        graph.SetCustomCanTxModeAction = (_, _, _) => false;
+
+        node.EditIsPeriodic = true;
+
+        Assert.False(node.Message.IsPeriodic);
+        Assert.False(node.EditIsPeriodic);
+        Assert.Equal(1000, node.EditTimeoutMs);
+        Assert.Contains("Unable to apply", node.ValidationMessage);
+    }
+
+    [Fact]
     public async Task FailedNodeDeletionRetainsNodeAndReportsFailure()
     {
         var (graph, node) = CreateGraph();
@@ -30,19 +45,18 @@ public sealed class CanTxNodeTests
     [InlineData(30001)]
     [InlineData(60000)]
     [InlineData(-1)]
-    public async Task ApplyPeriodicRejectsInvalidPeriodWithoutCallingSettingsCallback(int period)
+    public void PeriodicEditRejectsInvalidPeriodWithoutCallingSettingsCallback(int period)
     {
         var (graph, node) = CreateGraph();
         bool called = false;
         graph.SetCustomCanTxModeAction = (_, _, _) =>
         {
             called = true;
-            return Task.FromResult(true);
+            return true;
         };
         node.EditIsPeriodic = true;
+        called = false;
         node.EditTimeoutMs = period;
-
-        await graph.ApplyCanTxNodeSettingsCommand.ExecuteAsync(node);
 
         Assert.False(called);
         Assert.True(node.HasValidationMessage);
@@ -53,7 +67,7 @@ public sealed class CanTxNodeTests
     [InlineData(100)]
     [InlineData(200)]
     [InlineData(30000)]
-    public async Task ApplyPeriodicAcceptsBoundariesAndNotifiesDirtyTracking(int period)
+    public void PeriodicEditAcceptsBoundariesAndNotifiesDirtyTracking(int period)
     {
         var (graph, node) = CreateGraph();
         (bool Periodic, ushort Period)? applied = null;
@@ -62,12 +76,10 @@ public sealed class CanTxNodeTests
         graph.SetCustomCanTxModeAction = (_, periodic, value) =>
         {
             applied = (periodic, value);
-            return Task.FromResult(true);
+            return true;
         };
         node.EditIsPeriodic = true;
         node.EditTimeoutMs = period;
-
-        await graph.ApplyCanTxNodeSettingsCommand.ExecuteAsync(node);
 
         Assert.Equal((true, (ushort)period), applied);
         Assert.True(settingsChanged);
@@ -75,19 +87,18 @@ public sealed class CanTxNodeTests
     }
 
     [Fact]
-    public async Task OneShotIgnoresHiddenPeriod()
+    public void OneShotIgnoresHiddenPeriod()
     {
         var (graph, node) = CreateGraph();
         node.Message.TimeoutMs = 750;
-        node.EditTimeoutMs = -1;
         ushort? appliedPeriod = null;
         graph.SetCustomCanTxModeAction = (_, _, period) =>
         {
             appliedPeriod = period;
-            return Task.FromResult(true);
+            return true;
         };
 
-        await graph.ApplyCanTxNodeSettingsCommand.ExecuteAsync(node);
+        node.EditTimeoutMs = -1;
 
         Assert.Equal((ushort)750, appliedPeriod);
         Assert.False(node.HasValidationMessage);

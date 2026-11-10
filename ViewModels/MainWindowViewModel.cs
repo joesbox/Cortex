@@ -1948,9 +1948,9 @@ namespace Cortex.ViewModels
                 return (-30.0, 150.0);
             }
 
-            if (input.ChanType == AnalogueInput.AnalogueChannelType.RawVoltage)
+            if (input.ReportsConnectorVoltage)
             {
-                return (0.0, 5.0);
+                return (AnalogueInput.ConnectorVoltageMinimum, AnalogueInput.ConnectorVoltageMaximum);
             }
 
             double min = Math.Min(input.ConfigRangeMin, input.ConfigRangeMax);
@@ -4755,9 +4755,7 @@ namespace Cortex.ViewModels
             {
                 if (HasPendingConfigChanges)
                 {
-                    PersistIoFlowGraphSnapshotLocally();
-                    if (_ioFlowGraphStore.TryLoad(out var pendingSnapshot) && pendingSnapshot.DraftSettings != null)
-                        RememberIoFlowDraft(pendingSnapshot);
+                    RememberIoFlowDraft(IoFlowGraph.CreateSnapshot());
                 }
                 DataStructures confirmedControllerSettings = DeepCopyDataStructures(data);
                 refreshStaticData = false;
@@ -4835,7 +4833,7 @@ namespace Cortex.ViewModels
             }
             if (IsInitialSnapshotLoaded && (_portService == null
                 || (_portService.HasLoadedCustomCanSnapshot && _portService.HasLoadedMathSnapshot)))
-                StartBackgroundTask(ReconcileIoFlowDraftAsync(), "I/O Flow draft reconciliation");
+                StartBackgroundTask(ReconcileIoFlowDraftAsync(), "I/O Flow settings reconciliation");
         }
 
         private void HydrateMathSettingsFromLiveDataIfClean()
@@ -5409,6 +5407,16 @@ namespace Cortex.ViewModels
             var targetSys = LiveDataView.SystemParams;
             var sourceSys = newData.SystemParams;
 
+            targetSys.AccelerationX = sourceSys.AccelerationX;
+            targetSys.AccelerationY = sourceSys.AccelerationY;
+            targetSys.AccelerationZ = sourceSys.AccelerationZ;
+            targetSys.GyroscopeX = sourceSys.GyroscopeX;
+            targetSys.GyroscopeY = sourceSys.GyroscopeY;
+            targetSys.GyroscopeZ = sourceSys.GyroscopeZ;
+            targetSys.MagneticFieldX = sourceSys.MagneticFieldX;
+            targetSys.MagneticFieldY = sourceSys.MagneticFieldY;
+            targetSys.MagneticFieldZ = sourceSys.MagneticFieldZ;
+
             if (targetSys.SystemTemperature != sourceSys.SystemTemperature)
             {
                 targetSys.SystemTemperature = sourceSys.SystemTemperature;
@@ -5941,8 +5949,7 @@ namespace Cortex.ViewModels
 
         private static AnalogueInput.AnalogueUnits GetLiveAnalogueSeriesUnit(AnalogueInput input)
         {
-            return input.ChanType == AnalogueInput.AnalogueChannelType.RawVoltage ||
-                   input.ChanType == AnalogueInput.AnalogueChannelType.Digital
+            return input.ReportsConnectorVoltage
                 ? AnalogueInput.AnalogueUnits.Volts
                 : input.Units;
         }
@@ -6217,7 +6224,7 @@ namespace Cortex.ViewModels
             {
                 if (HasVisibleSeriesUsingUnit(units))
                 {
-                    parts.Add($"ana:{(int)units}");
+                    parts.Add($"ana:{(int)units}:{UsesConnectorVoltageAxis(units)}");
                 }
             }
 
@@ -6271,7 +6278,33 @@ namespace Cortex.ViewModels
             _lastLiveChartAxisSignature = axisSignature;
             OnPropertyChanged(nameof(YAxes));
             UpdateLiveSeriesAxisAssignments();
+            ApplyLiveChartAxisLimits(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), null);
             UpdateLiveCrosshairState();
+        }
+
+        private bool UsesConnectorVoltageAxis(AnalogueInput.AnalogueUnits units)
+        {
+            if (units != AnalogueInput.AnalogueUnits.Volts)
+            {
+                return false;
+            }
+
+            int count = Math.Min(LiveDataView.AnalogueInputsLiveData.Count, AnalogueLiveSeriesToggles.Count);
+            bool hasConnectorVoltage = false;
+            for (int i = 0; i < count; i++)
+            {
+                AnalogueInput input = LiveDataView.AnalogueInputsLiveData[i];
+                if (!AnalogueLiveSeriesToggles[i].IsEnabled || GetLiveAnalogueSeriesUnit(input) != units)
+                {
+                    continue;
+                }
+                if (!input.ReportsConnectorVoltage)
+                {
+                    return false;
+                }
+                hasConnectorVoltage = true;
+            }
+            return hasConnectorVoltage;
         }
 
         private void UpdateLiveSeriesAxisAssignments()
@@ -6562,14 +6595,38 @@ namespace Cortex.ViewModels
                 XAxes[0].MaxLimit = nowMs;
             }
 
-            if (maxVisibleByAxis != null && YAxes is { Length: > 0 })
+            if (YAxes is { Length: > 0 })
             {
+                int connectorVoltageAxis = -1;
+                if (UsesConnectorVoltageAxis(AnalogueInput.AnalogueUnits.Volts))
+                {
+                    int offset = LiveDataView.ChannelsLiveData.Count;
+                    int count = Math.Min(LiveDataView.AnalogueInputsLiveData.Count, AnalogueLiveSeriesToggles.Count);
+                    for (int i = 0; i < count && offset + i < SeriesCollection.Count; i++)
+                    {
+                        if (AnalogueLiveSeriesToggles[i].IsEnabled &&
+                            LiveDataView.AnalogueInputsLiveData[i].ReportsConnectorVoltage &&
+                            SeriesCollection[offset + i] is LineSeries<ObservablePoint> series)
+                        {
+                            connectorVoltageAxis = series.ScalesYAt;
+                            break;
+                        }
+                    }
+                }
                 for (int i = 0; i < YAxes.Length; i++)
                 {
-                    YAxes[i].MinLimit = null;
-                    YAxes[i].MaxLimit = maxVisibleByAxis.TryGetValue(i, out double axisMax)
-                        ? axisMax + LiveChartYAxisHeadroomAmps
-                        : null;
+                    if (i == connectorVoltageAxis)
+                    {
+                        YAxes[i].MinLimit = AnalogueInput.ConnectorVoltageMinimum;
+                        YAxes[i].MaxLimit = AnalogueInput.ConnectorVoltageMaximum;
+                    }
+                    else if (maxVisibleByAxis != null)
+                    {
+                        YAxes[i].MinLimit = null;
+                        YAxes[i].MaxLimit = maxVisibleByAxis.TryGetValue(i, out double axisMax)
+                            ? axisMax + LiveChartYAxisHeadroomAmps
+                            : null;
+                    }
                 }
             }
         }

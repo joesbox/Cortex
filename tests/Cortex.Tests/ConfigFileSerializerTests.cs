@@ -6,6 +6,45 @@ namespace Cortex.Tests;
 
 public class ConfigFileSerializerTests
 {
+    [Fact]
+    public void CanRecordsRoundTripPersistedFieldsWithoutLiveStatus()
+    {
+        var source = new DataStructures();
+        var message = source.CustomCanMessagesStaticData[1];
+        message.Id = 0x321;
+        message.Dlc = 8;
+        message.Flags = 0x0D;
+        message.TimeoutMs = 1200;
+        message.TxTrigger = 4;
+        message.Status = 123;
+        var signal = source.CustomCanSignalsStaticData[2];
+        signal.MessageIndex = 1;
+        signal.StartBit = 8;
+        signal.BitLength = 16;
+        signal.Flags = 1;
+        signal.ValueSource = 2;
+        signal.Factor = 0.5f;
+        signal.Offset = -2f;
+        Assert.True(ConfigFileSerializer.TryDeserialize(ConfigFileSerializer.SerializeSettings(source), out var snapshot, out _));
+        var target = new DataStructures();
+        ConfigFileSerializer.ApplySnapshot(target, snapshot!);
+        var restored = target.CustomCanMessagesStaticData[1];
+        Assert.Equal(message.Id, restored.Id);
+        Assert.Equal(message.Dlc, restored.Dlc);
+        Assert.Equal(message.Flags, restored.Flags);
+        Assert.Equal(message.TimeoutMs, restored.TimeoutMs);
+        Assert.Equal(message.TxTrigger, restored.TxTrigger);
+        Assert.Equal(0, restored.Status);
+        var restoredSignal = target.CustomCanSignalsStaticData[2];
+        Assert.Equal(signal.MessageIndex, restoredSignal.MessageIndex);
+        Assert.Equal(signal.StartBit, restoredSignal.StartBit);
+        Assert.Equal(signal.BitLength, restoredSignal.BitLength);
+        Assert.Equal(signal.Flags, restoredSignal.Flags);
+        Assert.Equal(signal.ValueSource, restoredSignal.ValueSource);
+        Assert.Equal(signal.Factor, restoredSignal.Factor);
+        Assert.Equal(signal.Offset, restoredSignal.Offset);
+    }
+
     // TryDeserialize
 
     [Fact]

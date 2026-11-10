@@ -11,7 +11,12 @@ namespace Cortex.ViewModels;
 
 public partial class MainWindowViewModel
 {
-    private IoFlowGraphSnapshot? _ioFlowDraftAwaitingReconciliation;
+    private sealed record IoFlowPendingDraft(
+        IoFlowGraphSnapshot Snapshot,
+        IoFlowDraftSettings Settings,
+        string BaselineSignature);
+
+    private IoFlowPendingDraft? _ioFlowDraftAwaitingReconciliation;
     private bool _reconcilingIoFlowDraft;
     private bool _ioFlowDraftDecisionDeferred;
 
@@ -23,6 +28,8 @@ public partial class MainWindowViewModel
         config.SystemParameters = null;
         config.CellularParameters = null;
         config.IoFlowGraph = null;
+        config.CanMessages = null;
+        config.CanSignals = null;
         foreach (var channel in config.Channels!)
         {
             channel.AnalogRaw = null;
@@ -79,58 +86,64 @@ public partial class MainWindowViewModel
 
     private void RememberIoFlowDraft(IoFlowGraphSnapshot snapshot)
     {
-        _ioFlowDraftAwaitingReconciliation = snapshot;
+        if (_controllerConfigBaseline == null)
+            return;
+
+        _ioFlowDraftAwaitingReconciliation = new IoFlowPendingDraft(
+            snapshot,
+            CreateIoFlowDraftSettings(SettingsDataView),
+            CreateIoFlowDraftSignature(_controllerConfigBaseline));
         _ioFlowDraftDecisionDeferred = false;
-        _ioFlowSnapshotMismatchWarning = "An unsaved I/O Flow draft is retained. Waiting for complete controller settings before reconciliation.";
+        _ioFlowSnapshotMismatchWarning = "Unsaved I/O Flow changes are being compared with the refreshed controller settings.";
     }
 
     private async Task ReconcileIoFlowDraftAsync()
     {
-        if (_ioFlowDraftAwaitingReconciliation is not { DraftSettings: { } draft } snapshot
+        if (_ioFlowDraftAwaitingReconciliation is not { } pending
             || _controllerConfigBaseline == null || _reconcilingIoFlowDraft || _ioFlowDraftDecisionDeferred) return;
-        if (!IsIoFlowSnapshotStructurallyValid(snapshot))
+        if (!IsIoFlowSnapshotStructurallyValid(pending.Snapshot))
         {
             _ioFlowDraftDecisionDeferred = true;
-            _ioFlowSnapshotMismatchWarning = "The retained I/O Flow draft is invalid and has been left untouched.";
-            AddLog("Cannot recover I/O Flow draft.", _ioFlowSnapshotMismatchWarning);
+            _ioFlowSnapshotMismatchWarning = "The pending I/O Flow changes are invalid and have been left untouched.";
+            AddLog("Cannot reconcile pending I/O Flow changes.", _ioFlowSnapshotMismatchWarning);
             UpdateIoFlowControllerMismatchWarning();
             return;
         }
         _reconcilingIoFlowDraft = true;
         try
         {
-            bool matchesBaseline = snapshot.DraftBaselineSignature == CreateIoFlowDraftSignature(_controllerConfigBaseline);
-            bool alreadyApplied = CreateIoFlowDraftSignature(draft) == CreateIoFlowDraftSignature(_controllerConfigBaseline);
+            bool matchesBaseline = pending.BaselineSignature == CreateIoFlowDraftSignature(_controllerConfigBaseline);
+            bool alreadyApplied = CreateIoFlowDraftSignature(pending.Settings) == CreateIoFlowDraftSignature(_controllerConfigBaseline);
             bool restore = matchesBaseline || alreadyApplied;
             if (!restore)
             {
-                restore = await _appCloser.ConfirmAsync("Recover I/O Flow draft",
-                    "An unsaved canvas was retained, but this controller has different settings. Restore the draft as pending edits, or use the controller settings?",
-                    "RESTORE DRAFT", "USE CONTROLLER");
-                if (!restore && !await _appCloser.ConfirmAsync("Discard retained I/O Flow draft",
-                    "Use the controller configuration and permanently discard the retained unsaved draft?",
-                    "USE CONTROLLER", "KEEP DRAFT"))
+                restore = await _appCloser.ConfirmAsync("Pending I/O Flow changes",
+                    "The controller settings changed while unsaved I/O Flow changes were pending. Restore the pending changes, or use the controller settings?",
+                    "RESTORE CHANGES", "USE CONTROLLER");
+                if (!restore && !await _appCloser.ConfirmAsync("Discard pending I/O Flow changes",
+                    "Use the controller configuration and discard the pending I/O Flow changes?",
+                    "USE CONTROLLER", "KEEP CHANGES"))
                 {
                     _ioFlowDraftDecisionDeferred = true;
-                    _ioFlowSnapshotMismatchWarning = "Unsaved I/O Flow draft retained without applying it. Reconnect to choose which configuration to use.";
+                    _ioFlowSnapshotMismatchWarning = "Pending I/O Flow changes were not applied. Reconnect to choose which configuration to use.";
                     UpdateIoFlowControllerMismatchWarning();
                     return;
                 }
             }
-            if (!ReferenceEquals(snapshot, _ioFlowDraftAwaitingReconciliation)) return;
+            if (!ReferenceEquals(pending, _ioFlowDraftAwaitingReconciliation)) return;
             if (restore)
             {
                 DataStructures settings = DeepCopyDataStructures(SettingsDataView);
-                ConfigFileSerializer.ApplySnapshot(settings, draft.InputsAndOutputs);
-                settings.CustomCanMessagesStaticData = new ObservableCollection<CustomCanMessage>(draft.CanMessages);
-                settings.CustomCanSignalsStaticData = new ObservableCollection<CustomCanSignal>(draft.CanSignals);
+                ConfigFileSerializer.ApplySnapshot(settings, pending.Settings.InputsAndOutputs);
+                settings.CustomCanMessagesStaticData = new ObservableCollection<CustomCanMessage>(pending.Settings.CanMessages);
+                settings.CustomCanSignalsStaticData = new ObservableCollection<CustomCanSignal>(pending.Settings.CanSignals);
                 _isApplyingIoFlowSnapshot = true;
                 bool wasSuppressing = _suppressDirtyTracking;
                 _suppressDirtyTracking = true;
                 try
                 {
                     ReplaceSettingsData(settings);
-                    IoFlowGraph.ApplySnapshot(snapshot);
+                    IoFlowGraph.ApplySnapshot(pending.Snapshot);
                     IoFlowGraph.ReconcileMathConfiguration();
                     _awaitingInitialMathSettingsHydration = false;
                     _portService?.UpdateSettingsData(SettingsDataView);
@@ -144,10 +157,10 @@ public partial class MainWindowViewModel
                     _isApplyingIoFlowSnapshot = false;
                 }
                 RecalculatePendingConfigChanges();
-                AddLog(alreadyApplied && !HasPendingConfigChanges ? "Recovered I/O Flow layout; its settings are already on the controller."
-                    : "Recovered unsaved I/O Flow draft. Save changes to apply it to the controller.");
+                AddLog(alreadyApplied && !HasPendingConfigChanges ? "I/O Flow settings are already on the controller."
+                    : "Restored pending I/O Flow changes after refreshing controller settings.");
             }
-            else AddLog("Using controller settings; the retained I/O Flow draft was discarded by confirmation.");
+            else AddLog("Using controller settings; pending I/O Flow changes were discarded by confirmation.");
             _ioFlowDraftAwaitingReconciliation = null;
             _ioFlowSnapshotMismatchWarning = string.Empty;
             RecalculatePendingConfigChanges();

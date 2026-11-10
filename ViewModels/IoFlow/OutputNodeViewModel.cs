@@ -69,6 +69,8 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
 
     public bool IsMathChannel => Channel.ChanType == OutputChannel.ChannelType.MATH;
 
+    public string MathOutputModeSummary => ((OutputChannel.MathOutputModeType)Channel.MathOutputMode).ToString();
+
     public IReadOnlyList<int> OutputChannelNumbers => _availableChannels.Select(channel => channel.ChannelNumber).OrderBy(channelNumber => channelNumber).ToList();
 
     public int SelectedOutputChannelNumber
@@ -344,6 +346,7 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
             return;
         }
 
+        LiveHistory.Clear();
         Channel.PropertyChanged -= Channel_PropertyChanged;
         _channel = channel;
         Channel.PropertyChanged += Channel_PropertyChanged;
@@ -354,6 +357,7 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
         OnPropertyChanged(nameof(Channel));
         OnPropertyChanged(nameof(ChannelNumber));
         OnPropertyChanged(nameof(IsMathChannel));
+        OnPropertyChanged(nameof(MathOutputModeSummary));
         OnPropertyChanged(nameof(SelectedOutputChannelNumber));
         OnPropertyChanged(nameof(ChannelName));
 
@@ -531,9 +535,9 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
                 : (-30.0, 150.0);
         }
 
-        if (input.ChanType == AnalogueInput.AnalogueChannelType.RawVoltage)
+        if (input.ReportsConnectorVoltage)
         {
-            return (0.0, 5.0);
+            return (AnalogueInput.ConnectorVoltageMinimum, AnalogueInput.ConnectorVoltageMaximum);
         }
 
         double min = Math.Min(input.ConfigRangeMin, input.ConfigRangeMax);
@@ -587,6 +591,9 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
 
     private void Channel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (e.PropertyName == nameof(OutputChannel.MathOutputMode))
+            OnPropertyChanged(nameof(MathOutputModeSummary));
+
         if (e.PropertyName == nameof(OutputChannel.ChanType))
         {
             SetDefaultBorderHex(ConnectorPinDisplayItem.GetOutputColorHex(Channel.ChanType));

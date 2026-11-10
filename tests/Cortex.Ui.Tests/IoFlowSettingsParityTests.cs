@@ -51,6 +51,7 @@ public sealed class IoFlowSettingsParityTests
 
             var flow = Assert.Single(view.GetVisualDescendants().OfType<IoFlowTabView>());
             MathRuleNodeViewModel rule = Assert.Single(vm.IoFlowGraph.MathRuleNodes.Where(node => node.OwnerChannelNumber == channel.ChannelNumber));
+            SelectNode(rule);
             Control[] ruleControls = flow.GetVisualDescendants().OfType<Control>()
                 .Where(control => ReferenceEquals(control.DataContext, rule)).ToArray();
             ToggleSwitch hysteresis = Assert.Single(ruleControls.OfType<ToggleSwitch>(), control => control.Classes.Contains("mathHysteresis"));
@@ -83,6 +84,7 @@ public sealed class IoFlowSettingsParityTests
             Layout();
 
             AnalogueInputNodeViewModel analogue = Assert.Single(vm.IoFlowGraph.AnalogueNodes);
+            SelectNode(analogue);
             analogue.Input.ChanType = AnalogueInput.AnalogueChannelType.Active;
             Layout();
             SetText("analogueRangeMin", analogue, "-10");
@@ -97,6 +99,7 @@ public sealed class IoFlowSettingsParityTests
             Assert.Equal(10000, analogue.Input.NtcNominalResistance);
 
             OutputNodeViewModel output = vm.IoFlowGraph.OutputNodes.Single(node => ReferenceEquals(node.Channel, channel));
+            SelectNode(output);
             Assert.DoesNotContain(flow.GetVisualDescendants().OfType<ComboBox>(),
                 control => control.Classes.Contains("outputChannelType"));
             Assert.DoesNotContain(flow.GetVisualDescendants().OfType<Button>(),
@@ -124,6 +127,8 @@ public sealed class IoFlowSettingsParityTests
             mode.SelectedItem = output.AvailableInputChannelTypes.Single(option => option.ChannelType == OutputChannel.ChannelType.AnalogueScaled);
             Layout();
             Assert.Equal(OutputChannel.ChannelType.AnalogueScaled, channel.ChanType);
+            await Task.Delay(150);
+            Layout();
             AssertSegmentedChoiceStyle(mode);
             SelectOutputTab("Analogue");
             Slider pwmMin = Assert.Single(flow.GetVisualDescendants().OfType<Slider>(),
@@ -205,7 +210,6 @@ public sealed class IoFlowSettingsParityTests
             window.KeyTextInput("7");
             Layout();
             Assert.Equal("7", thresholdHighValue.EditorBox.Text);
-            vm.IoFlowGraph.SelectedNodes.Add(output);
             int nodeCount = vm.IoFlowGraph.Nodes.Count;
             thresholdHighValue.EditorBox.CaretIndex = thresholdHighValue.EditorBox.Text!.Length;
             window.KeyPress(Key.Delete, RawInputModifiers.None, PhysicalKey.Delete, null);
@@ -213,7 +217,6 @@ public sealed class IoFlowSettingsParityTests
             thresholdHighValue.EditorBox.SelectAll();
             window.KeyPress(Key.Delete, RawInputModifiers.None, PhysicalKey.Delete, null);
             Assert.Equal(nodeCount, vm.IoFlowGraph.Nodes.Count);
-            vm.IoFlowGraph.SelectedNodes.Clear();
             thresholdHighValue.EditorBox.Text = "abc";
             Assert.False(thresholdHighValue.Commit());
             Assert.Equal("Enter a number", thresholdHighValue.ValidationMessage);
@@ -257,6 +260,13 @@ public sealed class IoFlowSettingsParityTests
                 Layout();
             }
 
+            void SelectNode(IoFlowNodeViewModel node)
+            {
+                vm.IoFlowGraph.SelectedNodes.Clear();
+                vm.IoFlowGraph.SelectedNodes.Add(node);
+                Layout();
+            }
+
             void SelectOutputTab(string header)
             {
                 TabItem tab = Assert.Single(flow.GetVisualDescendants().OfType<TabItem>(),
@@ -292,7 +302,7 @@ public sealed class IoFlowSettingsParityTests
             Assert.Equal(new CornerRadius(6), segment.CornerRadius);
             if (item.IsSelected)
             {
-                var fill = Assert.IsType<LinearGradientBrush>(segment.Background);
+                var fill = Assert.IsAssignableFrom<ILinearGradientBrush>(segment.Background);
                 Assert.Equal(new[] { Color.Parse("#FF5A4280"), Color.Parse("#FF443061") }, fill.GradientStops.Select(stop => stop.Color));
                 Assert.Equal(Color.Parse("#88C8A7FF"), Assert.IsAssignableFrom<ISolidColorBrush>(segment.BorderBrush).Color);
                 Assert.Equal(FontWeight.SemiBold, item.FontWeight);

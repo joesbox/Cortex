@@ -183,6 +183,8 @@ public sealed class IoFlowMathWiringRenderingTests
             Assert.NotEqual(rule.OperandAConnector.Anchor, rule.OperandBConnector.Anchor);
             Assert.True(a.IsEffectivelyVisible);
             Assert.True(b.IsEffectivelyVisible);
+            graph.SelectedNodes.Add(rule);
+            UpdateLayout();
             var aSource = Assert.Single(view.GetVisualDescendants().OfType<ComboBox>(), box => box.Classes.Contains("mathOperandASource"));
             var bSource = Assert.Single(view.GetVisualDescendants().OfType<ComboBox>(), box => box.Classes.Contains("mathOperandBSource"));
             Assert.Equal(3, aSource.ItemCount);

@@ -1,5 +1,6 @@
 using Avalonia;
 using Cortex.Models;
+using System.Linq;
 
 namespace Cortex.ViewModels.IoFlow;
 
@@ -20,6 +21,7 @@ public sealed class MathSourceNodeViewModel : IoFlowNodeViewModel
 
     public void AssignSource(byte index)
     {
+        LiveHistory.Clear();
         SourceIndex = index;
         OnPropertyChanged(nameof(SourceIndex));
         LiveValueText = "--";
@@ -63,5 +65,17 @@ public sealed class MathSourceNodeViewModel : IoFlowNodeViewModel
     {
         var operand = new OutputChannel.MathRule { OperandAType = (byte)OperandType, OperandAIndex = SourceIndex };
         LiveValueText = IsAvailable ? MathRuntimeDisplayFormatter.FormatOperand(operand, true, live, 1, null) : "--";
+    }
+
+    public double? GetLiveChartValue(DataStructures live)
+    {
+        if (!IsAvailable)
+            return null;
+        if (OperandType == OutputChannel.MathOperandType.CanSignal)
+        {
+            var signal = live.CustomCanSignalsLiveData.FirstOrDefault(signal => signal.Index == SourceIndex);
+            return signal?.Status == (byte)CustomCanStatus.Valid ? signal.RuntimeValue : null;
+        }
+        return live.SystemParams.GetMathSystemValue((OutputChannel.MathSystemValue)SourceIndex);
     }
 }

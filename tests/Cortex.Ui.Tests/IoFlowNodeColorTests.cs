@@ -15,7 +15,7 @@ namespace Cortex.Ui.Tests;
 public sealed class IoFlowNodeColorTests
 {
     [AvaloniaFact]
-    public void NodesShareGradientAndHaveDistinctBordersEvenWhenSelected()
+    public void NodesSharePropertyPanelSurfaceAndHaveDistinctBordersEvenWhenSelected()
     {
         var settings = new DataStructures();
         var channel = new OutputChannel { ChannelNumber = 1 };
@@ -49,14 +49,10 @@ public sealed class IoFlowNodeColorTests
                 .OfType<ItemContainer>(), item => ReferenceEquals(item.DataContext, node))).ToArray();
             var borders = containers.Select(container => Assert.Single(container.GetVisualDescendants()
                 .OfType<Border>(), border => border.Classes.Contains("ioFlowNode"))).ToArray();
-            var gradients = borders.Select(border => Assert.IsType<LinearGradientBrush>(border.Background)).ToArray();
+            var backgrounds = borders.Select(border => border.Background).ToArray();
             Color[] borderColors = borders.Select(border => Assert.IsAssignableFrom<ISolidColorBrush>(border.BorderBrush).Color).ToArray();
-            foreach (var gradient in gradients)
-            {
-                Assert.Equal(new[] { 0.0, 0.55, 1.0 }, gradient.GradientStops.Select(stop => stop.Offset));
-                Assert.Equal(new[] { Color.Parse("#FF2E2143"), Color.Parse("#FF261A38"), Color.Parse("#FF1E152E") },
-                    gradient.GradientStops.Select(stop => stop.Color));
-            }
+            Assert.All(borders, border => Assert.Equal(Color.Parse("#FF221C34"),
+                Assert.IsAssignableFrom<ISolidColorBrush>(border.Background).Color));
             for (int i = 0; i < borderColors.Length; i++)
                 for (int j = i + 1; j < borderColors.Length; j++)
                 {
@@ -81,6 +77,7 @@ public sealed class IoFlowNodeColorTests
                     Assert.Equal(Assert.IsType<SolidColorBrush>(outputPin.PinBrush).Color,
                         Assert.IsAssignableFrom<ISolidColorBrush>(borders[5].BorderBrush).Color);
                     Color outputColor = Assert.IsAssignableFrom<ISolidColorBrush>(borders[5].BorderBrush).Color;
+                    Assert.Equal(Color.Parse("#68C579"), outputColor);
                     for (int i = 0; i < borderColors.Length; i++)
                     {
                         if (i == 5) continue;
@@ -100,9 +97,8 @@ public sealed class IoFlowNodeColorTests
 
             for (int i = 0; i < borders.Length; i++)
             {
-                var background = Assert.IsType<LinearGradientBrush>(borders[i].Background);
-                Assert.Equal(new[] { Color.Parse("#FF2E2143"), Color.Parse("#FF261A38"), Color.Parse("#FF1E152E") },
-                    background.GradientStops.Select(stop => stop.Color));
+                Assert.Equal(Color.Parse("#FF221C34"),
+                    Assert.IsAssignableFrom<ISolidColorBrush>(borders[i].Background).Color);
                 Assert.Equal(borderColors[i], Assert.IsAssignableFrom<ISolidColorBrush>(borders[i].BorderBrush).Color);
                 Assert.Equal(2, borders[i].BoxShadow.Count);
                 Assert.Equal(Color.FromArgb(255, borderColors[i].R, borderColors[i].G, borderColors[i].B), borders[i].BoxShadow[0].Color);
@@ -124,7 +120,7 @@ public sealed class IoFlowNodeColorTests
             window.UpdateLayout();
             Dispatcher.UIThread.RunJobs();
             for (int i = 0; i < borders.Length; i++)
-                Assert.Same(gradients[i], borders[i].Background);
+                Assert.Same(backgrounds[i], borders[i].Background);
 
             void AssertPinColor(int index, ConnectorPinRole role)
             {

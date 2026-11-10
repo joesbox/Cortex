@@ -38,6 +38,7 @@ public sealed partial class AnalogueInputNodeViewModel : IoFlowNodeViewModel
 
     public void AssignInput(AnalogueInput input)
     {
+        LiveHistory.Clear();
         Input.PropertyChanged -= OnInputPropertyChanged;
         Input = input;
         Input.PropertyChanged += OnInputPropertyChanged;
@@ -45,6 +46,7 @@ public sealed partial class AnalogueInputNodeViewModel : IoFlowNodeViewModel
         OnPropertyChanged(nameof(Input));
         OnPropertyChanged(nameof(InputNumber));
         OnPropertyChanged(nameof(FilteredAnalogueUnits));
+        OnPropertyChanged(nameof(ChartLabel));
         UpdateLiveState(null);
     }
 
@@ -81,7 +83,11 @@ public sealed partial class AnalogueInputNodeViewModel : IoFlowNodeViewModel
     {
         if (e.PropertyName == nameof(AnalogueInput.ChanType))
         {
+            LiveHistory.Clear();
             OnPropertyChanged(nameof(FilteredAnalogueUnits));
+            OnPropertyChanged(nameof(ChartLabel));
         }
+        else if (e.PropertyName == nameof(AnalogueInput.Units))
+            LiveHistory.Clear();
     }
 }

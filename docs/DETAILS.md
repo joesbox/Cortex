@@ -4,12 +4,83 @@ This document contains detailed implementation, transport, and hardware-test not
 
 ## I/O configuration
 
+I/O Flow auto-arrange leaves 240 pixels of horizontal clearance between node
+columns; vertical spacing is unchanged.
+
+Configuration files include persisted Custom CAN message and signal records,
+including TX trigger, mode and period. Loading stages them alongside the other
+settings; Save to controller writes the changed records. Older files that only
+embedded these records in the I/O Flow signature recover them from that
+signature before graph validation. Live CAN status is not restored from files.
+
+Local layout saves include both standalone logic-node positions and their
+controller channel/rule-slot aliases. Controller reloads reconstruct rules by
+channel and slot rather than local logic ID; the aliases preserve their exact
+positions and canvas membership across restarts without saving configuration
+locally. Each canvas keeps its own viewport and node coordinates.
+
 I/O Flow is the only visible I/O editor and is selected when Settings opens.
 The legacy I/O tab is hidden and disabled; CAN Messages, Connector, System and
 the shared Save/Revert controls remain available.
 
+Nodes are read-only summary cards with connectors, a 20-point title and 16-point
+configuration summaries. Digital/analogue inputs, output channels and decoded
+CAN RX/system-value nodes include a rolling ten-second mini chart; logic, CAN TX,
+ignition and system CAN nodes do not. Logic results use a prominent text readout.
+Select one node to edit its existing
+settings in the resizable, scrollable Node properties panel on the right.
+Every node type uses the output editor's shared setting cards, with 20-point
+headings, 14-point labels/controls, matching padding, borders and spacing.
+Canvas nodes share the properties panel's solid purple surface, rounded frame
+and inset setting cards, while retaining type-coloured borders and selection glows.
+All output modes share the same green (`#68C579`) in node borders, selection
+glows, connector pins and connector legends. Subtype labels remain distinct;
+analogue inputs use yellow (`#E3C85C`), while digital inputs, ignition and CAN
+retain their separate palette colours.
+Title, summary and mini-chart cards share the same width and aligned edges,
+with connectors in separate side columns. Mini charts fill their card below
+the summary, with a 140-pixel chart height. Both axes have major and minor grid lines matching the
+main live chart's grey separator colours and stroke weights.
+Connection ports are discreet vertical pills (6 by 18 pixels) within transparent
+10 by 24 pixel hit targets. Four-pixel side gaps leave more width for the cards.
+Ports use dark muted purple; wires and drag previews use moderately bright, desaturated purple with
+matching arrow fills, brighter hover feedback and a subdued selected-wire glow.
+An empty or multiple selection shows a selection prompt, not an arbitrary node's
+settings. Selection and live chart updates do not stage controller changes;
+configuration still uses the shared Save/Revert lifecycle.
+
+Mini charts use timestamped controller telemetry: digital electrical state,
+analogue value (or voltage when no scaled value is reported), output current,
+decoded CAN/system values. Every series is a single green, unfilled line path
+with flat caps and no point markers; missing readings start separate path figures.
+Series have no per-sample strokes or dots, and
+chart labels use 14-point text. The properties panel retains the full per-output
+logic runtime details. Missing, invalid and
+timed-out readings leave gaps. Charts age out old samples even when telemetry
+stops, keep at most 101 samples at 100 ms spacing, and reset when a source
+assignment or analogue mode/units changes. Chart history is transient and is
+not saved in controller settings or local layout snapshots.
+
+Analogue voltage is connector-side (0-5 V), already scaled by firmware using
+`MCU pin volts * (5.0 / 3.3)`; Cortex never applies the divider gain again.
+Raw-voltage and analogue-digital mini charts have a fixed 0-5 V range, as does
+the main live chart's voltage axis when it contains only connector-voltage
+series. Calibrated/NTC values retain their engineering units and dynamic ranges;
+a voltage axis shared with calibrated voltage values remains dynamic.
+Output thresholds/scales and calibration voltage points use connector volts.
+Connector/status readouts and log values consume the reported values unchanged,
+including any out-of-range readings rather than silently clamping telemetry.
+Log charts retain their shared dynamic value axis for mixed units.
+
+System-value nodes and logic operand readouts support all 14 firmware sources:
+system/SIM/IMU temperatures, battery voltage, total current, and all three axes
+of acceleration (G), gyroscope (degrees/second) and magnetic field (microtesla).
+The live-status reply includes the nine IMU axes as an optional 36-byte suffix.
+Older firmware omitting it leaves these readouts unavailable and mini charts
+empty; missing data is not displayed as zero. Session loss clears the IMU values.
+
 Analogue, digital, decoded CAN RX and system-value nodes have source assignment
-selectors. Reassignment preserves node positions and retargets both operands
+selectors in the properties panel. Reassignment preserves node positions and retargets both operands
 and physical-output wires, including hidden configured rules. Input settings
 belong to the selected physical channel and are not copied from the old channel.
 Sources already represented by another node are excluded. An input change that
@@ -18,14 +89,14 @@ CAN RX choices are enabled decoded receive signals; an unavailable current
 assignment remains visible so it can be repaired. Ignition and system CAN are
 fixed hardware/protocol sources, not numbered input channels.
 
-Wiring determines the output mode. Output nodes offer only source-compatible
+Wiring determines the output mode. Output properties offer only source-compatible
 sub-options: digital/PWM/intermittent, analogue threshold/scaled PWM, CAN
 digital/PWM, or maths digital/PWM. There is no general output-type dropdown,
 connection summary, add-rule button or maths output-effect readout on outputs.
-Output nodes retain category/name, current limits, inrush, retries, applicable
+Output properties retain category/name, current limits, inrush, retries, applicable
 PWM duty/ranges and timing settings. Protection and timing settings are available
 for maths and unconnected outputs. Analogue threshold
-direction is selectable; analogue source nodes include calibration ranges and
+direction is selectable; analogue source properties include calibration ranges and
 NTC beta/nominal resistance, including for logging-only sources.
 The channel enabled switch edits the stored controller `Enabled` flag and also
 disables the node's configuration controls. It remains accessible while disabled.
@@ -37,7 +108,9 @@ Select/delete rule nodes to remove them. Comparison nodes expose hysteresis;
 ON/OFF thresholds appear only while it is enabled. Unsupported settings are
 hidden, including units/pull resistors for incompatible input modes and timing
 durations for disabled timers/ramps. CAN TX nodes select stored messages, enable/disable them
-without removing trigger assignments, and stage independent mode/period edits.
+without removing trigger assignments, and stage mode/period edits immediately.
+There is no separate Apply step: Save to controller persists these pending
+changes. CAN TX nodes use dark blue, distinct from the other I/O node colours.
 Connecting additional TX nodes adds assignments; deleting a node/wire removes
 that assignment. Frame/signal definitions remain in CAN Messages.
 
@@ -51,8 +124,8 @@ minute in I/O Flow after opening Settings and switching through CAN Messages.
 Tab entry did not create pending configuration changes. No configuration or
 output commands were sent during this check.
 
-Maths runtime displays use separate, vertically stacked operand A, operand B and
-rule-result sections in I/O Flow. Unary operations
+Maths runtime details use separate, vertically stacked operand A, operand B and
+rule-result sections in the properties panel. Unary operations
 hide operand B. Fixed panel/node widths and wrapped text keep changing telemetry
 from resizing the layout horizontally; output effects and rule usage remain in
 their own sections. Results come from controller telemetry, not local evaluation.
@@ -60,10 +133,10 @@ There is no combined all-rule runtime summary.
 Maths outputs expose Digital/PWM sub-options: the
 connected rule result determines ON/OFF or a duty cycle clamped to 0-100%, not a fixed
 PWM slider value. Selected nodes keep their normal background and gain a glow
-matching their type-specific border colour; selected wires glow light purple.
+matching their type-specific border colour; selected wires use a muted purple glow.
 Node glows follow the rounded corners and fade outward without a solid expanded outline;
-node containers do not clip, so the glow can render beyond the card edge.
-Unselected wires are dark purple and brighten on hover. Click a wire and press Delete or
+node cards and containers do not clip, so the glow can render beyond the card edge.
+Unselected wires are muted purple and brighten on hover. Click a wire and press Delete or
 right-click it to remove the connection. Clicking empty canvas clears the
 selection. Wires follow connector
 positions throughout node drags, including when live updates resize a node.
@@ -74,8 +147,8 @@ Live readings (output current, analogue voltage/value, maths operands and result
 CAN/system sources, connector pin values and live chart legends/tooltips) are shown to
 one decimal place; configured constants keep their entered precision. Output current
 thresholds and the inrush current limit snap to 0.1 A (100 mA) steps. Every I/O Flow
-slider fills its card and shows its value right-aligned beside it in a column with a minimum width sized for the widest expected value, so changing
-values never resize the slider. Each output-node parameter (its title, controls and value) sits in its own subtle card; the Delayed OFF trigger lives in the Delayed OFF card. The Retry count card spans the full node width unless a PWM output shows the Duty card, which then takes the left half.
+slider in the properties panel fills its setting card and shows its value right-aligned beside it in a column with a minimum width sized for the widest expected value, so changing
+values never resize the slider. Each output parameter (its title, controls and value) sits in its own subtle card; the Delayed OFF trigger lives in the Delayed OFF card. The Retry count card spans the full panel width unless a PWM output shows the Duty card, which then takes the left half.
 Clicking a slider value (in I/O Flow and the System current limit) opens an inline box for typing an exact value. Enter or clicking away applies it, and Escape cancels. A unit suffix such as `A`, `s`, `ms` or `%` is optional, and `,` is accepted as the decimal separator. Non-numbers and values outside the slider's current range are rejected with a red border and a tooltip. Clicking away with an invalid value reverts it. Accepted values snap to the slider step and then pass through the same view-model clamping and rounding as dragging. Keys typed in the box never reach canvas shortcuts such as Delete.
 
 I/O Flow supports up to 20 named canvases. The canvas tabs sit along the top edge of the
@@ -91,13 +164,27 @@ and controller settings are shared across canvases, so changing canvases does
 not create duplicate physical inputs or outputs.
 Select nodes and right-click "Move selected nodes to canvas" to choose a
 destination. The entire connected group moves, including indirect connections;
-confirmation is required if connected nodes were not selected. Moves retain
-node coordinates and connections. Auto arrange affects only the current canvas.
+confirmation is required if connected nodes were not selected. Moves place the
+group in free space near the destination canvas's viewport, preserving relative
+node positions and connections. If nearby space is occupied, the group is placed
+below the existing nodes rather than overlapping them.
+Auto arrange affects only the current canvas.
 Canvas names, membership, selected canvas, node positions, and each canvas's pan
 position and zoom are stored in the
-local draft and in saved configuration files, and restored when those files are
-loaded. Older files without canvas metadata use a single canvas.
+local layout file and restored across sessions, independently of controller
+configuration. They are also included in saved configuration files and restored
+when those files are loaded. Older files without canvas metadata use a single canvas.
 The output node's Active label and live LED are in its header.
+
+A minimap below the properties panel in the right-hand sidebar shows only the current canvas's nodes.
+The properties panel uses the remaining height and scrolls independently, keeping the canvas unobstructed.
+Nodes use their border colour without a viewport tint. The dark-grey, gridded
+background fills the preview with a fixed eight-pixel inset, regardless of node
+positions, panning or zoom. The world extent expands to the preview's aspect
+ratio rather than shrinking the background; nodes retain their proportions
+and move relative to the viewport marquee. The visible viewport has the
+application's pink accent outline. Click or drag in
+the overview to pan without changing zoom, node positions or controller settings.
 
 Math rules have separate A/B input connectors (B is hidden for unary operations).
 Every nonconstant operand has a source node and a wire, including imported
@@ -126,16 +213,22 @@ Save to controller uses a captured configuration; edits made during a save remai
 pending rather than being reported as saved. Controller settings refresh waits
 for a fresh math status response before loading math rules, including after a
 save, so cached telemetry cannot restore deleted rules.
-Local I/O Flow persistence stores an unsaved draft of input calibration, output
-settings, maths rules, CAN definitions/assignments and layout separately from its
-original controller baseline. Drafts survive restart and reconnect. After fresh
-static, maths and custom CAN snapshots arrive, an unchanged controller baseline
+Local I/O Flow persistence stores only canvas layout metadata and node positions,
+not input calibration, output settings, maths rules or CAN definitions/assignments.
+Unsaved controller edits are discarded on restart; layout is applied only to
+matching nodes rebuilt from the current settings. Legacy local drafts are migrated
+to layout-only files without restoring their controller edits.
+While waiting for initial controller and maths settings, layout saves retain
+positions for nodes not loaded yet, including their canvas membership. Loading
+an explicit configuration or reverting changes replaces the layout instead.
+During the same application session, unsaved edits are retained in memory across
+reconnects. After fresh static, maths and custom CAN snapshots arrive, an unchanged controller baseline
 restores the draft automatically; an independently changed controller prompts
 for Restore Draft or Use Controller. Restoration stages edits, never writes to
 the PDM automatically. Already-applied drafts recover their layout without
 requiring another save. Revert Changes explicitly discards the draft.
-Using Controller requires explicit confirmation to discard the draft; cancelling
-that confirmation keeps the file untouched and defers the choice until reconnect.
+Using Controller requires explicit confirmation to discard the in-memory draft;
+cancelling that confirmation defers the choice until reconnect.
 Local files are replaced atomically and persistence errors are logged.
 Configuration signatures exclude runtime values and cellular/system credentials.
 Restored standalone rule chains are validated and compiled before dirty-state
@@ -175,7 +268,7 @@ pending-change warning.
 Node locations use a local two-way container binding so Nodify's drag updates
 do not override subsequent undo, auto-arrange or restored-layout positions.
 
-CAN TX connections and applied mode/period edits in I/O Flow are pending
+CAN TX connections and mode/period edits in I/O Flow are pending
 configuration changes. Neither writes to the PDM until Save to controller;
 Revert Changes discards them. Nodes and CAN Messages share enabled state,
 trigger channel, mode and period. Create TX nodes explicitly in I/O Flow.

@@ -32,7 +32,7 @@ public sealed partial class IoFlowGraphViewModel
             ShowAddNodeWarning("No additional enabled CAN RX signals are available. Configure a receive message and its decoded signals first.");
             return;
         }
-        AddMathSourceNode(OutputChannel.MathOperandType.CanSignal, (byte)signal.Index, ConsumeNextNodeSpawnLocation(new Point(50, 50), 340, 200));
+        AddMathSourceNode(OutputChannel.MathOperandType.CanSignal, (byte)signal.Index, ConsumeNextNodeSpawnLocation(new Point(50, 50), 310, 400));
         if (_settings != null)
         {
             RebuildConnections(_settings);
@@ -57,7 +57,7 @@ public sealed partial class IoFlowGraphViewModel
             ShowAddNodeWarning("All system value sources are already on the canvas.");
             return;
         }
-        AddMathSourceNode(OutputChannel.MathOperandType.SystemValue, (byte)value.Value, ConsumeNextNodeSpawnLocation(new Point(50, 50), 340, 200));
+        AddMathSourceNode(OutputChannel.MathOperandType.SystemValue, (byte)value.Value, ConsumeNextNodeSpawnLocation(new Point(50, 50), 310, 400));
         RebuildConnections(_settings);
         ClearAddNodeWarning();
         NotifyGraphChanged(false);

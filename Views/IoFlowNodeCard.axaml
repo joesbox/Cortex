@@ -1,0 +1,145 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:io="using:Cortex.ViewModels.IoFlow"
+             xmlns:controls="using:Cortex.Controls"
+             x:Class="Cortex.Views.IoFlowNodeCard"
+             ClipToBounds="False"
+             x:CompileBindings="False">
+    <UserControl.Styles>
+        <Style Selector="TextBlock">
+            <Setter Property="FontSize" Value="16" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+    </UserControl.Styles>
+    <Border Classes="ioFlowNode" Width="310" BorderBrush="{Binding BorderHex}" BorderThickness="{Binding BorderThickness}" TextElement.Foreground="#FFE9E1F8">
+        <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto" ColumnSpacing="4" RowSpacing="10">
+            <ContentControl Content="{Binding}" VerticalAlignment="Top">
+                <ContentControl.DataTemplates>
+                    <DataTemplate DataType="{x:Type io:MathRuleNodeViewModel}">
+                        <StackPanel Spacing="12">
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="A" FontSize="14" />
+                                <controls:IoFlowConnector Classes="ioFlowConnector mathOperandA" DataContext="{Binding OperandAConnector}" WireAnchor="{Binding Anchor, Mode=OneWayToSource}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+                            </StackPanel>
+                            <StackPanel Spacing="3" IsVisible="{Binding ShowOperandB}">
+                                <TextBlock Text="B" FontSize="14" />
+                                <controls:IoFlowConnector Classes="ioFlowConnector mathOperandB" DataContext="{Binding OperandBConnector}" WireAnchor="{Binding Anchor, Mode=OneWayToSource}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+                            </StackPanel>
+                        </StackPanel>
+                    </DataTemplate>
+                    <DataTemplate DataType="{x:Type io:OutputNodeViewModel}">
+                        <controls:IoFlowConnector Classes="ioFlowConnector" DataContext="{Binding InputConnector}" WireAnchor="{Binding Anchor, Mode=OneWayToSource}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+                    </DataTemplate>
+                    <DataTemplate DataType="{x:Type io:CanTxNodeViewModel}">
+                        <controls:IoFlowConnector Classes="ioFlowConnector" DataContext="{Binding InputConnector}" WireAnchor="{Binding Anchor, Mode=OneWayToSource}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+                    </DataTemplate>
+                    <DataTemplate DataType="{x:Type io:IoFlowNodeViewModel}">
+                        <Panel />
+                    </DataTemplate>
+                </ContentControl.DataTemplates>
+            </ContentControl>
+            <StackPanel Grid.Column="1" Spacing="10">
+                <Border Classes="settingGroup">
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
+                    <TextBlock Classes="nodeTitle" Text="{Binding Title}" FontWeight="Bold" FontSize="20" TextWrapping="Wrap" />
+                    <ContentControl Grid.Column="1" Content="{Binding}">
+                        <ContentControl.DataTemplates>
+                            <DataTemplate DataType="{x:Type io:OutputNodeViewModel}">
+                                <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                                    <TextBlock Text="Active:" FontSize="14" VerticalAlignment="Center" />
+                                    <Ellipse Classes="outputActiveLed" Width="12" Height="12" Fill="{Binding OutputLedBrush}" ToolTip.Tip="{Binding OutputActiveToolTip}" />
+                                </StackPanel>
+                            </DataTemplate>
+                            <DataTemplate DataType="{x:Type io:IoFlowNodeViewModel}">
+                                <Panel />
+                            </DataTemplate>
+                        </ContentControl.DataTemplates>
+                    </ContentControl>
+                </Grid>
+                </Border>
+                <Border Classes="settingGroup">
+                <ContentControl Content="{Binding}">
+                    <ContentControl.DataTemplates>
+                        <DataTemplate DataType="{x:Type io:DigitalInputNodeViewModel}">
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="Digital input / active high" />
+                                <TextBlock Text="{Binding LiveStatusText}" />
+                            </StackPanel>
+                        </DataTemplate>
+                        <DataTemplate DataType="{x:Type io:AnalogueInputNodeViewModel}">
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="{Binding Input.ChanType, StringFormat='Mode: {0}'}" />
+                                <TextBlock Text="{Binding Input.Units, StringFormat='Units: {0}'}" />
+                                <TextBlock IsVisible="{Binding Input.IsCalibrationMode}" Text="{Binding Input.CalibrationPoints, StringFormat='Calibration: {0} points'}" />
+                                <TextBlock Text="{Binding LiveVoltageText, StringFormat='Connector: {0}'}" ToolTip.Tip="Connector-side voltage (0-5 V), scaled by the PDM firmware." />
+                                <TextBlock Text="{Binding LiveValueText, StringFormat='Value: {0}'}" />
+                            </StackPanel>
+                        </DataTemplate>
+                        <DataTemplate DataType="{x:Type io:OutputNodeViewModel}">
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="{Binding Channel.ChanType, StringFormat='Output: {0}'}" />
+                                <TextBlock Text="{Binding Channel.Category, StringFormat='Category: {0}'}" />
+                                <TextBlock Text="{Binding CurrentThresholdHighValue, StringFormat='Current limit: {0:0.#} A'}" />
+                                <TextBlock IsVisible="{Binding ShowDutyConfiguration}" Text="{Binding DutyValue, StringFormat='PWM duty: {0:0.#}%'}" />
+                                <TextBlock IsVisible="{Binding ShowAnalogueThresholdConfiguration}" Text="{Binding OnThresholdValue, StringFormat='ON threshold: {0:0.##}'}" />
+                                <TextBlock IsVisible="{Binding ShowAnalogueThresholdConfiguration}" Text="{Binding OffThresholdValue, StringFormat='OFF threshold: {0:0.##}'}" />
+                                <TextBlock IsVisible="{Binding IsMathChannel}" Text="{Binding MathOutputModeSummary, StringFormat='Math output: {0}'}" />
+                                <TextBlock Text="{Binding LiveCurrentText, StringFormat='Live current: {0}'}" />
+                            </StackPanel>
+                        </DataTemplate>
+                        <DataTemplate DataType="{x:Type io:MathRuleNodeViewModel}">
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="{Binding OperationSummary, StringFormat='Operation: {0}'}" />
+                                <TextBlock Text="{Binding SelectedOperandASource.Label, StringFormat='A: {0}'}" TextWrapping="Wrap" />
+                                <TextBlock IsVisible="{Binding ShowOperandAConstant}" Text="{Binding Rule.OperandAConstant, StringFormat='Constant A: {0}'}" />
+                                <TextBlock IsVisible="{Binding ShowOperandB}" Text="{Binding SelectedOperandBSource.Label, StringFormat='B: {0}'}" TextWrapping="Wrap" />
+                                <TextBlock IsVisible="{Binding ShowOperandBConstant}" Text="{Binding Rule.OperandBConstant, StringFormat='Constant B: {0}'}" />
+                                <Border Classes="mathRuleResult" Padding="6" CornerRadius="4" BorderThickness="1">
+                                    <TextBlock Classes="mathLiveValue" FontSize="20" FontWeight="SemiBold" Text="{Binding LiveRuleResultText}" TextWrapping="Wrap" />
+                                </Border>
+                            </StackPanel>
+                        </DataTemplate>
+                        <DataTemplate DataType="{x:Type io:MathSourceNodeViewModel}">
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="{Binding SelectedSource.Label}" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding LiveValueText}" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </DataTemplate>
+                        <DataTemplate DataType="{x:Type io:CanTxNodeViewModel}">
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="{Binding ModeText}" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding StatusText}" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding Message.TriggerLabel, StringFormat='Trigger: {0}'}" />
+                            </StackPanel>
+                        </DataTemplate>
+                        <DataTemplate DataType="{x:Type io:CanInputNodeViewModel}">
+                            <TextBlock Text="System CAN input / output control" TextWrapping="Wrap" />
+                        </DataTemplate>
+                        <DataTemplate DataType="{x:Type io:IgnitionOnNodeViewModel}">
+                            <TextBlock Text="Ignition input / fixed source" />
+                        </DataTemplate>
+                    </ContentControl.DataTemplates>
+                </ContentControl>
+                </Border>
+            </StackPanel>
+            <ContentControl Grid.Column="2" Content="{Binding}" IsVisible="{Binding HasOutputConnector}" VerticalAlignment="Top">
+                <ContentControl.DataTemplates>
+                    <DataTemplate DataType="{x:Type io:MathSourceNodeViewModel}">
+                        <Panel IsEnabled="{Binding IsAvailable}">
+                            <controls:IoFlowConnector Classes="ioFlowConnector" DataContext="{Binding OutputConnector}" WireAnchor="{Binding Anchor, Mode=OneWayToSource}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+                        </Panel>
+                    </DataTemplate>
+                    <DataTemplate DataType="{x:Type io:IoFlowNodeViewModel}">
+                        <controls:IoFlowConnector Classes="ioFlowConnector" DataContext="{Binding OutputConnector}" WireAnchor="{Binding Anchor, Mode=OneWayToSource}" IsConnected="{Binding IsConnected, Mode=TwoWay}" />
+                    </DataTemplate>
+                </ContentControl.DataTemplates>
+            </ContentControl>
+            <Border Grid.Row="1" Grid.Column="1" Classes="settingGroup" IsVisible="{Binding HasLiveChart}">
+                <StackPanel Spacing="6">
+                    <TextBlock Text="{Binding ChartLabel}" Foreground="#FFD0C3E8" FontSize="14" TextWrapping="Wrap" />
+                    <controls:IoFlowMiniChart IsVisible="{Binding HasLiveChart}" AutomationProperties.Name="Rolling ten-second live chart" />
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Border>
+</UserControl>

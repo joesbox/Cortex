@@ -6,6 +6,9 @@ namespace Cortex.Models
     [Serializable]
     public partial class AnalogueInput : ObservableObject
     {
+        public const double ConnectorVoltageMinimum = 0.0;
+        public const double ConnectorVoltageMaximum = 5.0;
+
         public enum AnalogueChannelType : byte
         {
             RawVoltage = 0,
@@ -48,7 +51,7 @@ namespace Cortex.Models
         private bool _pullDownEnable;       // Pull-down resistor enable flag
 
         [ObservableProperty]
-        private float? _inputVoltage;       // Live input voltage
+        private float? _inputVoltage;       // Connector-side volts, already scaled by firmware
 
         [ObservableProperty]
         private float? _inputValue;         // Live converted value in selected units
@@ -84,6 +87,8 @@ namespace Cortex.Models
         private float _ntcNominalResistance;
 
         public bool IsRawVoltageMode => ChanType == AnalogueChannelType.RawVoltage;
+
+        public bool ReportsConnectorVoltage => ChanType is AnalogueChannelType.RawVoltage or AnalogueChannelType.Digital;
 
         public bool IsUnitsSelectable => ChanType != AnalogueChannelType.RawVoltage && ChanType != AnalogueChannelType.Digital;
 
@@ -124,6 +129,7 @@ namespace Cortex.Models
         {
             NormalizeForType();
             OnPropertyChanged(nameof(IsRawVoltageMode));
+            OnPropertyChanged(nameof(ReportsConnectorVoltage));
             OnPropertyChanged(nameof(IsUnitsSelectable));
             OnPropertyChanged(nameof(IsNtcMode));
             OnPropertyChanged(nameof(IsCalibrationMode));

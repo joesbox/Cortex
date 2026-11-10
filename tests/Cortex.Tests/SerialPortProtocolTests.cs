@@ -3,6 +3,8 @@ using Cortex.Services;
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.IO;
+using Cortex.ViewModels.IoFlow;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
@@ -12,6 +14,96 @@ namespace Cortex.Tests;
 
 public class SerialPortProtocolTests
 {
+    [Fact]
+    public void LiveSystemValuesReachEverySourceReadoutAndChartAndClearForLegacyFirmware()
+    {
+        using var service = new SerialPortService("COM1");
+        DataStructures data = GetField<DataStructures>(service, "dataStructures");
+        float[] axes = [0.125f, -0.25f, 1f, -11.5f, 22.5f, -33.5f, 44.5f, -55.5f, 66.5f];
+        Parse(axes);
+        float[] expected = [41, 42.5f, 43.5f, 12.5f, 7.5f, .. axes];
+        string[] units = ["°C", "°C", "°C", "V", "A", "G", "G", "G", "°/s", "°/s", "°/s", "µT", "µT", "µT"];
+        foreach (var value in Enum.GetValues<OutputChannel.MathSystemValue>())
+        {
+            var node = new MathSourceNodeViewModel(OutputChannel.MathOperandType.SystemValue, (byte)value, "", default);
+            node.UpdateLiveState(data);
+            Assert.Equal(expected[(int)value], node.GetLiveChartValue(data));
+            Assert.DoesNotContain("--", node.LiveValueText);
+            Assert.EndsWith(" " + units[(int)value], node.LiveValueText);
+        }
+        Assert.Equal((ushort)0x1234, data.SystemParams.ErrorFlags);
+        Assert.Equal((ushort)4, data.SystemParams.MobileSignalPercent);
+
+        axes[0] = -2;
+        Parse(axes);
+        Assert.Equal(-2, data.SystemParams.AccelerationX);
+        Parse([]);
+        AssertMissingAxes();
+        Parse(axes);
+        InvokeInstanceMethod(service, "MarkControllerSessionLost", true);
+        AssertMissingAxes();
+
+        void Parse(float[] values)
+        {
+            byte[] frame = BuildLiveSystemFrame(values);
+            SetField(service, "dataBytes", frame);
+            SetField(service, "dataLength", frame.Length);
+            Assert.True((bool)InvokeInstanceMethod(service, "ParseLiveStatusPacket")!);
+        }
+
+        void AssertMissingAxes()
+        {
+            foreach (var value in Enum.GetValues<OutputChannel.MathSystemValue>().Skip(5))
+            {
+                var node = new MathSourceNodeViewModel(OutputChannel.MathOperandType.SystemValue, (byte)value, "", default);
+                node.UpdateLiveState(data);
+                Assert.Null(node.GetLiveChartValue(data));
+                Assert.EndsWith(": --", node.LiveValueText);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(8)]
+    public void LiveStatusRejectsTruncatedImuSuffixWithoutPublishingPartialAxes(int axisCount)
+    {
+        using var service = new SerialPortService("COM1");
+        var data = GetField<DataStructures>(service, "dataStructures");
+        data.SystemParams.AccelerationX = 99;
+        byte[] frame = BuildLiveSystemFrame(new float[axisCount]);
+        SetField(service, "dataBytes", frame);
+        SetField(service, "dataLength", frame.Length);
+        Assert.False((bool)InvokeInstanceMethod(service, "ParseLiveStatusPacket")!);
+        foreach (var value in Enum.GetValues<OutputChannel.MathSystemValue>().Skip(5))
+            Assert.Null(data.SystemParams.GetMathSystemValue(value));
+    }
+
+    private static byte[] BuildLiveSystemFrame(float[] axes)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream);
+        writer.Write((ushort)0x1984);
+        writer.Write((byte)Constants.COMMAND_ID_REQUEST);
+        writer.Write((byte)Constants.NUM_OUTPUT_CHANNELS);
+        writer.Write(new byte[Constants.NUM_OUTPUT_CHANNELS * 9]);
+        writer.Write((byte)8);
+        writer.Write(new byte[8 * 8]);
+        writer.Write(41);
+        foreach (float value in new[] { 42.5f, 43.5f, 12.5f, 7.5f })
+            writer.Write(value);
+        writer.Write((ushort)0x1234);
+        writer.Write((byte)4);
+        foreach (float value in axes)
+            writer.Write(value);
+        writer.Write((ushort)0x1985);
+        uint checksum = 0;
+        foreach (byte value in stream.ToArray())
+            checksum += value;
+        writer.Write(checksum);
+        return stream.ToArray();
+    }
+
     [Fact]
     public void CustomCanDefinitionsLoadAfterStaticSnapshotWithoutOpeningCanTab()
     {

@@ -4,9 +4,9 @@ namespace Cortex.ViewModels.IoFlow;
 
 public sealed partial class IoFlowConnectionViewModel : ObservableObject
 {
-    private const string DefaultStrokeHex = "#FF8254B8";
-    private const string SelectedStrokeHex = "#FFE0C8FF";
-    private const string HoveredStrokeHex = "#FFB794EB";
+    private const string DefaultStrokeHex = "#FF78638F";
+    private const string SelectedStrokeHex = "#FFB29ACB";
+    private const string HoveredStrokeHex = "#FF9580AD";
 
     public IoFlowConnectionViewModel(IoFlowConnectorEndpoint source, IoFlowConnectorEndpoint target, string label)
     {

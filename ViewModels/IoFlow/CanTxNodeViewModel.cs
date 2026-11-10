@@ -18,6 +18,7 @@ public sealed class CanTxNodeViewModel : IoFlowNodeViewModel
     private bool _editIsPeriodic;
     private int _editTimeoutMs;
     private int _selectedMessageIndex;
+    private bool _refreshingEditFields;
     private string _validationMessage = string.Empty;
     private CustomCanMessage _message;
     private IReadOnlyList<CustomCanMessage> _availableMessages;
@@ -49,6 +50,8 @@ public sealed class CanTxNodeViewModel : IoFlowNodeViewModel
         set => SetSelectedMessageIndex(value, notifyGraph: true);
     }
 
+    public Action<CanTxNodeViewModel>? SettingsEdited { get; set; }
+
     public bool EditIsPeriodic
     {
         get => _editIsPeriodic;
@@ -61,6 +64,8 @@ public sealed class CanTxNodeViewModel : IoFlowNodeViewModel
 
             _editIsPeriodic = value;
             OnPropertyChanged(nameof(EditIsPeriodic));
+            if (!_refreshingEditFields)
+                SettingsEdited?.Invoke(this);
         }
     }
 
@@ -76,6 +81,8 @@ public sealed class CanTxNodeViewModel : IoFlowNodeViewModel
 
             _editTimeoutMs = value;
             OnPropertyChanged(nameof(EditTimeoutMs));
+            if (!_refreshingEditFields)
+                SettingsEdited?.Invoke(this);
         }
     }
 
@@ -119,8 +126,16 @@ public sealed class CanTxNodeViewModel : IoFlowNodeViewModel
 
     public void RefreshEditFieldsFromMessage()
     {
-        EditIsPeriodic = Message.IsPeriodic;
-        EditTimeoutMs = Message.TimeoutMs;
+        _refreshingEditFields = true;
+        try
+        {
+            EditIsPeriodic = Message.IsPeriodic;
+            EditTimeoutMs = Message.TimeoutMs;
+        }
+        finally
+        {
+            _refreshingEditFields = false;
+        }
     }
 
     public void SetAvailableMessages(IReadOnlyList<CustomCanMessage> availableMessages)
@@ -143,6 +158,7 @@ public sealed class CanTxNodeViewModel : IoFlowNodeViewModel
         }
 
         _message.PropertyChanged -= Message_PropertyChanged;
+        LiveHistory.Clear();
         _message = message;
         _message.PropertyChanged += Message_PropertyChanged;
 

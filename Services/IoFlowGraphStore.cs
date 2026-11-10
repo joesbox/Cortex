@@ -1,6 +1,7 @@
 using Cortex.ViewModels.IoFlow;
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 
 namespace Cortex.Services;
@@ -22,12 +23,22 @@ public sealed class IoFlowGraphStore
             "ioflow-graph.json");
     }
 
-    public void Save(IoFlowGraphSnapshot snapshot)
+    public void Save(IoFlowGraphSnapshot snapshot, bool preserveUnmatchedNodePositions = false)
+        => Save(snapshot.ToLayoutSnapshot(), preserveUnmatchedNodePositions);
+
+    public void Save(IoFlowGraphLayoutSnapshot layout, bool preserveUnmatchedNodePositions = false)
     {
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(_snapshotPath)!);
-            string json = JsonSerializer.Serialize(snapshot, JsonOptions);
+            if (preserveUnmatchedNodePositions && TryLoad(out var previous))
+            {
+                var identities = layout.NodePositions.Select(node => (node.Kind, node.Id, node.Option)).ToHashSet();
+                var canvasIds = layout.Canvases.Select(canvas => canvas.Id).ToHashSet();
+                layout.NodePositions.AddRange(previous.NodePositions.Where(node =>
+                    canvasIds.Contains(node.CanvasId) && !identities.Contains((node.Kind, node.Id, node.Option))));
+            }
+            string json = JsonSerializer.Serialize(layout, JsonOptions);
             string temporaryPath = _snapshotPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
             try
             {
@@ -41,13 +52,13 @@ public sealed class IoFlowGraphStore
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
-            LoggingService.AddLog("Could not save the local I/O Flow draft. Unsaved changes may not survive restart.", ex.Message);
+            LoggingService.AddLog("Could not save the local I/O Flow layout.", ex.Message);
         }
     }
 
-    public bool TryLoad(out IoFlowGraphSnapshot snapshot)
+    public bool TryLoad(out IoFlowGraphLayoutSnapshot snapshot)
     {
-        snapshot = new IoFlowGraphSnapshot();
+        snapshot = new IoFlowGraphLayoutSnapshot();
 
         try
         {
@@ -57,23 +68,47 @@ public sealed class IoFlowGraphStore
             }
 
             string json = File.ReadAllText(_snapshotPath);
-            IoFlowGraphSnapshot? loaded = JsonSerializer.Deserialize<IoFlowGraphSnapshot>(json);
-            if (loaded == null)
+            using JsonDocument document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
             {
-                return false;
-            }
-            if (!IoFlowGraphViewModel.IsCanvasLayoutValid(loaded))
-            {
-                LoggingService.AddLog("Could not load the local I/O Flow draft: invalid canvas layout.");
+                LoggingService.AddLog("Could not load the local I/O Flow layout: invalid snapshot format.");
                 return false;
             }
 
-            snapshot = loaded;
+            if (document.RootElement.TryGetProperty(nameof(IoFlowGraphLayoutSnapshot.NodePositions), out _))
+            {
+                IoFlowGraphLayoutSnapshot? loadedLayout = JsonSerializer.Deserialize<IoFlowGraphLayoutSnapshot>(json);
+                if (loadedLayout == null || !IoFlowGraphViewModel.IsNodePositionsValid(loadedLayout))
+                {
+                    LoggingService.AddLog("Could not load the local I/O Flow layout: invalid canvas layout or node positions.");
+                    return false;
+                }
+
+                snapshot = loadedLayout;
+                return true;
+            }
+
+            IoFlowGraphSnapshot? legacy = JsonSerializer.Deserialize<IoFlowGraphSnapshot>(json);
+            if (legacy == null || !IoFlowGraphViewModel.IsCanvasLayoutValid(legacy))
+            {
+                LoggingService.AddLog("Could not load the local I/O Flow layout: invalid canvas layout.");
+                return false;
+            }
+
+            IoFlowGraphLayoutSnapshot migratedLayout = legacy.ToLayoutSnapshot();
+            if (!IoFlowGraphViewModel.IsNodePositionsValid(migratedLayout))
+            {
+                LoggingService.AddLog("Could not load the local I/O Flow layout: invalid node positions.");
+                return false;
+            }
+
+            Save(legacy);
+            snapshot = migratedLayout;
             return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
-            LoggingService.AddLog("Could not load the local I/O Flow draft.", ex.Message);
+            LoggingService.AddLog("Could not load the local I/O Flow layout.", ex.Message);
             return false;
         }
     }

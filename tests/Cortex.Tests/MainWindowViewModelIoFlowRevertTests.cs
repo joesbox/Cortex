@@ -4,6 +4,7 @@ using Cortex.Services;
 using Cortex.ViewModels;
 using Cortex.ViewModels.IoFlow;
 using System.Reflection;
+using System.Text.Json;
 using Xunit;
 
 namespace Cortex.Tests;
@@ -25,6 +26,63 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
         }
 
         ConfigureBaseline();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ConfigFileRestoresCanTxChangesAndEnablesSave(bool legacyFile)
+    {
+        var tx = Assert.Single(_viewModel.IoFlowGraph.CanTxNodes);
+        await _viewModel.IoFlowGraph.ConnectNodes(
+            _viewModel.IoFlowGraph.OutputNodes.Single(node => node.ChannelNumber == 1), tx);
+        tx.EditIsPeriodic = true;
+        tx.EditTimeoutMs = 1200;
+        var flow = (IoFlowGraphConfigSnapshot)typeof(MainWindowViewModel)
+            .GetMethod("CreateIoFlowConfigSnapshot", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .Invoke(_viewModel, null)!;
+        string content = ConfigFileSerializer.SerializeSettings(_viewModel.SettingsDataView, flow);
+        if (legacyFile)
+        {
+            var json = System.Text.Json.Nodes.JsonNode.Parse(content)!.AsObject();
+            json.Remove("CanMessages");
+            json.Remove("CanSignals");
+            content = json.ToJsonString();
+        }
+        _viewModel.RevertChanges();
+        ((TestAppCloser)GetField("_appCloser").GetValue(_viewModel)!).ConfigContent = content;
+
+        await _viewModel.OpenConfigFileCommand.ExecuteAsync(null);
+
+        Assert.True(_viewModel.CanSendConfig, _viewModel.IoFlowControllerMismatchWarning);
+        Assert.DoesNotContain("does not match", _viewModel.IoFlowControllerMismatchWarning);
+        var restored = Assert.Single(_viewModel.IoFlowGraph.CanTxNodes);
+        Assert.True(restored.Message.IsPeriodic);
+        Assert.Equal(1200, restored.Message.TimeoutMs);
+        Assert.Equal(0, restored.Message.TxTrigger);
+    }
+
+    [Fact]
+    public async Task ConfigFileRestoresPendingLogicAndEnablesSave()
+    {
+        var graph = _viewModel.IoFlowGraph;
+        var logic = Assert.Single(graph.MathRuleNodes, node => node.IsStandalone);
+        logic.Rule.OperandAConstant = 42;
+        await graph.ConnectNodes(logic, graph.OutputNodes.Single(node => node.ChannelNumber == 1));
+        var flow = (IoFlowGraphConfigSnapshot)typeof(MainWindowViewModel)
+            .GetMethod("CreateIoFlowConfigSnapshot", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .Invoke(_viewModel, null)!;
+        string content = ConfigFileSerializer.SerializeSettings(_viewModel.SettingsDataView, flow);
+        _viewModel.RevertChanges();
+        var closer = (TestAppCloser)GetField("_appCloser").GetValue(_viewModel)!;
+        closer.ConfigContent = content;
+
+        await _viewModel.OpenConfigFileCommand.ExecuteAsync(null);
+
+        Assert.True(_viewModel.CanSendConfig, _viewModel.IoFlowControllerMismatchWarning);
+        Assert.Equal(42, _viewModel.SettingsDataView.ChannelsStaticData[0].MathRules[0].OperandAConstant);
+        Assert.Contains("Save to controller", _viewModel.IoFlowControllerMismatchWarning);
+        Assert.Contains(_viewModel.IoFlowGraph.MathRuleNodes, node => node.IsStandalone && node.Rule.OperandAConstant == 42);
     }
 
     [Fact]
@@ -215,8 +273,8 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
             }
 
             var nodes = graph.CanTxNodes;
-            Assert.False(new Rect(nodes[0].Location, new Size(420, 480))
-                .Intersects(new Rect(nodes[1].Location, new Size(420, 480))));
+            Assert.False(new Rect(nodes[0].Location, new Size(310, 300))
+                .Intersects(new Rect(nodes[1].Location, new Size(310, 300))));
         }
     }
 
@@ -274,8 +332,8 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
             Assert.False(message.IsEnabled);
             Assert.Equal(Constants.CUSTOM_CAN_TX_TRIGGER_ALWAYS, message.TxTrigger);
         });
-        Assert.True(_store.TryLoad(out IoFlowGraphSnapshot stored));
-        Assert.DoesNotContain(stored.Nodes, node => node.Kind == "CanTx");
+        Assert.True(_store.TryLoad(out IoFlowGraphLayoutSnapshot stored));
+        Assert.DoesNotContain(stored.NodePositions, node => node.Kind == "CanTx");
 
         _viewModel.RevertChanges();
 
@@ -492,8 +550,6 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
         tx.EditIsPeriodic = true;
         tx.EditTimeoutMs = 30000;
 
-        await graph.ApplyCanTxNodeSettingsCommand.ExecuteAsync(tx);
-
         Assert.True(tx.Message.IsPeriodic);
         Assert.Equal(30000, tx.Message.TimeoutMs);
         Assert.Equal(1, _viewModel.SelectedChannelCanTxModeIndex);
@@ -583,7 +639,7 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
         await _viewModel.IoFlowGraph.UndoCommand.ExecuteAsync(null);
 
         AssertLocations(before, _viewModel.IoFlowGraph.CreateSnapshot());
-        Assert.True(_store.TryLoad(out IoFlowGraphSnapshot persisted));
+        Assert.True(_store.TryLoad(out IoFlowGraphLayoutSnapshot persisted));
         AssertLocations(before, persisted);
         Assert.False(_viewModel.HasPendingConfigChanges);
         Assert.False(_viewModel.HasIoFlowControllerMismatchWarning);
@@ -604,7 +660,7 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
         Assert.Equal(InputPinCatalog.DIChannelInputPins[0], _viewModel.SettingsDataView.ChannelsStaticData[0].InputControlPin);
         Assert.False(_viewModel.HasPendingConfigChanges);
         Assert.False(_viewModel.HasIoFlowControllerMismatchWarning);
-        Assert.True(_store.TryLoad(out IoFlowGraphSnapshot persisted));
+        Assert.True(_store.TryLoad(out IoFlowGraphLayoutSnapshot persisted));
         AssertLocations(_viewModel.IoFlowGraph.CreateSnapshot(), persisted);
     }
 
@@ -636,13 +692,16 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
         AssertLocations(expected, _viewModel.IoFlowGraph.CreateSnapshot());
         Assert.False(_viewModel.HasPendingConfigChanges);
         Assert.False(_viewModel.HasIoFlowControllerMismatchWarning);
-        Assert.True(_store.TryLoad(out IoFlowGraphSnapshot persisted));
+        Assert.True(_store.TryLoad(out IoFlowGraphLayoutSnapshot persisted));
         AssertLocations(expected, persisted);
 
         var reopenedGraph = new IoFlowGraphViewModel();
         reopenedGraph.Build(_viewModel.SettingsDataView, _viewModel.LiveDataView);
-        reopenedGraph.ApplySnapshot(persisted);
-        AssertLocations(expected, reopenedGraph.CreateSnapshot());
+        reopenedGraph.PopulateFromCurrentSettings();
+        reopenedGraph.ApplyNodePositions(persisted);
+        IoFlowNodeSnapshot expectedOutput = Assert.Single(expected.Nodes, node => node.Kind == "Output" && node.Id == 1);
+        OutputNodeViewModel restoredOutput = Assert.Single(reopenedGraph.OutputNodes, node => node.ChannelNumber == 1);
+        Assert.Equal(new Point(expectedOutput.X, expectedOutput.Y), restoredOutput.Location);
     }
 
     [Fact]
@@ -691,55 +750,67 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
         IoFlowGraphSnapshot latestLayout = _viewModel.IoFlowGraph.CreateSnapshot();
         _viewModel.RevertChanges();
         AssertLocations(latestLayout, _viewModel.IoFlowGraph.CreateSnapshot());
-        Assert.True(_store.TryLoad(out IoFlowGraphSnapshot persisted));
+        Assert.True(_store.TryLoad(out IoFlowGraphLayoutSnapshot persisted));
         AssertLocations(latestLayout, persisted);
     }
 
-    [Theory]
-    [InlineData(false, true)]
-    [InlineData(true, true)]
-    [InlineData(true, false)]
-    public async Task RestartRecoversCompleteIoDraftAndAsksOnlyForIndependentControllerChanges(bool controllerChanged, bool restore)
+    [Fact]
+    public async Task RestartDropsUncommittedControllerEditsButRestoresCanvasLayout()
     {
-        DataStructures baseline = (DataStructures)GetField("_controllerConfigBaseline").GetValue(_viewModel)!;
-        _viewModel.SettingsDataView.ChannelsStaticData[0].Enabled ^= 1;
-        _viewModel.SettingsDataView.AnalogueInputsStaticData[0].CalibrationValue1 = 73;
-        _viewModel.SettingsDataView.CustomCanMessagesStaticData[0].TimeoutMs = 1450;
-        _viewModel.NotifySelectedChannelCanTxChanged();
+        var graph = _viewModel.IoFlowGraph;
+        var first = graph.SelectedCanvas;
+        first.Name = "Inputs";
+        graph.AddCanvasCommand.Execute(null);
+        var destination = graph.SelectedCanvas;
+        destination.Name = "Lighting";
+        destination.ViewportLocation = new Point(82, 91);
+        destination.ViewportZoom = 0.6;
+        graph.SelectedCanvas = first;
+        foreach (var node in graph.VisibleNodes)
+            graph.SelectedNodes.Add(node);
+        await graph.MoveSelectedNodesToCanvasCommand.ExecuteAsync(destination);
+        graph.AddCanvasCommand.Execute(null);
+        graph.SelectedCanvas.Name = "Accessories";
+        Assert.False(_viewModel.HasPendingConfigChanges);
+        Assert.False(_viewModel.HasIoFlowControllerMismatchWarning);
+        _viewModel.SettingsDataView.AnalogueInputsStaticData[0].CalibrationValue1 = 91;
         MoveAllNodes();
-        Assert.True(_viewModel.CanSendConfig);
-        Assert.True(_store.TryLoad(out var retained));
-        Assert.NotNull(retained.DraftSettings);
-        Assert.Null(retained.DraftSettings.InputsAndOutputs.CellularParameters);
-        Assert.Null(retained.DraftSettings.InputsAndOutputs.SystemParameters);
-        if (controllerChanged) baseline.ChannelsStaticData[0].InrushDelay++;
-        baseline.ChannelsStaticData[0].MathCalculatedRootValue = 99;
-        var closer = new TestAppCloser { ConfirmationResult = restore };
-        var restarted = new MainWindowViewModel(closer, new MainWindowViewModelDependencies(ioFlowGraphStore: _store));
+        IoFlowGraphSnapshot expected = _viewModel.IoFlowGraph.CreateSnapshot();
+        Assert.True(_viewModel.HasPendingConfigChanges);
+        Assert.True(_viewModel.HasIoFlowControllerMismatchWarning);
+        var restarted = new MainWindowViewModel(new TestAppCloser(),
+            new MainWindowViewModelDependencies(ioFlowGraphStore: _store));
         foreach (string name in new[] { "_uiUpdateTimer", "_pollTimer", "_commsTimer" })
             Assert.IsType<System.Timers.Timer>(GetField(name).GetValue(restarted)).Stop();
         try
         {
-            typeof(MainWindowViewModel).GetMethod("ReplaceSettingsData", BindingFlags.NonPublic | BindingFlags.Instance)!
-                .Invoke(restarted, [baseline]);
-            GetField("_controllerConfigBaseline").SetValue(restarted, baseline);
-            Assert.True(_store.TryLoad(out var stillRetained));
-            Assert.NotNull(stillRetained.DraftSettings);
-            await (Task)typeof(MainWindowViewModel).GetMethod("ReconcileIoFlowDraftAsync", BindingFlags.NonPublic | BindingFlags.Instance)!
-                .Invoke(restarted, null)!;
-            Assert.Equal(controllerChanged ? (restore ? 1 : 2) : 0, closer.ConfirmationCount);
-            bool restored = !controllerChanged || restore;
-            Assert.Equal(restored, restarted.HasPendingConfigChanges);
-            Assert.Equal(restored, restarted.CanSendConfig);
-            Assert.Equal(restored, restarted.HasIoFlowControllerMismatchWarning);
-            if (restored)
-            {
-                Assert.Equal(73, restarted.SettingsDataView.AnalogueInputsStaticData[0].CalibrationValue1);
-                Assert.Equal(1450, restarted.SettingsDataView.CustomCanMessagesStaticData[0].TimeoutMs);
-                AssertLocations(retained, restarted.IoFlowGraph.CreateSnapshot());
-            }
-            Assert.True(_store.TryLoad(out var reconciled));
-            Assert.Equal(restored, reconciled.DraftSettings != null);
+            Assert.False(restarted.HasPendingConfigChanges);
+            Assert.False(restarted.HasIoFlowControllerMismatchWarning);
+            Assert.NotEqual(91, restarted.SettingsDataView.AnalogueInputsStaticData[0].CalibrationValue1);
+            IoFlowNodeSnapshot expectedOutput = Assert.Single(expected.Nodes, node => node.Kind == "Output" && node.Id == 1);
+            OutputNodeViewModel restoredOutput = Assert.Single(restarted.IoFlowGraph.OutputNodes, node => node.ChannelNumber == 1);
+            Assert.Equal(new Point(expectedOutput.X, expectedOutput.Y), restoredOutput.Location);
+            Assert.Equal(destination.Id, restoredOutput.CanvasId);
+            Assert.Equal(["Inputs", "Lighting", "Accessories"], restarted.IoFlowGraph.Canvases.Select(canvas => canvas.Name));
+            Assert.Equal(expected.SelectedCanvasId, restarted.IoFlowGraph.SelectedCanvas.Id);
+            Assert.Empty(restarted.IoFlowGraph.VisibleNodes);
+            Assert.Equal(destination.ViewportLocation, restarted.IoFlowGraph.Canvases[1].ViewportLocation);
+            Assert.Equal(destination.ViewportZoom, restarted.IoFlowGraph.Canvases[1].ViewportZoom);
+
+            typeof(MainWindowViewModel).GetMethod("RefreshIoFlowGraphFromSettings", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .Invoke(restarted, null);
+            Assert.Equal(["Inputs", "Lighting", "Accessories"], restarted.IoFlowGraph.Canvases.Select(canvas => canvas.Name));
+            Assert.Equal(expected.SelectedCanvasId, restarted.IoFlowGraph.SelectedCanvas.Id);
+            Assert.Equal(destination.Id, restarted.IoFlowGraph.OutputNodes.First(node => node.ChannelNumber == 1).CanvasId);
+            Assert.False(restarted.HasPendingConfigChanges);
+
+            Assert.True(_store.TryLoad(out IoFlowGraphLayoutSnapshot stored));
+            Assert.Equal(expected.Nodes.Count, stored.NodePositions.Count);
+            string json = File.ReadAllText(Path.Combine(_directory, "ioflow-graph.json"));
+            Assert.DoesNotContain("DraftSettings", json);
+            Assert.DoesNotContain("StandaloneLogicRules", json);
+            Assert.DoesNotContain("ControllerSettingsSignature", json);
+            Assert.Contains("Canvases", json);
         }
         finally
         {
@@ -749,18 +820,74 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
     }
 
     [Fact]
-    public void OrdinaryInputEditsPersistDraftAndRevertExplicitlyDiscardsIt()
+    public void LegacyPersistedDraftIsIgnoredWhileItsNodePositionsAreMigrated()
+    {
+        _viewModel.IoFlowGraph.SelectedCanvas.Name = "Lighting";
+        _viewModel.IoFlowGraph.AddCanvasCommand.Execute(null);
+        _viewModel.IoFlowGraph.SelectedCanvas.Name = "Accessories";
+        IoFlowGraphSnapshot graph = _viewModel.IoFlowGraph.CreateSnapshot();
+        Assert.True(ConfigFileSerializer.TryDeserialize(
+            ConfigFileSerializer.SerializeSettings(_viewModel.SettingsDataView),
+            out ConfigSnapshot? draftSettings,
+            out string? error), error);
+        draftSettings!.AnalogueInputs![0].CalibrationValue1 = 91;
+        string path = Path.Combine(_directory, "ioflow-graph.json");
+        File.WriteAllText(path, JsonSerializer.Serialize(new
+        {
+            graph.Canvases,
+            graph.SelectedCanvasId,
+            graph.ControllerSettingsSignature,
+            DraftSettings = new
+            {
+                InputsAndOutputs = draftSettings,
+                CanMessages = Array.Empty<object>(),
+                CanSignals = Array.Empty<object>(),
+            },
+            DraftBaselineSignature = "obsolete",
+            graph.Nodes,
+            graph.StandaloneLogicRules,
+            graph.OutputRootLogicNodeByChannel,
+        }));
+
+        var restarted = new MainWindowViewModel(new TestAppCloser(),
+            new MainWindowViewModelDependencies(ioFlowGraphStore: _store));
+        foreach (string name in new[] { "_uiUpdateTimer", "_pollTimer", "_commsTimer" })
+            Assert.IsType<System.Timers.Timer>(GetField(name).GetValue(restarted)).Stop();
+        try
+        {
+            Assert.False(restarted.HasPendingConfigChanges);
+            Assert.False(restarted.HasIoFlowControllerMismatchWarning);
+            Assert.NotEqual(91, restarted.SettingsDataView.AnalogueInputsStaticData[0].CalibrationValue1);
+            IoFlowNodeSnapshot expectedOutput = Assert.Single(graph.Nodes, node => node.Kind == "Output" && node.Id == 1);
+            OutputNodeViewModel restoredOutput = Assert.Single(restarted.IoFlowGraph.OutputNodes, node => node.ChannelNumber == 1);
+            Assert.Equal(new Point(expectedOutput.X, expectedOutput.Y), restoredOutput.Location);
+            Assert.Equal(["Lighting", "Accessories"], restarted.IoFlowGraph.Canvases.Select(canvas => canvas.Name));
+            Assert.Equal(graph.SelectedCanvasId, restarted.IoFlowGraph.SelectedCanvas.Id);
+            Assert.True(_store.TryLoad(out IoFlowGraphLayoutSnapshot migrated));
+            Assert.Equal(graph.Nodes.Count, migrated.NodePositions.Count);
+            Assert.Equal(2, migrated.Canvases.Count);
+            Assert.DoesNotContain("DraftSettings", File.ReadAllText(path));
+        }
+        finally
+        {
+            foreach (string name in new[] { "_uiUpdateTimer", "_pollTimer", "_commsTimer" })
+                Assert.IsType<System.Timers.Timer>(GetField(name).GetValue(restarted)).Dispose();
+        }
+    }
+
+    [Fact]
+    public void OrdinaryInputEditsWarnButDoNotPersistControllerDraft()
     {
         _viewModel.SettingsDataView.AnalogueInputsStaticData[0].CalibrationValue1 = 91;
         Assert.True(_viewModel.CanSendConfig);
         Assert.True(_viewModel.HasIoFlowControllerMismatchWarning);
-        Assert.True(_store.TryLoad(out var draft));
-        Assert.NotNull(draft.DraftSettings);
+        Assert.True(_store.TryLoad(out IoFlowGraphLayoutSnapshot layout));
+        Assert.NotEmpty(layout.NodePositions);
         _viewModel.RevertChanges();
         Assert.False(_viewModel.CanSendConfig);
         Assert.False(_viewModel.HasIoFlowControllerMismatchWarning);
-        Assert.True(_store.TryLoad(out var reverted));
-        Assert.Null(reverted.DraftSettings);
+        Assert.True(_store.TryLoad(out IoFlowGraphLayoutSnapshot reverted));
+        Assert.Equal(layout.NodePositions.Count, reverted.NodePositions.Count);
     }
 
     [Fact]
@@ -782,8 +909,11 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
         typeof(MainWindowViewModel).GetMethod("UpdateIoFlowControllerMismatchWarning", BindingFlags.NonPublic | BindingFlags.Instance)!
             .Invoke(_viewModel, null);
         Assert.True(_viewModel.HasIoFlowControllerMismatchWarning);
-        Assert.True(_store.TryLoad(out var saved));
-        Assert.NotNull(saved.DraftSettings);
+        Assert.True(_store.TryLoad(out IoFlowGraphLayoutSnapshot saved));
+        var savedRule = Assert.Single(saved.NodePositions, node => node.Kind == "OutputMath" && node.Id == 2);
+        var standalone = Assert.Single(snapshot.Nodes, node => node.Kind == "Logic");
+        Assert.Equal(standalone.X, savedRule.X);
+        Assert.Equal(standalone.Y, savedRule.Y);
         typeof(MainWindowViewModel).GetMethod("CaptureIoFlowBaselineSnapshot", BindingFlags.NonPublic | BindingFlags.Instance)!
             .Invoke(_viewModel, null);
         _viewModel.RevertChanges();
@@ -792,57 +922,10 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
         Assert.False(_viewModel.CanSendConfig);
     }
 
-    [Fact]
-    public async Task DraftAlreadyAppliedOnControllerRestoresLayoutWithoutAnotherSave()
-    {
-        _viewModel.SettingsDataView.AnalogueInputsStaticData[0].CalibrationValue1 = 91;
-        MoveAllNodes();
-        Assert.True(_store.TryLoad(out var draft));
-        var copy = typeof(MainWindowViewModel).GetMethod("DeepCopyDataStructures", BindingFlags.NonPublic | BindingFlags.Instance)!;
-        GetField("_controllerConfigBaseline").SetValue(_viewModel, copy.Invoke(_viewModel, [_viewModel.SettingsDataView]));
-        typeof(MainWindowViewModel).GetMethod("RememberIoFlowDraft", BindingFlags.NonPublic | BindingFlags.Instance)!
-            .Invoke(_viewModel, [draft]);
-        await (Task)typeof(MainWindowViewModel).GetMethod("ReconcileIoFlowDraftAsync", BindingFlags.NonPublic | BindingFlags.Instance)!
-            .Invoke(_viewModel, null)!;
-        Assert.Equal(0, ((TestAppCloser)GetField("_appCloser").GetValue(_viewModel)!).ConfirmationCount);
-        Assert.False(_viewModel.CanSendConfig);
-        Assert.False(_viewModel.HasIoFlowControllerMismatchWarning);
-        AssertLocations(draft, _viewModel.IoFlowGraph.CreateSnapshot());
-        Assert.True(_store.TryLoad(out var stored));
-        Assert.Null(stored.DraftSettings);
-    }
-
-    [Fact]
-    public async Task CancellingRecoveryChoiceKeepsDraftUntouchedAndDoesNotRepeatedlyPrompt()
-    {
-        _viewModel.SettingsDataView.AnalogueInputsStaticData[0].CalibrationValue1 = 91;
-        Assert.True(_store.TryLoad(out var draft));
-        var baseline = (DataStructures)GetField("_controllerConfigBaseline").GetValue(_viewModel)!;
-        baseline.ChannelsStaticData[0].InrushDelay++;
-        var closer = (TestAppCloser)GetField("_appCloser").GetValue(_viewModel)!;
-        closer.ConfirmationResult = false;
-        closer.DiscardDraftConfirmationResult = false;
-        typeof(MainWindowViewModel).GetMethod("ReplaceSettingsData", BindingFlags.NonPublic | BindingFlags.Instance)!
-            .Invoke(_viewModel, [baseline]);
-        typeof(MainWindowViewModel).GetMethod("RecalculatePendingConfigChanges", BindingFlags.NonPublic | BindingFlags.Instance)!
-            .Invoke(_viewModel, null);
-        var reconcile = typeof(MainWindowViewModel).GetMethod("ReconcileIoFlowDraftAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
-        await (Task)reconcile.Invoke(_viewModel, null)!;
-        await (Task)reconcile.Invoke(_viewModel, null)!;
-        Assert.Equal(2, closer.ConfirmationCount);
-        Assert.False(_viewModel.CanSendConfig);
-        Assert.Contains("retained without applying", _viewModel.IoFlowControllerMismatchWarning);
-        MoveAllNodes();
-        Assert.True(_store.TryLoad(out var retained));
-        Assert.NotNull(retained.DraftSettings);
-        Assert.Equal(draft.DraftBaselineSignature, retained.DraftBaselineSignature);
-        AssertLocations(draft, retained);
-    }
-
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void FreshControllerReadbackPreservesAndRecoversPendingDraft(bool customCanReady)
+    public void FreshControllerReadbackPreservesPendingChangesInCurrentSession(bool customCanReady)
     {
         var baseline = (DataStructures)GetField("_controllerConfigBaseline").GetValue(_viewModel)!;
         _viewModel.SettingsDataView.AnalogueInputsStaticData[0].CalibrationValue1 = 91;
@@ -861,8 +944,8 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
         if (!customCanReady)
         {
             Assert.False(_viewModel.CanSendConfig);
-            Assert.True(_store.TryLoad(out var waiting));
-            Assert.NotNull(waiting.DraftSettings);
+            Assert.True(_store.TryLoad(out IoFlowGraphLayoutSnapshot waiting));
+            Assert.NotEmpty(waiting.NodePositions);
             typeof(SerialPortService).GetProperty("HasLoadedCustomCanSnapshot")!.SetValue(service, true);
             typeof(MainWindowViewModel).GetMethod("UpdateUIWithData", BindingFlags.NonPublic | BindingFlags.Instance)!
                 .Invoke(_viewModel, [baseline]);
@@ -874,8 +957,8 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
         Assert.Equal(0, ((TestAppCloser)GetField("_appCloser").GetValue(_viewModel)!).ConfirmationCount);
         var confirmed = (DataStructures)GetField("_controllerConfigBaseline").GetValue(_viewModel)!;
         Assert.NotEqual(91, confirmed.AnalogueInputsStaticData[0].CalibrationValue1);
-        Assert.True(_store.TryLoad(out var persisted));
-        Assert.NotNull(persisted.DraftSettings);
+        Assert.True(_store.TryLoad(out IoFlowGraphLayoutSnapshot persisted));
+        Assert.NotEmpty(persisted.NodePositions);
         GetField("_portService").SetValue(_viewModel, null);
     }
 
@@ -937,12 +1020,24 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
 
     private static (string Kind, int Id, byte Option) Key(IoFlowNodeSnapshot node) => (node.Kind, node.Id, node.Option);
 
+    private static (string Kind, int Id, byte Option) Key(IoFlowNodePositionSnapshot node) => (node.Kind, node.Id, node.Option);
+
     private static void AssertLocations(IoFlowGraphSnapshot expected, IoFlowGraphSnapshot actual)
     {
         Assert.Equal(expected.Nodes.Count, actual.Nodes.Count);
         foreach (IoFlowNodeSnapshot node in expected.Nodes)
         {
             IoFlowNodeSnapshot match = Assert.Single(actual.Nodes, item => Key(item) == Key(node));
+            Assert.Equal(new Point(node.X, node.Y), new Point(match.X, match.Y));
+        }
+    }
+
+    private static void AssertLocations(IoFlowGraphSnapshot expected, IoFlowGraphLayoutSnapshot actual)
+    {
+        Assert.Equal(expected.Nodes.Count, actual.NodePositions.Count);
+        foreach (IoFlowNodeSnapshot node in expected.Nodes)
+        {
+            IoFlowNodePositionSnapshot match = Assert.Single(actual.NodePositions, item => Key(item) == Key(node));
             Assert.Equal(new Point(node.X, node.Y), new Point(match.X, match.Y));
         }
     }
@@ -964,19 +1059,18 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
 
     private sealed class TestAppCloser : IAppCloser
     {
+        public string? ConfigContent { get; set; }
         public bool ConfirmationResult { get; set; } = true;
-        public bool DiscardDraftConfirmationResult { get; set; } = true;
         public int ConfirmationCount { get; private set; }
         public void CloseApp() { }
-        public Task<string?> OpenPdmFileContentAsync() => Task.FromResult<string?>(null);
+        public Task<string?> OpenPdmFileContentAsync() => Task.FromResult(ConfigContent);
         public Task<string?> BrowseLocalLogFilePathAsync(string initialDirectory) => Task.FromResult<string?>(null);
         public Task<string?> BrowseDbcFilePathAsync() => Task.FromResult<string?>(null);
         public Task<bool> SavePdmFileContentAsync(string content) => Task.FromResult(true);
         public Task<bool> ConfirmAsync(string title, string message, string confirmButtonText = "CONFIRM", string cancelButtonText = "CANCEL")
         {
             ConfirmationCount++;
-            return Task.FromResult(title == "Discard retained I/O Flow draft"
-                ? DiscardDraftConfirmationResult : ConfirmationResult);
+            return Task.FromResult(ConfirmationResult);
         }
         public Task OpenUrlAsync(string url) => Task.CompletedTask;
         public Task<LocalFirmwareUpdateSelection?> BrowseLocalFirmwareUpdateFilesAsync() => Task.FromResult<LocalFirmwareUpdateSelection?>(null);

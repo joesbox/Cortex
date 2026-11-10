@@ -53,7 +53,7 @@ public sealed class IoFlowWireInteractionTests
             window.MouseMove(cursor);
             Layout();
             Assert.True(model.IsHovered);
-            Assert.Equal(Color.Parse("#FFB794EB"), Assert.IsAssignableFrom<ISolidColorBrush>(wire.Stroke).Color);
+            Assert.Equal(Color.Parse("#FF9580AD"), Assert.IsAssignableFrom<ISolidColorBrush>(wire.Stroke).Color);
             Layout();
             Assert.True(model.IsHovered);
             graph.RebuildConnections(vm.SettingsDataView);
@@ -87,7 +87,7 @@ public sealed class IoFlowWireInteractionTests
             Layout();
             Assert.False(model.IsHovered);
             Assert.True(model.IsSelected);
-            Assert.Equal(Color.Parse("#FFE0C8FF"), Assert.IsAssignableFrom<ISolidColorBrush>(wire.Stroke).Color);
+            Assert.Equal(Color.Parse("#FFB29ACB"), Assert.IsAssignableFrom<ISolidColorBrush>(wire.Stroke).Color);
             Assert.Equal(7, wire.StrokeThickness);
             graph.RebuildConnections(vm.SettingsDataView);
             Layout();

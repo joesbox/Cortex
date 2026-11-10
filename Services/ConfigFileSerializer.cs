@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Cortex.Services
 {
@@ -36,7 +37,20 @@ namespace Cortex.Services
                     return false;
                 }
 
-                if (snapshot.Channels == null && snapshot.DigitalInputs == null && snapshot.AnalogueInputs == null && snapshot.SystemParameters == null && snapshot.CellularParameters == null && snapshot.CustomCanSignalMetadata == null && snapshot.IoFlowGraph == null)
+                // Older files kept CAN records only inside the graph's canonical signature.
+                if ((snapshot.CanMessages == null || snapshot.CanSignals == null)
+                    && !string.IsNullOrWhiteSpace(snapshot.IoFlowGraph?.ControllerSettingsSignature))
+                {
+                    using var signature = JsonDocument.Parse(snapshot.IoFlowGraph.ControllerSettingsSignature);
+                    if (signature.RootElement.TryGetProperty("InputsAndOutputs", out _))
+                    {
+                        var legacy = JsonSerializer.Deserialize<ConfigSnapshot>(snapshot.IoFlowGraph.ControllerSettingsSignature);
+                        snapshot.CanMessages ??= legacy?.CanMessages;
+                        snapshot.CanSignals ??= legacy?.CanSignals;
+                    }
+                }
+
+                if (snapshot.Channels == null && snapshot.DigitalInputs == null && snapshot.AnalogueInputs == null && snapshot.SystemParameters == null && snapshot.CellularParameters == null && snapshot.CustomCanSignalMetadata == null && snapshot.IoFlowGraph == null && snapshot.CanMessages == null && snapshot.CanSignals == null)
                 {
                     error = "Configuration file does not contain any recognized configuration sections.";
                     return false;
@@ -55,6 +69,36 @@ namespace Cortex.Services
 
         public static void ApplySnapshot(DataStructures target, ConfigSnapshot snapshot)
         {
+            if (snapshot.CanMessages != null)
+            {
+                foreach (var source in snapshot.CanMessages)
+                {
+                    if (source.Index < 0 || source.Index >= target.CustomCanMessagesStaticData.Count)
+                        throw new ArgumentException("Configuration contains an invalid CAN message slot.");
+                    var message = target.CustomCanMessagesStaticData[source.Index];
+                    message.Id = source.Id;
+                    message.Dlc = source.Dlc;
+                    message.Flags = source.Flags;
+                    message.TimeoutMs = source.TimeoutMs;
+                    message.TxTrigger = source.TxTrigger;
+                }
+            }
+            if (snapshot.CanSignals != null)
+            {
+                foreach (var source in snapshot.CanSignals)
+                {
+                    if (source.Index < 0 || source.Index >= target.CustomCanSignalsStaticData.Count)
+                        throw new ArgumentException("Configuration contains an invalid CAN signal slot.");
+                    var signal = target.CustomCanSignalsStaticData[source.Index];
+                    signal.MessageIndex = source.MessageIndex;
+                    signal.StartBit = source.StartBit;
+                    signal.BitLength = source.BitLength;
+                    signal.Flags = source.Flags;
+                    signal.ValueSource = source.ValueSource;
+                    signal.Factor = source.Factor;
+                    signal.Offset = source.Offset;
+                }
+            }
             if (snapshot.Channels != null)
             {
                 int channelCount = Math.Min(target.ChannelsStaticData.Count, snapshot.Channels.Count);
@@ -279,6 +323,17 @@ namespace Cortex.Services
         {
             return new ConfigSnapshot
             {
+                CanMessages = settingsData.CustomCanMessagesStaticData.Select(message => new CanMessageConfigSnapshot
+                {
+                    Index = message.Index, Id = message.Id, Dlc = message.Dlc, Flags = message.Flags,
+                    TimeoutMs = message.TimeoutMs, TxTrigger = message.TxTrigger,
+                }).ToList(),
+                CanSignals = settingsData.CustomCanSignalsStaticData.Select(signal => new CanSignalConfigSnapshot
+                {
+                    Index = signal.Index, MessageIndex = signal.MessageIndex, StartBit = signal.StartBit,
+                    BitLength = signal.BitLength, Flags = signal.Flags, ValueSource = signal.ValueSource,
+                    Factor = signal.Factor, Offset = signal.Offset,
+                }).ToList(),
                 FormatVersion = 1,
                 IoFlowGraph = ioFlowGraph,
                 Channels = settingsData.ChannelsStaticData.Select(channel => new OutputChannelSnapshot
@@ -477,6 +532,10 @@ namespace Cortex.Services
 
     public sealed class ConfigSnapshot
     {
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public List<CanMessageConfigSnapshot>? CanMessages { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public List<CanSignalConfigSnapshot>? CanSignals { get; set; }
         public int FormatVersion { get; set; } = 1;
 
         public IoFlowGraphConfigSnapshot? IoFlowGraph { get; set; }
@@ -492,6 +551,28 @@ namespace Cortex.Services
         public CellularParametersSnapshot? CellularParameters { get; set; }
 
         public List<CustomCanSignalMetadataSnapshot>? CustomCanSignalMetadata { get; set; }
+    }
+
+    public sealed class CanMessageConfigSnapshot
+    {
+        public int Index { get; set; }
+        public uint Id { get; set; }
+        public byte Dlc { get; set; }
+        public byte Flags { get; set; }
+        public ushort TimeoutMs { get; set; }
+        public byte TxTrigger { get; set; }
+    }
+
+    public sealed class CanSignalConfigSnapshot
+    {
+        public int Index { get; set; }
+        public byte MessageIndex { get; set; }
+        public byte StartBit { get; set; }
+        public byte BitLength { get; set; }
+        public byte Flags { get; set; }
+        public byte ValueSource { get; set; }
+        public float Factor { get; set; }
+        public float Offset { get; set; }
     }
 
     public sealed class OutputChannelSnapshot

@@ -2116,6 +2116,9 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
         }));
 
     public Task<bool> SetCustomCanMessageTxModeAsync(int messageIndex, bool isPeriodic, ushort timeoutMs)
+        => Task.FromResult(SetCustomCanMessageTxMode(messageIndex, isPeriodic, timeoutMs));
+
+    private bool SetCustomCanMessageTxMode(int messageIndex, bool isPeriodic, ushort timeoutMs)
     {
         if (isPeriodic && (timeoutMs < Constants.CUSTOM_CAN_TX_PERIOD_MIN_MS ||
                            timeoutMs > Constants.CUSTOM_CAN_TX_PERIOD_MAX_MS ||
@@ -2123,17 +2126,17 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
         {
             CustomCanStatusMessage = "Periodic TX period must be between 100 and 30,000 ms in 100 ms steps.";
             AddLog(CustomCanStatusMessage);
-            return Task.FromResult(false);
+            return false;
         }
 
-        return Task.FromResult(StageCustomCanTxMessageChange(messageIndex, message =>
+        return StageCustomCanTxMessageChange(messageIndex, message =>
         {
             message.IsPeriodic = isPeriodic;
             if (isPeriodic)
             {
                 message.TimeoutMs = timeoutMs;
             }
-        }));
+        });
     }
 
     private bool StageCustomCanTxMessageChange(int messageIndex, Action<CustomCanMessage> apply)
@@ -2814,7 +2817,8 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             bool baselineIsTx = (baseline.Flags & 0x04) != 0;
             bool compareTxTrigger = currentIsTx || baselineIsTx;
 
-            if (current.TimeoutMs != baseline.TimeoutMs ||
+            if (current.Id != baseline.Id || current.Dlc != baseline.Dlc ||
+                current.TimeoutMs != baseline.TimeoutMs ||
                 current.Flags != baseline.Flags ||
                 (compareTxTrigger && current.TxTrigger != baseline.TxTrigger))
             {
@@ -2834,7 +2838,9 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
                                        baselineData.CustomCanMessagesStaticData[baseline.MessageIndex].IsTx;
 
             bool valueSourceChanged = (currentOnTxMessage || baselineOnTxMessage) && current.ValueSource != baseline.ValueSource;
-            bool signalFlagsChanged = current.Flags != baseline.Flags;
+            bool signalFlagsChanged = current.Flags != baseline.Flags
+                || current.MessageIndex != baseline.MessageIndex || current.StartBit != baseline.StartBit
+                || current.BitLength != baseline.BitLength || current.Factor != baseline.Factor || current.Offset != baseline.Offset;
             if (valueSourceChanged || signalFlagsChanged)
             {
                 return true;
@@ -2866,7 +2872,8 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             bool baselineIsTx = (baseline.Flags & 0x04) != 0;
             bool compareTxTrigger = currentIsTx || baselineIsTx;
 
-            if (current.TimeoutMs != baseline.TimeoutMs ||
+            if (current.Id != baseline.Id || current.Dlc != baseline.Dlc ||
+                current.TimeoutMs != baseline.TimeoutMs ||
                 current.Flags != baseline.Flags ||
                 (compareTxTrigger && current.TxTrigger != baseline.TxTrigger))
             {
@@ -2887,7 +2894,9 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
                                        baselineData.CustomCanMessagesStaticData[baseline.MessageIndex].IsTx;
 
             bool valueSourceChanged = (currentOnTxMessage || baselineOnTxMessage) && current.ValueSource != baseline.ValueSource;
-            bool signalFlagsChanged = current.Flags != baseline.Flags;
+            bool signalFlagsChanged = current.Flags != baseline.Flags
+                || current.MessageIndex != baseline.MessageIndex || current.StartBit != baseline.StartBit
+                || current.BitLength != baseline.BitLength || current.Factor != baseline.Factor || current.Offset != baseline.Offset;
             if (valueSourceChanged || signalFlagsChanged)
             {
                 changedSignalIndexes.Add(i);

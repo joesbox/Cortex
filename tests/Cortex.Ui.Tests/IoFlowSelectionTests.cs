@@ -77,6 +77,8 @@ public class IoFlowSelectionTests
                 {
                     var border = borders[index];
                     Assert.False(containers[index].ClipToBounds);
+                    Assert.All(border.GetVisualAncestors().TakeWhile(ancestor => ancestor != editor),
+                        ancestor => Assert.False(ancestor.ClipToBounds, $"{ancestor.GetType().Name} clips the node glow"));
                     Assert.Equal(2, border.BoxShadow.Count);
                     var outline = border.BoxShadow[0];
                     Assert.Equal(255, outline.Color.A);
@@ -84,7 +86,7 @@ public class IoFlowSelectionTests
                     Assert.Equal(0, outline.Spread);
                     Assert.Equal(36, border.BoxShadow[1].Blur * zoom, 6);
                     Assert.Equal(0, border.BoxShadow[1].Spread);
-                    Assert.Equal(new CornerRadius(8), border.CornerRadius);
+                    Assert.Equal(new CornerRadius(10), border.CornerRadius);
                     Color borderColor = Assert.IsAssignableFrom<ISolidColorBrush>(border.BorderBrush).Color;
                     Assert.Equal(Color.FromArgb(255, borderColor.R, borderColor.G, borderColor.B), outline.Color);
                     Assert.Equal(Color.FromArgb(170, borderColor.R, borderColor.G, borderColor.B), border.BoxShadow[1].Color);
@@ -155,7 +157,7 @@ public class IoFlowSelectionTests
             Assert.DoesNotContain(view.GetVisualDescendants().OfType<TextBlock>(),
                 text => text.Classes.Contains("outputControlHint"));
             Border outputBorder = Assert.Single(view.GetVisualDescendants().OfType<Border>(),
-                border => border.Classes.Contains("ioFlowOutputNode"));
+                border => border.Classes.Contains("ioFlowNode") && ReferenceEquals(border.DataContext, output));
             Assert.DoesNotContain(outputBorder.GetVisualDescendants().OfType<TextBlock>(),
                 text => text.Text?.Contains("effect", StringComparison.OrdinalIgnoreCase) == true
                     || text.Text?.Contains("root", StringComparison.OrdinalIgnoreCase) == true);
@@ -170,6 +172,8 @@ public class IoFlowSelectionTests
             await graph.ConnectNodes(graph.MathRuleNodes.Single(), output);
             UpdateLayout();
             Assert.True(output.IsMathChannel);
+            graph.SelectedNodes.Add(output);
+            UpdateLayout();
             ComboBox mode = Assert.Single(view.GetVisualDescendants().OfType<ComboBox>(),
                 box => box.Classes.Contains("mathOutputMode"));
             Assert.True(mode.IsEffectivelyVisible);

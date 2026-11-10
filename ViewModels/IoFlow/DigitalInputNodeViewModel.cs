@@ -16,6 +16,7 @@ public sealed partial class DigitalInputNodeViewModel : IoFlowNodeViewModel
 
     public void AssignInput(DigitalInput input)
     {
+        LiveHistory.Clear();
         Input = input;
         Title = $"Digital Input {input.InputNumber}";
         OnPropertyChanged(nameof(Input));

@@ -178,6 +178,7 @@ public sealed class IoFlowUndoKeyboardTests
         graph.AutoArrangeNodesCommand.Execute(null);
         Point arranged = node.Location;
         Assert.NotEqual(original, arranged);
+        editor.ViewportLocation = arranged - new Vector(50, 50);
         try
         {
             window.Show();
@@ -241,6 +242,7 @@ public sealed class IoFlowUndoKeyboardTests
         var (graph, view, _, window) = CreateView();
         graph.AddLogicNodeCommand.Execute(null);
         graph.MathRuleNodes[0].Location = new Point(400, 50);
+        graph.SelectedNodes.Add(graph.MathRuleNodes[0]);
         try
         {
             window.Show();

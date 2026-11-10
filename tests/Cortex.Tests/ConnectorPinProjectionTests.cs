@@ -43,12 +43,15 @@ public class ConnectorPinProjectionTests
     }
 
     [Theory]
-    [InlineData(OutputChannel.ChannelType.Digital, "#BDA5FF")]
-    [InlineData(OutputChannel.ChannelType.PWM, "#83B7F1")]
-    [InlineData(OutputChannel.ChannelType.Intermittent, "#EAA3CD")]
-    [InlineData(OutputChannel.ChannelType.Analogue, "#68C579")]
-    [InlineData(OutputChannel.ChannelType.AnalogueScaled, "#BB8AD9")]
-    public void ConnectorOutputPalette_UsesNonOrangeColorsAcrossPinAndLegend(OutputChannel.ChannelType type, string expected)
+    [InlineData(OutputChannel.ChannelType.Digital)]
+    [InlineData(OutputChannel.ChannelType.PWM)]
+    [InlineData(OutputChannel.ChannelType.Intermittent)]
+    [InlineData(OutputChannel.ChannelType.Analogue)]
+    [InlineData(OutputChannel.ChannelType.AnalogueScaled)]
+    [InlineData(OutputChannel.ChannelType.CAN)]
+    [InlineData(OutputChannel.ChannelType.CAN_PWM)]
+    [InlineData(OutputChannel.ChannelType.MATH)]
+    public void ConnectorOutputPalette_UsesGlobalGreenAcrossPinAndLegend(OutputChannel.ChannelType type)
     {
         MainWindowViewModel viewModel = CreateViewModel();
         try
@@ -57,8 +60,8 @@ public class ConnectorPinProjectionTests
             ConnectorPinDisplayItem pin = viewModel.ConnectorPins.Single(item => item.PinNumber == 1);
             ConnectorLegendItem legend = viewModel.ConnectorLegendItems.Single(item =>
                 item.Text == ConnectorPinDisplayItem.FormatOutputChannelType(type));
-            Assert.Equal(Color.Parse(expected), Assert.IsType<SolidColorBrush>(pin.PinBrush).Color);
-            Assert.Equal(Color.Parse(expected), Assert.IsType<SolidColorBrush>(legend.Background).Color);
+            Assert.Equal(Color.Parse("#68C579"), Assert.IsType<SolidColorBrush>(pin.PinBrush).Color);
+            Assert.Equal(Color.Parse("#68C579"), Assert.IsType<SolidColorBrush>(legend.Background).Color);
         }
         finally
         {

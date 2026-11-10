@@ -1,4 +1,5 @@
 using CommunityToolkit.Mvvm.Input;
+using Avalonia;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -135,8 +136,22 @@ public sealed partial class IoFlowGraphViewModel
         }
         ClearSelection();
         ClearAddNodeWarning();
+        Rect bounds = moving.Select(node =>
+        {
+            NodeSize size = EstimateNodeSize(node);
+            return new Rect(node.Location, new Size(size.Width, size.Height));
+        }).Aggregate((left, right) => left.Union(right));
+        Point location = FindNearestAvailableSpawnLocation(
+            destination.ViewportLocation + new Vector(40, 40), bounds.Width, bounds.Height,
+            Nodes.Where(node => node.CanvasId == destination.Id).ToList(),
+            Connections.Where(connection => connection.Source.Node.CanvasId == destination.Id
+                && connection.Target.Node.CanvasId == destination.Id).ToList(), clampToViewport: false);
+        Vector offset = location - bounds.Position;
         foreach (IoFlowNodeViewModel node in moving)
+        {
             node.CanvasId = destination.Id;
+            node.Location += offset;
+        }
         ClearUndoHistory();
         RefreshVisibleGraph();
         NotifyGraphChanged(false);
@@ -233,6 +248,20 @@ public sealed partial class IoFlowGraphViewModel
                 && double.IsFinite(canvas.ViewportZoom) && canvas.ViewportZoom > 0)
             && ids.Contains(snapshot.SelectedCanvasId)
             && snapshot.Nodes.All(node => ids.Contains(node.CanvasId) && double.IsFinite(node.X) && double.IsFinite(node.Y));
+    }
+
+    public static bool IsNodePositionsValid(IoFlowGraphLayoutSnapshot snapshot)
+    {
+        if (snapshot.NodePositions == null || snapshot.NodePositions.Any(position => position == null))
+            return false;
+
+        var identities = new HashSet<(string Kind, int Id, byte Option)>();
+        return IsCanvasLayoutValid(snapshot.ToGraphSnapshot()) && snapshot.NodePositions.All(position =>
+            (position.Kind is "Digital" or "Analogue" or "Output" or "Can" or "CanTx" or "Ignition"
+                or "Logic" or "OutputMath" or "CanRx" or "SystemValue")
+            && double.IsFinite(position.X)
+            && double.IsFinite(position.Y)
+            && identities.Add((position.Kind, position.Id, position.Option)));
     }
 
     private void KeepConnectedNodesOnSameCanvas()

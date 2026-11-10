@@ -93,8 +93,8 @@ public sealed class IoFlowWireDragTests
                 item => ReferenceEquals(item.DataContext, node));
             Connector connector = Assert.Single(container.GetVisualDescendants().OfType<Connector>(),
                 item => ReferenceEquals(item.DataContext, endpoint));
-            Assert.Equal(18, connector.Width);
-            Assert.Equal(18, connector.Height);
+            Assert.Equal(10, connector.Width);
+            Assert.Equal(24, connector.Height);
             Connection wire = Assert.Single(view.GetVisualDescendants().OfType<Connection>(),
                 item => ReferenceEquals(item.DataContext, model) && !item.IsHitTestVisible && item.StrokeThickness == 4);
             List<Point> changes = [];

@@ -35,6 +35,9 @@ public sealed class IoFlowSourceSelectionTests
             IoFlowNodeViewModel[] sources = [graph.AnalogueNodes[0], graph.DigitalNodes[0], .. graph.MathSourceNodes];
             foreach (IoFlowNodeViewModel source in sources)
             {
+                graph.SelectedNodes.Clear();
+                graph.SelectedNodes.Add(source);
+                Layout();
                 ComboBox selector = Assert.Single(view.GetVisualDescendants().OfType<ComboBox>(),
                     box => box.Classes.Contains("nodeSourceSelector") && ReferenceEquals(box.DataContext, source));
                 Assert.True(selector.IsEffectivelyVisible);

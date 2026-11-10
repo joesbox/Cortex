@@ -107,6 +107,7 @@ public class SerialPortService : IDisposable
 
     private static readonly bool EnableLogTransferDebug = false;
     private const int ExtendedLiveSystemPayloadBytes = 23;
+    private const int LiveImuPayloadBytes = 9 * sizeof(float);
     private const int ExtendedStaticSystemPayloadBytes = 61;
     private const int StaticTimeZoneRulePayloadBytes = Constants.TIME_ZONE_RULE_LENGTH;
     private const int StaticCellularPayloadBytes = Constants.CELLULAR_STATIC_PAYLOAD_BYTES;
@@ -1879,6 +1880,7 @@ public class SerialPortService : IDisposable
         _digitalInputStatusSupportState = DigitalInputStatusSupportState.Unknown;
         _customCanStatusSupportState = CustomCanStatusSupportState.Unknown;
         ClearDigitalInputLiveStates();
+        ClearImuLiveValues();
 
         if (requestStaticSnapshot)
         {
@@ -2749,7 +2751,45 @@ public class SerialPortService : IDisposable
         dataStructures.SystemParams.SystemCurrent = reader.ReadSingle();
         dataStructures.SystemParams.ErrorFlags = reader.ReadUInt16();
         dataStructures.SystemParams.MobileSignalPercent = reader.ReadByte();
+        int extensionBytes = packetEndIndex - sizeof(ushort) - reader.Position;
+        if (extensionBytes == 0)
+        {
+            ClearImuLiveValues();
+        }
+        else if (extensionBytes < LiveImuPayloadBytes)
+        {
+            ClearImuLiveValues();
+            LogProtocolDebug($"Truncated live IMU payload: expected {LiveImuPayloadBytes} bytes, got {extensionBytes}.");
+            return false;
+        }
+        else
+        {
+            var system = dataStructures.SystemParams;
+            system.AccelerationX = reader.ReadSingle();
+            system.AccelerationY = reader.ReadSingle();
+            system.AccelerationZ = reader.ReadSingle();
+            system.GyroscopeX = reader.ReadSingle();
+            system.GyroscopeY = reader.ReadSingle();
+            system.GyroscopeZ = reader.ReadSingle();
+            system.MagneticFieldX = reader.ReadSingle();
+            system.MagneticFieldY = reader.ReadSingle();
+            system.MagneticFieldZ = reader.ReadSingle();
+        }
         return true;
+    }
+
+    private void ClearImuLiveValues()
+    {
+        var system = dataStructures.SystemParams;
+        system.AccelerationX = null;
+        system.AccelerationY = null;
+        system.AccelerationZ = null;
+        system.GyroscopeX = null;
+        system.GyroscopeY = null;
+        system.GyroscopeZ = null;
+        system.MagneticFieldX = null;
+        system.MagneticFieldY = null;
+        system.MagneticFieldZ = null;
     }
 
     private bool ParseDigitalInputStatusPacket()

@@ -52,7 +52,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
     /// Stages a Custom CAN TX message's timing mode and period:
     /// (messageIndex, isPeriodic, timeoutMs) → success.
     /// </summary>
-    public Func<int, bool, ushort, Task<bool>>? SetCustomCanTxModeAction { get; set; }
+    public Func<int, bool, ushort, bool>? SetCustomCanTxModeAction { get; set; }
 
     public Action<bool>? GraphChangedAction { get; set; }
 
@@ -61,6 +61,12 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
     public ObservableCollection<IoFlowConnectionViewModel> Connections { get; } = [];
 
     public ObservableCollection<object> SelectedNodes { get; } = [];
+
+    public IoFlowNodeViewModel? SelectedNode => SelectedNodes.Count == 1
+        ? SelectedNodes[0] as IoFlowNodeViewModel
+        : null;
+
+    public bool HasSelectedNode => SelectedNode != null;
 
     public IoFlowConnectionViewModel? SelectedConnection { get; private set; }
 
@@ -229,9 +235,13 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
             Math.Clamp(location.Y, minY, maxY));
     }
 
-    private Point FindNearestAvailableSpawnLocation(Point preferred, double nodeWidth, double nodeHeight)
+    private Point FindNearestAvailableSpawnLocation(Point preferred, double nodeWidth, double nodeHeight,
+        IReadOnlyList<IoFlowNodeViewModel>? existingNodes = null,
+        IReadOnlyList<IoFlowConnectionViewModel>? existingConnections = null, bool clampToViewport = true)
     {
-        if (IsSpawnCandidateAvailable(preferred, nodeWidth, nodeHeight))
+        existingNodes ??= VisibleNodes;
+        existingConnections ??= VisibleConnections;
+        if (IsSpawnCandidateAvailable(preferred, nodeWidth, nodeHeight, existingNodes, existingConnections))
         {
             return preferred;
         }
@@ -253,8 +263,8 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
 
                 foreach (Point rawCandidate in candidates)
                 {
-                    Point candidate = ClampToSpawnViewport(rawCandidate, nodeWidth, nodeHeight);
-                    if (IsSpawnCandidateAvailable(candidate, nodeWidth, nodeHeight))
+                    Point candidate = clampToViewport ? ClampToSpawnViewport(rawCandidate, nodeWidth, nodeHeight) : rawCandidate;
+                    if (IsSpawnCandidateAvailable(candidate, nodeWidth, nodeHeight, existingNodes, existingConnections))
                     {
                         return candidate;
                     }
@@ -263,7 +273,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
         }
 
         // The viewport can be full. Expand the canvas rather than reuse an occupied position.
-        double bottom = VisibleNodes.Select(node => node.Location.Y + EstimateNodeSize(node).Height).DefaultIfEmpty(0).Max();
+        double bottom = existingNodes.Select(node => node.Location.Y + EstimateNodeSize(node).Height).DefaultIfEmpty(0).Max();
         return new Point(preferred.X, Math.Max(preferred.Y, bottom + 40));
     }
 
@@ -501,11 +511,12 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
         NotifyGraphChanged(controllerSettingsChanged: _outputRootLogicNodeByChannel.Count > 0);
     }
 
-    private bool IsSpawnCandidateAvailable(Point location, double nodeWidth, double nodeHeight)
+    private static bool IsSpawnCandidateAvailable(Point location, double nodeWidth, double nodeHeight,
+        IReadOnlyList<IoFlowNodeViewModel> existingNodes, IReadOnlyList<IoFlowConnectionViewModel> existingConnections)
     {
         Rect candidateRect = new(location, new Size(nodeWidth, nodeHeight));
 
-        foreach (IoFlowNodeViewModel existingNode in VisibleNodes)
+        foreach (IoFlowNodeViewModel existingNode in existingNodes)
         {
             NodeSize existingSize = EstimateNodeSize(existingNode);
             Rect existingRect = ExpandRect(new Rect(existingNode.Location, new Size(existingSize.Width, existingSize.Height)), 20);
@@ -515,7 +526,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
             }
         }
 
-        if (IsOverlappingConnectionSegment(candidateRect))
+        if (IsOverlappingConnectionSegment(candidateRect, existingConnections))
         {
             return false;
         }
@@ -523,11 +534,11 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
         return true;
     }
 
-    private bool IsOverlappingConnectionSegment(Rect candidateRect)
+    private static bool IsOverlappingConnectionSegment(Rect candidateRect, IReadOnlyList<IoFlowConnectionViewModel> connections)
     {
         Rect expandedCandidate = ExpandRect(candidateRect, 10);
 
-        foreach (IoFlowConnectionViewModel connection in VisibleConnections)
+        foreach (IoFlowConnectionViewModel connection in connections)
         {
             Point source = GetOutputAnchor(connection.Source.Node);
             Point target = GetInputAnchor(connection.Target.Node);
@@ -850,6 +861,35 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
         }
     }
 
+    public IoFlowGraphLayoutSnapshot CreateLayoutSnapshot()
+    {
+        IoFlowGraphLayoutSnapshot layout = CreateSnapshot().ToLayoutSnapshot();
+        foreach (var (channelNumber, rootId) in _outputRootLogicNodeByChannel)
+        {
+            MathRuleNodeViewModel? root = MathRuleNodes.FirstOrDefault(node => node.IsStandalone && node.LogicNodeId == rootId);
+            if (root == null || !TryBuildOrderedLogicTree(root, out var ordered, out _))
+            {
+                throw new InvalidOperationException($"Cannot save logic node positions for output {channelNumber}.");
+            }
+            layout.NodePositions.RemoveAll(node => node.Kind == "OutputMath" && node.Id == channelNumber);
+            // Standalone IDs are local; controller reloads identify the same rules by channel and slot.
+            for (int index = 0; index < ordered.Count; index++)
+            {
+                var rule = ordered[index];
+                layout.NodePositions.Add(new IoFlowNodePositionSnapshot
+                {
+                    Kind = "OutputMath",
+                    Id = channelNumber,
+                    Option = (byte)index,
+                    CanvasId = rule.CanvasId,
+                    X = rule.Location.X,
+                    Y = rule.Location.Y,
+                });
+            }
+        }
+        return layout;
+    }
+
     public IoFlowGraphSnapshot CreateSnapshot()
     {
         var snapshot = new IoFlowGraphSnapshot
@@ -1147,6 +1187,14 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
         KeepConnectedNodesOnSameCanvas();
     }
 
+    public void ApplyNodePositions(IoFlowGraphLayoutSnapshot snapshot)
+    {
+        if (!IsNodePositionsValid(snapshot))
+            throw new ArgumentException("Invalid I/O Flow canvas layout or node positions.", nameof(snapshot));
+
+        ApplyNodeLocations(snapshot.ToGraphSnapshot());
+    }
+
     [RelayCommand]
     private void AddNextDigitalNode()
     {
@@ -1164,7 +1212,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
         }
 
         next.IsActiveHigh = true;
-        Nodes.Add(new DigitalInputNodeViewModel(next, ConsumeNextNodeSpawnLocation(new Point(50, 50), nodeWidth: 280, nodeHeight: 170)));
+        Nodes.Add(new DigitalInputNodeViewModel(next, ConsumeNextNodeSpawnLocation(new Point(50, 50), nodeWidth: 310, nodeHeight: 340)));
         RebuildConnections(_settings);
         NotifyGraphChanged(controllerSettingsChanged: false);
     }
@@ -1185,7 +1233,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
             return;
         }
 
-        Nodes.Add(new AnalogueInputNodeViewModel(next, ConsumeNextNodeSpawnLocation(new Point(430, 50), nodeWidth: 320, nodeHeight: 260)));
+        Nodes.Add(new AnalogueInputNodeViewModel(next, ConsumeNextNodeSpawnLocation(new Point(430, 50), nodeWidth: 310, nodeHeight: 440)));
         RebuildConnections(_settings);
         NotifyGraphChanged(controllerSettingsChanged: false);
     }
@@ -1221,7 +1269,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
             return;
         }
 
-        Nodes.Add(new CanInputNodeViewModel(ConsumeNextNodeSpawnLocation(new Point(430, 50), nodeWidth: 320, nodeHeight: 160)));
+        Nodes.Add(new CanInputNodeViewModel(ConsumeNextNodeSpawnLocation(new Point(430, 50), nodeWidth: 310, nodeHeight: 220)));
         RebuildConnections(_settings);
         NotifyGraphChanged(controllerSettingsChanged: false);
     }
@@ -1243,7 +1291,10 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
     private CanTxNodeViewModel CreateCanTxNode(CustomCanMessage message, Point location)
     {
         IReadOnlyList<CustomCanMessage> options = GetCanTxEligibleMessages().ToList();
-        return new CanTxNodeViewModel(message, location, options, OnCanTxNodeMessageSelectionChanged);
+        return new CanTxNodeViewModel(message, location, options, OnCanTxNodeMessageSelectionChanged)
+        {
+            SettingsEdited = ApplyCanTxNodeSettings,
+        };
     }
 
     private void RefreshCanTxNodeMessageOptions()
@@ -1310,8 +1361,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
         NotifyGraphChanged(controllerSettingsChanged: false);
     }
 
-    [RelayCommand]
-    private async Task ApplyCanTxNodeSettings(CanTxNodeViewModel? node)
+    private void ApplyCanTxNodeSettings(CanTxNodeViewModel? node)
     {
         if (node == null || SetCustomCanTxModeAction == null)
         {
@@ -1329,7 +1379,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
         }
 
         ushort period = node.EditIsPeriodic ? (ushort)timeoutCandidate : node.Message.TimeoutMs;
-        bool applied = await SetCustomCanTxModeAction(node.MessageIndex, node.EditIsPeriodic, period);
+        bool applied = SetCustomCanTxModeAction(node.MessageIndex, node.EditIsPeriodic, period);
         if (!applied)
         {
             node.SetValidationMessage("Unable to apply CAN TX settings.");
@@ -1355,7 +1405,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
             return;
         }
 
-        Nodes.Add(new IgnitionOnNodeViewModel(ConsumeNextNodeSpawnLocation(new Point(50, 50), nodeWidth: 300, nodeHeight: 140)));
+        Nodes.Add(new IgnitionOnNodeViewModel(ConsumeNextNodeSpawnLocation(new Point(50, 50), nodeWidth: 310, nodeHeight: 220)));
         RebuildConnections(_settings);
         ClearAddNodeWarning();
         NotifyGraphChanged(controllerSettingsChanged: false);
@@ -2539,7 +2589,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
 
         const double baseY = 70;
         const double outputColumnX = 1220;
-        const double horizontalGap = 120;
+        const double horizontalGap = 240;
         const double verticalGap = 30;
         const double outputGap = 60;
 
@@ -2798,91 +2848,27 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
     {
         NodeSize estimate = node switch
         {
-            DigitalInputNodeViewModel => new NodeSize(340, 250),
-            IgnitionOnNodeViewModel => new NodeSize(340, 150),
-            CanInputNodeViewModel => new NodeSize(340, 170),
-            MathRuleNodeViewModel mathNode => new NodeSize(340, EstimateMathNodeHeight(mathNode)),
-            AnalogueInputNodeViewModel analogueNode => new NodeSize(340, EstimateAnalogueInputNodeHeight(analogueNode)),
-            OutputNodeViewModel outputNode => new NodeSize(560, EstimateOutputNodeHeight(outputNode)),
-            CanTxNodeViewModel txNode => new NodeSize(420, txNode.HasValidationMessage ? 560 : 480),
-            _ => new NodeSize(340, 220),
+            DigitalInputNodeViewModel => new NodeSize(310, 340),
+            MathRuleNodeViewModel => new NodeSize(310, 460),
+            AnalogueInputNodeViewModel => new NodeSize(310, 440),
+            OutputNodeViewModel => new NodeSize(310, 500),
+            CanTxNodeViewModel => new NodeSize(310, 360),
+            MathSourceNodeViewModel => new NodeSize(310, 400),
+            _ => new NodeSize(310, 220),
         };
         return new NodeSize(Math.Max(estimate.Width, node.MeasuredSize.Width),
             Math.Max(estimate.Height, node.MeasuredSize.Height));
     }
 
-    private static double EstimateAnalogueInputNodeHeight(AnalogueInputNodeViewModel node)
-    {
-        double height = 440;
-
-        if (node.Input.IsCalibrationMode)
-        {
-            height += node.Input.IsThreePointCalibration ? 290 : 240;
-        }
-
-        if (node.Input.IsNtcMode)
-        {
-            height += 160;
-        }
-
-        return height;
-    }
-
-    private static double EstimateMathNodeHeight(MathRuleNodeViewModel node)
-    {
-        double height = 490 + (node.SupportsHysteresis ? 80 : 0)
-            + (node.IsHysteresisConfigurationEnabled ? 80 : 0);
-        height += node.ShowOperandAIndex || node.ShowOperandAConstant ? 70 : 0;
-
-        if (node.ShowOperandB)
-        {
-            height += 160;
-            height += node.ShowOperandBIndex || node.ShowOperandBConstant ? 70 : 0;
-        }
-
-        return height;
-    }
-
-    private static double EstimateOutputNodeHeight(OutputNodeViewModel node)
-    {
-        double height = 380;
-
-        if (node.IsMathChannel)
-        {
-            height += 90;
-        }
-
-        if (node.IsInputChannelTypeSelectionRequired)
-        {
-            height += 40;
-        }
-
-        if (node.ShowInputChannelTypeOptions)
-        {
-            height += 110;
-        }
-
-        if (node.ShowInputDependentConfiguration)
-        {
-            height += 150;
-
-            double currentTabHeight = node.ShowCurrentInrushConfiguration ? 280 : 0;
-            double analogueTabHeight = node.ShowAnalogueConfiguration ? 400 : 0;
-            double timingTabHeight = node.ShowTimingConfiguration ? 420 : 0;
-
-            height += Math.Max(currentTabHeight, Math.Max(analogueTabHeight, timingTabHeight));
-        }
-
-        return height;
-    }
-
     public void UpdateLiveChannelSamples(IReadOnlyList<OutputChannel> liveChannels)
     {
+        TimeSpan timestamp = IoFlowLiveHistory.Now;
         if (_live != null)
         {
             foreach (MathSourceNodeViewModel source in MathSourceNodes)
             {
                 source.UpdateLiveState(_live);
+                source.LiveHistory.Record(timestamp, source.GetLiveChartValue(_live));
             }
         }
         foreach (MathRuleNodeViewModel ruleNode in MathRuleNodes)
@@ -2895,12 +2881,14 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
             int index = node.ChannelNumber - 1;
             if (index < 0 || index >= liveChannels.Count)
             {
+                node.LiveHistory.Record(timestamp, null);
                 continue;
             }
 
             OutputChannel liveChannel = liveChannels[index];
             node.UpdateLiveState(liveChannel);
             node.UpdateLiveCurrent(liveChannel.CurrentValue);
+            node.LiveHistory.Record(timestamp, liveChannel.CurrentValue);
 
             if (node.IsMathChannel && !MathConfigurationMatches(node.Channel, liveChannel))
             {
@@ -3003,12 +2991,24 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
         {
             DigitalInput? liveInput = _live?.DigitalInputsLiveData.ElementAtOrDefault(digitalNode.InputNumber - 1);
             digitalNode.UpdateLiveState(liveInput);
+            digitalNode.LiveHistory.Record(timestamp, liveInput?.LiveElectricalState is bool state ? state ? 1 : 0 : null);
         }
 
         foreach (AnalogueInputNodeViewModel analogueNode in AnalogueNodes)
         {
             AnalogueInput? liveInput = _live?.AnalogueInputsLiveData.ElementAtOrDefault(analogueNode.InputNumber - 1);
             analogueNode.UpdateLiveState(liveInput);
+            analogueNode.LiveHistory.Record(timestamp, liveInput?.InputValue ?? liveInput?.InputVoltage);
+        }
+
+        foreach (MathRuleNodeViewModel rule in MathRuleNodes)
+            rule.LiveHistory.Record(timestamp, rule.LiveChartValue);
+
+        foreach (CanTxNodeViewModel node in CanTxNodes)
+        {
+            // This is the live trigger channel, not a report of CAN frame transmission.
+            OutputChannel? trigger = liveChannels.ElementAtOrDefault(node.Message.TxTrigger);
+            node.LiveHistory.Record(timestamp, trigger == null ? null : trigger.Enabled != 0 ? 1 : 0);
         }
     }
 
@@ -3322,6 +3322,8 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
 
     private void SynchronizeNodeSelectionState()
     {
+        OnPropertyChanged(nameof(SelectedNode));
+        OnPropertyChanged(nameof(HasSelectedNode));
         foreach (IoFlowNodeViewModel node in Nodes)
         {
             node.IsSelected = false;
@@ -3479,7 +3481,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
         if (outputNode == null)
         {
             Point outputLocation = useSpawnLocation
-                ? ConsumeNextNodeSpawnLocation(new Point(830, 50), nodeWidth: 560, nodeHeight: 340)
+                ? ConsumeNextNodeSpawnLocation(new Point(830, 50), nodeWidth: 310, nodeHeight: 500)
                 : new Point(830, 50);
             outputNode = new OutputNodeViewModel(channel, outputLocation, _settings?.AnalogueInputsStaticData ?? [], _settings?.ChannelsStaticData ?? [], TrySelectOutputChannel);
             outputNode.CanvasId = canvasId ?? SelectedCanvas.Id;

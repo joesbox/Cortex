@@ -11,6 +11,7 @@ using Avalonia.Threading;
 using Avalonia.VisualTree;
 using CommunityToolkit.Mvvm.Input;
 using Cortex.Models;
+using Cortex.Controls;
 using Cortex.Services;
 using Cortex.ViewModels;
 using Cortex.ViewModels.IoFlow;
@@ -23,8 +24,324 @@ namespace Cortex.Ui.Tests;
 
 public sealed class IoFlowCanvasRenderingTests
 {
+    [AvaloniaTheory]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public async Task LaterCanvasDragPositionsSurviveSwitchingAndSettingsRefresh(int canvasNumber)
+    {
+        string directory = Path.Combine(Path.GetTempPath(), $"cortex-canvas-position-{Guid.NewGuid():N}");
+        string path = Path.Combine(directory, "graph.json");
+        var vm = CreateViewModel(path);
+        var graph = vm.IoFlowGraph;
+        graph.AddIgnitionNodeCommand.Execute(null);
+        var ignition = Assert.Single(graph.IgnitionNodes);
+        graph.AddNextOutputNodeCommand.Execute(null);
+        var output = Assert.Single(graph.OutputNodes);
+        await graph.ConnectNodes(ignition, output);
+        var first = graph.SelectedCanvas;
+        for (int id = 1; id < canvasNumber; id++)
+            graph.AddCanvasCommand.Execute(null);
+        var destination = graph.SelectedCanvas;
+        graph.SelectedCanvas = first;
+        graph.SelectedNodes.Add(ignition);
+        graph.SelectedNodes.Add(output);
+        await graph.MoveSelectedNodesToCanvasCommand.ExecuteAsync(destination);
+        graph.SelectedCanvas = destination;
+        ignition.Location = new Point(90, 60);
+        output.Location = new Point(700, 90);
+        graph.ItemsDragCompletedCommand.Execute(null);
+        var view = new IoFlowTabView { DataContext = vm };
+        var window = new Window { Width = 1600, Height = 1000, Content = view };
+        try
+        {
+            window.Show();
+            Layout(window);
+            var editor = view.FindControl<NodifyEditor>("IoFlowEditor")!;
+            editor.SetCurrentValue(NodifyEditor.ViewportZoomProperty, 0.7);
+            editor.SetCurrentValue(NodifyEditor.ViewportLocationProperty, new Point(-100, -80));
+            Layout(window);
+            var container = Assert.Single(editor.GetVisualDescendants().OfType<ItemContainer>(),
+                item => item.DataContext == ignition);
+            Point start = container.TranslatePoint(new Point(40, 20), window)!.Value;
+            window.MouseMove(start);
+            window.MouseDown(start, MouseButton.Left);
+            window.MouseMove(start + new Vector(5, 5));
+            window.MouseMove(start + new Vector(90, 60));
+            window.MouseUp(start + new Vector(90, 60), MouseButton.Left);
+            Layout(window);
+            Point expected = ignition.Location;
+            Assert.NotEqual(new Point(90, 60), expected);
+            var store = new IoFlowGraphStore(path);
+            void AssertStored()
+            {
+                Assert.True(store.TryLoad(out var stored));
+                var position = Assert.Single(stored.NodePositions, node => node.Kind == "Ignition");
+                Assert.Equal(destination.Id, position.CanvasId);
+                Assert.Equal(expected, new Point(position.X, position.Y));
+                Assert.Equal(-100, stored.Canvases[canvasNumber - 1].ViewportX);
+                Assert.Equal(-80, stored.Canvases[canvasNumber - 1].ViewportY);
+            }
+            AssertStored();
+            var baseline = ConfigFileSerializer.SerializeSettings(vm.SettingsDataView);
+            var restarted = new MainWindowViewModel(new ChannelCanTxSettingsTests.TestAppCloser(),
+                new MainWindowViewModelDependencies(ioFlowGraphStore: store));
+            foreach (string name in new[] { "_uiUpdateTimer", "_pollTimer", "_commsTimer" })
+                Assert.IsType<System.Timers.Timer>(typeof(MainWindowViewModel).GetField(name, BindingFlags.NonPublic | BindingFlags.Instance)!
+                    .GetValue(restarted)).Stop();
+            try
+            {
+                window.Content = new IoFlowTabView { DataContext = restarted };
+                Layout(window);
+                restarted.IoFlowGraph.SelectedCanvas = restarted.IoFlowGraph.Canvases[0];
+                Layout(window);
+                AssertStored();
+                Assert.True(ConfigFileSerializer.TryDeserialize(baseline, out var settings, out var error), error);
+                ConfigFileSerializer.ApplySnapshot(restarted.SettingsDataView, settings!);
+                typeof(MainWindowViewModel).GetMethod("RefreshIoFlowGraphFromSettings", BindingFlags.NonPublic | BindingFlags.Instance)!
+                    .Invoke(restarted, null);
+                Layout(window);
+                AssertStored();
+                Assert.Equal(expected, Assert.Single(restarted.IoFlowGraph.IgnitionNodes).Location);
+                Assert.Equal(destination.Id, restarted.IoFlowGraph.IgnitionNodes[0].CanvasId);
+            }
+            finally
+            {
+                foreach (string name in new[] { "_uiUpdateTimer", "_pollTimer", "_commsTimer" })
+                    Assert.IsType<System.Timers.Timer>(typeof(MainWindowViewModel).GetField(name, BindingFlags.NonPublic | BindingFlags.Instance)!
+                        .GetValue(restarted)).Dispose();
+            }
+            window.Content = view;
+            Layout(window);
+            graph.SelectedCanvas = first;
+            Layout(window);
+            graph.SelectedCanvas = destination;
+            Layout(window);
+            Assert.Equal(expected, ignition.Location);
+            AssertStored();
+            container = Assert.Single(editor.GetVisualDescendants().OfType<ItemContainer>(),
+                item => item.DataContext == ignition);
+            start = container.TranslatePoint(new Point(40, 20), window)!.Value;
+            window.MouseMove(start);
+            window.MouseDown(start, MouseButton.Left);
+            window.MouseMove(start + new Vector(5, 5));
+            window.MouseMove(start + new Vector(60, 30));
+            window.MouseUp(start + new Vector(60, 30), MouseButton.Left);
+            Layout(window);
+            Assert.NotEqual(expected, ignition.Location);
+            expected = ignition.Location;
+            AssertStored();
+            typeof(MainWindowViewModel).GetMethod("RefreshIoFlowGraphFromSettings", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .Invoke(vm, null);
+            Layout(window);
+            AssertStored();
+            Assert.Equal(destination.Id, graph.SelectedCanvas.Id);
+            Assert.Equal(expected, Assert.Single(graph.IgnitionNodes).Location);
+            Assert.Equal(destination.Id, graph.IgnitionNodes[0].CanvasId);
+        }
+        finally
+        {
+            window.Close();
+            CleanUp(path, directory);
+        }
+    }
+
     [AvaloniaFact]
-    public void CanvasPanAndZoomPersistAndRestoreInNewView()
+    public void MinimapRendersOnlyCurrentCanvasAndTracksNodeMovesAndZoom()
+    {
+        var graph = new IoFlowGraphViewModel();
+        graph.Build(new DataStructures(), new DataStructures());
+        graph.AddIgnitionNodeCommand.Execute(null);
+        var ignition = Assert.Single(graph.IgnitionNodes);
+        ignition.Location = new Point(-650, -300);
+        var original = graph.SelectedCanvas;
+        graph.AddCanvasCommand.Execute(null);
+        var empty = graph.SelectedCanvas;
+        graph.SelectedCanvas = original;
+        var view = new IoFlowTabView { DataContext = new { IoFlowGraph = graph } };
+        var window = new Window { Width = 1600, Height = 1000, Content = view };
+        try
+        {
+            window.Show();
+            Layout(window);
+            var editor = view.FindControl<NodifyEditor>("IoFlowEditor")!;
+            var minimap = view.FindControl<IoFlowMinimap>("IoFlowMinimap")!;
+            Assert.Same(editor, minimap.Editor);
+            var previewHeading = Assert.Single(view.GetVisualDescendants().OfType<TextBlock>(),
+                text => text.Text == "Canvas preview");
+            Assert.Equal(16, previewHeading.FontSize);
+            Assert.Equal(FontWeight.SemiBold, previewHeading.FontWeight);
+            Assert.Equal(Color.Parse("#FFE9E1F8"), Assert.IsAssignableFrom<ISolidColorBrush>(previewHeading.Foreground).Color);
+            var headingCard = view.FindControl<Border>("IoFlowMinimapPanel")!;
+            Assert.NotNull(headingCard.Background);
+            Assert.Equal(new Thickness(1), headingCard.BorderThickness);
+            var properties = view.FindControl<Border>("IoFlowPropertiesPanel")!;
+            var canvasFrame = view.FindControl<Border>("IoFlowCanvasFrame")!;
+            Point corner = headingCard.TranslatePoint(default, view)!.Value;
+            Point propertiesCorner = properties.TranslatePoint(default, view)!.Value;
+            Assert.Equal(propertiesCorner.X, corner.X);
+            Assert.True(corner.Y > propertiesCorner.Y + properties.Bounds.Height);
+            Assert.Equal(properties.Bounds.Width, headingCard.Bounds.Width);
+            Assert.True(properties.Bounds.Height < canvasFrame.Bounds.Height);
+            Assert.True(corner.X > canvasFrame.TranslatePoint(new Point(canvasFrame.Bounds.Width, 0), view)!.Value.X);
+            Assert.DoesNotContain(minimap.GetVisualAncestors(), ancestor => ReferenceEquals(ancestor, editor));
+            List<GeometryDrawing> Draw()
+            {
+                var drawing = new DrawingGroup();
+                using (var context = drawing.Open())
+                    minimap.Render(context);
+                return Flatten(drawing).ToList();
+            }
+            static IEnumerable<GeometryDrawing> Flatten(DrawingGroup group) =>
+                group.Children.SelectMany(drawing => drawing is DrawingGroup nested
+                    ? Flatten(nested) : drawing is GeometryDrawing geometry ? [geometry] : Array.Empty<GeometryDrawing>());
+
+            var initial = Draw();
+            Assert.Equal(5, initial.Count);
+            Assert.Equal(Color.Parse("#1B1E24"), Assert.IsAssignableFrom<ISolidColorBrush>(initial[1].Brush).Color);
+            Rect canvas = initial[1].Geometry!.Bounds;
+            AssertCanvasFillsPreview(canvas);
+            Assert.Null(initial[2].Brush);
+            Assert.Equal(Color.Parse("#557A889A"), Assert.IsAssignableFrom<ISolidColorBrush>(initial[2].Pen!.Brush).Color);
+            Assert.True(canvas.Inflate(0.001).Contains(initial[2].Geometry!.Bounds));
+            Assert.Equal(Color.Parse(ignition.BorderHex), Assert.IsAssignableFrom<ISolidColorBrush>(initial[3].Brush).Color);
+            Assert.Null(initial[3].Pen);
+            Assert.Null(initial[4].Brush);
+            Assert.Equal(Color.Parse("#800071"), Assert.IsAssignableFrom<ISolidColorBrush>(initial[4].Pen!.Brush).Color);
+            Rect initialNode = initial[3].Geometry!.Bounds;
+            Rect initialViewport = initial[4].Geometry!.Bounds;
+            Assert.True(initialNode.Width > 0 && initialNode.Height > 0);
+            Assert.True(initialViewport.Width > 0 && initialViewport.Height > 0);
+            ignition.Location = new Point(2300, 1700);
+            Layout(window);
+            var moved = Draw();
+            Assert.NotEqual(initialNode, moved[3].Geometry!.Bounds);
+            AssertCanvasFillsPreview(moved[1].Geometry!.Bounds);
+            Assert.Equal(initialNode.Width / initialNode.Height,
+                moved[3].Geometry!.Bounds.Width / moved[3].Geometry!.Bounds.Height, 6);
+            editor.SetCurrentValue(NodifyEditor.ViewportZoomProperty, 0.5);
+            Layout(window);
+            Assert.NotEqual(initialViewport, Draw()[4].Geometry!.Bounds);
+            AssertCanvasFillsPreview(Draw()[1].Geometry!.Bounds);
+            editor.SetCurrentValue(NodifyEditor.ViewportLocationProperty, new Point(-5000, 4000));
+            Layout(window);
+            AssertCanvasFillsPreview(Draw()[1].Geometry!.Bounds);
+            graph.SelectedCanvas = empty;
+            Layout(window);
+            Assert.Equal(4, Draw().Count);
+            AssertCanvasFillsPreview(Draw()[1].Geometry!.Bounds);
+            graph.SelectedCanvas = original;
+            Layout(window);
+            Assert.Equal(5, Draw().Count);
+            window.Content = null;
+            window.Content = view;
+            Layout(window);
+            Assert.Equal(5, Draw().Count);
+            graph.SelectedNodes.Add(ignition);
+            graph.RemoveSelectedNodesCommand.Execute(null);
+            Layout(window);
+            Assert.Equal(4, Draw().Count);
+            window.Width = 1300;
+            window.Height = 800;
+            Layout(window);
+            AssertCanvasFillsPreview(Draw()[1].Geometry!.Bounds);
+
+            void AssertCanvasFillsPreview(Rect bounds)
+            {
+                Assert.Equal(8, bounds.X, 6);
+                Assert.Equal(8, bounds.Y, 6);
+                Assert.Equal(minimap.Bounds.Width - 16, bounds.Width, 6);
+                Assert.Equal(minimap.Bounds.Height - 16, bounds.Height, 6);
+            }
+            window.Content = null;
+            window.Content = view;
+            Layout(window);
+            Assert.Equal(4, Draw().Count);
+        }
+        finally
+        {
+            window.Close();
+        }
+    }
+
+    [AvaloniaFact]
+    public void MinimapClickAndDragPansAndPersistsViewportWithoutMovingNodes()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), $"cortex-minimap-{Guid.NewGuid():N}");
+        string path = Path.Combine(directory, "graph.json");
+        var vm = CreateViewModel(path);
+        var graph = vm.IoFlowGraph;
+        graph.AddNextOutputNodeCommand.Execute(null);
+        var node = Assert.Single(graph.OutputNodes);
+        node.Location = new Point(-1800, 1300);
+        var view = new IoFlowTabView { DataContext = vm };
+        var window = new Window { Width = 1600, Height = 1000, Content = view };
+        try
+        {
+            window.Show();
+            Layout(window);
+            var editor = view.FindControl<NodifyEditor>("IoFlowEditor")!;
+            var minimap = view.FindControl<IoFlowMinimap>("IoFlowMinimap")!;
+            editor.SetCurrentValue(NodifyEditor.ViewportZoomProperty, 0.7);
+            Layout(window);
+            Point location = node.Location;
+            bool pending = vm.HasPendingConfigChanges;
+            bool warning = vm.HasIoFlowControllerMismatchWarning;
+            graph.SelectedNodes.Add(node);
+            Point start = editor.ViewportLocation;
+            var drawing = new DrawingGroup();
+            using (var context = drawing.Open())
+                minimap.Render(context);
+            Rect viewport = drawing.Children.OfType<GeometryDrawing>().Last().Geometry!.Bounds;
+            double scale = viewport.Width / editor.ViewportSize.Width;
+            var expected = new Point(
+                start.X + (25 - viewport.X) / scale - editor.ViewportSize.Width / 2,
+                start.Y + (100 - viewport.Y) / scale - editor.ViewportSize.Height / 2);
+            Point click = minimap.TranslatePoint(new Point(25, 100), window)!.Value;
+            window.MouseMove(click);
+            window.MouseDown(click, MouseButton.Left);
+            Layout(window);
+            Point clicked = editor.ViewportLocation;
+            Assert.NotEqual(start, clicked);
+            Assert.Equal(expected.X, clicked.X, 6);
+            Assert.Equal(expected.Y, clicked.Y, 6);
+            Point drag = minimap.TranslatePoint(new Point(90, 40), window)!.Value;
+            window.MouseMove(drag);
+            Layout(window);
+            Assert.NotEqual(clicked, editor.ViewportLocation);
+            Assert.Equal(clicked.X + 65 / scale, editor.ViewportLocation.X, 6);
+            Assert.Equal(clicked.Y - 60 / scale, editor.ViewportLocation.Y, 6);
+            window.MouseUp(drag, MouseButton.Left);
+            Layout(window);
+            Point released = editor.ViewportLocation;
+            window.MouseMove(minimap.TranslatePoint(new Point(140, 80), window)!.Value);
+            Layout(window);
+            Assert.Equal(released, editor.ViewportLocation);
+            Assert.Equal(location, node.Location);
+            Assert.Equal(0.7, editor.ViewportZoom);
+            window.MouseWheel(minimap.TranslatePoint(new Point(100, 70), window)!.Value, new Vector(0, -1));
+            Layout(window);
+            Assert.Equal(0.7, editor.ViewportZoom);
+            Assert.Equal(pending, vm.HasPendingConfigChanges);
+            Assert.Equal(warning, vm.HasIoFlowControllerMismatchWarning);
+            Assert.Contains(node, graph.SelectedNodes);
+            Assert.Equal(released, graph.SelectedCanvas.ViewportLocation);
+            Assert.True(new IoFlowGraphStore(path).TryLoad(out var persisted));
+            Assert.Equal(released.X, persisted.Canvases[0].ViewportX);
+            Assert.Equal(released.Y, persisted.Canvases[0].ViewportY);
+            var storedNode = Assert.Single(persisted.NodePositions, position => position.Kind == "Output" && position.Id == node.ChannelNumber);
+            Assert.Equal(location.X, storedNode.X);
+            Assert.Equal(location.Y, storedNode.Y);
+        }
+        finally
+        {
+            window.Close();
+            CleanUp(path, directory);
+        }
+    }
+
+    [AvaloniaFact]
+    public void CanvasPanAndZoomPersistsBetweenSessions()
     {
         string directory = Path.Combine(Path.GetTempPath(), $"cortex-viewport-{Guid.NewGuid():N}");
         string path = Path.Combine(directory, "graph.json");
@@ -61,11 +378,11 @@ public sealed class IoFlowCanvasRenderingTests
             Layout(window);
             Assert.Equal(0.4, editor.ViewportZoom);
             Assert.Equal(new Point(750, 220), editor.ViewportLocation);
-            Assert.True(new IoFlowGraphStore(path).TryLoad(out var snapshot));
+            Assert.True(new IoFlowGraphStore(path).TryLoad(out IoFlowGraphLayoutSnapshot snapshot));
             window.Close();
             var restored = new IoFlowGraphViewModel();
             restored.Build(new DataStructures(), new DataStructures());
-            restored.ApplySnapshot(snapshot);
+            restored.ApplyNodePositions(snapshot);
             var restoredView = new IoFlowTabView { DataContext = new { IoFlowGraph = restored } };
             var reopened = new Window { Width = 1600, Height = 1000, Content = restoredView };
             try
@@ -188,9 +505,12 @@ public sealed class IoFlowCanvasRenderingTests
     [AvaloniaFact]
     public void TabContextMenuRenamesInPlaceAndEscapeCancels()
     {
-        var graph = new IoFlowGraphViewModel();
+        string directory = Path.Combine(Path.GetTempPath(), $"cortex-rename-{Guid.NewGuid():N}");
+        string path = Path.Combine(directory, "graph.json");
+        var vm = CreateViewModel(path);
+        var graph = vm.IoFlowGraph;
         graph.AddCanvasCommand.Execute(null);
-        var view = new IoFlowTabView { DataContext = new { IoFlowGraph = graph } };
+        var view = new IoFlowTabView { DataContext = vm };
         var window = new Window { Width = 1600, Height = 1000, Content = view };
         try
         {
@@ -224,6 +544,8 @@ public sealed class IoFlowCanvasRenderingTests
             window.KeyRelease(Key.Enter, RawInputModifiers.None, PhysicalKey.Enter, string.Empty);
             Layout(window);
             Assert.Equal("Lights", graph.Canvases[0].Name);
+            Assert.True(new IoFlowGraphStore(path).TryLoad(out var entered));
+            Assert.Equal("Lights", entered.Canvases[0].Name);
             Assert.False(editor.IsVisible);
             Assert.Equal("Canvas 2", graph.Canvases[1].Name);
             StartRename();
@@ -232,16 +554,23 @@ public sealed class IoFlowCanvasRenderingTests
             window.KeyRelease(Key.Escape, RawInputModifiers.None, PhysicalKey.Escape, string.Empty);
             Layout(window);
             Assert.Equal("Lights", graph.Canvases[0].Name);
+            Assert.True(new IoFlowGraphStore(path).TryLoad(out var cancelled));
+            Assert.Equal("Lights", cancelled.Canvases[0].Name);
             StartRename();
             editor.Text = "Accessories";
             view.FindControl<Button>("IoFlowAddCanvasTab")!.Focus();
             Layout(window);
             Assert.Equal("Accessories", graph.Canvases[0].Name);
+            Assert.True(new IoFlowGraphStore(path).TryLoad(out var committed));
+            var restored = new IoFlowGraphViewModel();
+            restored.ApplyNodePositions(committed);
+            Assert.Equal(["Accessories", "Canvas 2"], restored.Canvases.Select(canvas => canvas.Name));
             Assert.False(editor.IsVisible);
         }
         finally
         {
             window.Close();
+            CleanUp(path, directory);
         }
     }
 
@@ -446,8 +775,8 @@ public sealed class IoFlowCanvasRenderingTests
             Assert.Empty(graph.VisibleNodes);
             Assert.Equal(destination.Id, Assert.Single(graph.OutputNodes).CanvasId);
             Assert.Equal(output.Location, graph.OutputNodes[0].Location);
-            Assert.True(new IoFlowGraphStore(path).TryLoad(out var persisted));
-            Assert.Equal(3, persisted.Canvases.Count);
+            Assert.True(new IoFlowGraphStore(path).TryLoad(out IoFlowGraphLayoutSnapshot persisted));
+            Assert.Equal(graph.Nodes.Count, persisted.NodePositions.Count);
         }
         finally
         {

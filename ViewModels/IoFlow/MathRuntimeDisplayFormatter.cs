@@ -195,16 +195,9 @@ internal static class MathRuntimeDisplayFormatter
                 break;
             case OutputChannel.MathOperandType.SystemValue:
                 label = FormatSystemValue((OutputChannel.MathSystemValue)operandIndex);
-                value = liveData?.SystemParams is SystemParameters system
-                    ? (OutputChannel.MathSystemValue)operandIndex switch
-                    {
-                        OutputChannel.MathSystemValue.SystemTemperature => FormatWithUnit(system.SystemTemperature, "°C"),
-                        OutputChannel.MathSystemValue.SIMModuleTemperature => FormatWithUnit(system.SIMModuleTemp, "°C"),
-                        OutputChannel.MathSystemValue.IMUTemperature => FormatWithUnit(system.IMUTemp, "°C"),
-                        OutputChannel.MathSystemValue.BatteryVoltage => FormatWithUnit(system.VBatt, "V"),
-                        OutputChannel.MathSystemValue.SystemCurrent => FormatWithUnit(system.SystemCurrent, "A"),
-                        _ => "--",
-                    }
+                value = liveData?.SystemParams.GetMathSystemValue((OutputChannel.MathSystemValue)operandIndex) is float systemValue
+                    && float.IsFinite(systemValue)
+                    ? FormatWithUnit(systemValue, GetSystemUnit((OutputChannel.MathSystemValue)operandIndex))
                     : "--";
                 break;
             case OutputChannel.MathOperandType.CanSignal:
@@ -268,9 +261,33 @@ internal static class MathRuntimeDisplayFormatter
             OutputChannel.MathSystemValue.IMUTemperature => "IMU temperature",
             OutputChannel.MathSystemValue.BatteryVoltage => "Battery voltage",
             OutputChannel.MathSystemValue.SystemCurrent => "System current",
+            OutputChannel.MathSystemValue.AccelerationX => "Acceleration X",
+            OutputChannel.MathSystemValue.AccelerationY => "Acceleration Y",
+            OutputChannel.MathSystemValue.AccelerationZ => "Acceleration Z",
+            OutputChannel.MathSystemValue.GyroscopeX => "Gyroscope X",
+            OutputChannel.MathSystemValue.GyroscopeY => "Gyroscope Y",
+            OutputChannel.MathSystemValue.GyroscopeZ => "Gyroscope Z",
+            OutputChannel.MathSystemValue.MagneticFieldX => "Magnetic field X",
+            OutputChannel.MathSystemValue.MagneticFieldY => "Magnetic field Y",
+            OutputChannel.MathSystemValue.MagneticFieldZ => "Magnetic field Z",
             _ => value.ToString(),
         };
     }
+
+    private static string GetSystemUnit(OutputChannel.MathSystemValue value) => value switch
+    {
+        OutputChannel.MathSystemValue.SystemTemperature or OutputChannel.MathSystemValue.SIMModuleTemperature
+            or OutputChannel.MathSystemValue.IMUTemperature => "°C",
+        OutputChannel.MathSystemValue.BatteryVoltage => "V",
+        OutputChannel.MathSystemValue.SystemCurrent => "A",
+        OutputChannel.MathSystemValue.AccelerationX or OutputChannel.MathSystemValue.AccelerationY
+            or OutputChannel.MathSystemValue.AccelerationZ => "G",
+        OutputChannel.MathSystemValue.GyroscopeX or OutputChannel.MathSystemValue.GyroscopeY
+            or OutputChannel.MathSystemValue.GyroscopeZ => "°/s",
+        OutputChannel.MathSystemValue.MagneticFieldX or OutputChannel.MathSystemValue.MagneticFieldY
+            or OutputChannel.MathSystemValue.MagneticFieldZ => "µT",
+        _ => string.Empty,
+    };
 
     private static string GetAnalogueUnit(AnalogueInput.AnalogueUnits units)
     {

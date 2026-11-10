@@ -24,6 +24,25 @@ public abstract partial class IoFlowNodeViewModel : ObservableObject
 
     public Size MeasuredSize { get; set; }
 
+    public IoFlowLiveHistory LiveHistory { get; } = new();
+
+    public bool HasOutputConnector => this is not CanTxNodeViewModel;
+
+    public bool HasLiveChart => this is DigitalInputNodeViewModel or AnalogueInputNodeViewModel
+        or OutputNodeViewModel or MathSourceNodeViewModel;
+
+    public string ChartLabel => this switch
+    {
+        DigitalInputNodeViewModel => "Electrical state (0 / 1)",
+        AnalogueInputNodeViewModel analogue when analogue.Input.ReportsConnectorVoltage => "Connector voltage (0-5 V)",
+        AnalogueInputNodeViewModel => "Input value",
+        OutputNodeViewModel => "Current (A)",
+        MathRuleNodeViewModel => "Rule result (first connected output)",
+        MathSourceNodeViewModel => "Source value",
+        CanTxNodeViewModel => "Trigger channel state (0 / 1)",
+        _ => "Live data not reported for this node",
+    };
+
     public Action<IoFlowNodeViewModel, int>? SourceSelectionChangedAction { get; set; }
 
     private IReadOnlyList<NodeSourceOption> _availableSources = [];

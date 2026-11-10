@@ -35,7 +35,7 @@ public partial class MainWindowViewModel
         IoFlowGraph.GraphChangedAction = OnIoFlowGraphChanged;
         IoFlowGraph.ConfirmAction = (title, message, confirmText, cancelText) => _appCloser.ConfirmAsync(title, message, confirmText, cancelText);
         IoFlowGraph.SetCustomCanTxStateAction = SetCustomCanMessageTxStateAsync;
-        IoFlowGraph.SetCustomCanTxModeAction = SetCustomCanMessageTxModeAsync;
+        IoFlowGraph.SetCustomCanTxModeAction = SetCustomCanMessageTxMode;
         IoFlowGraph.Build(SettingsDataView, LiveDataView);
         _ioFlowHasUnsavedControllerChanges = false;
         _ioFlowSnapshotMismatchWarning = string.Empty;
@@ -89,19 +89,12 @@ public partial class MainWindowViewModel
         IoFlowGraph.UseControllerConfigurationValues = false;
         if (_isApplyingIoFlowSnapshot) return;
 
-        if (!_ioFlowGraphStore.TryLoad(out IoFlowGraphSnapshot snapshot))
+        if (!_ioFlowGraphStore.TryLoad(out IoFlowGraphLayoutSnapshot snapshot))
         {
             return;
         }
 
-        if (snapshot.DraftSettings != null)
-        {
-            RememberIoFlowDraft(snapshot);
-            return;
-        }
-
-        // Restore local layout only when it matches the current controller configuration.
-        TryApplyIoFlowSnapshot(snapshot, requireSignatureMatch: true, setMismatchWarning: false);
+        IoFlowGraph.ApplyNodePositions(snapshot);
     }
 
     private void PersistIoFlowGraphSnapshotForController()
@@ -159,18 +152,14 @@ public partial class MainWindowViewModel
         }
     }
 
-    private void PersistIoFlowGraphSnapshotLocally()
+    private void PersistIoFlowGraphSnapshotLocally(bool replaceLayout = false)
     {
-        if (_isApplyingIoFlowSnapshot || _suppressDirtyTracking || _ioFlowDraftAwaitingReconciliation != null)
+        if (_isApplyingIoFlowSnapshot || _suppressDirtyTracking)
             return;
-        IoFlowGraphSnapshot snapshot = IoFlowGraph.CreateSnapshot();
-        snapshot.ControllerSettingsSignature = CreateIoFlowControllerSignature();
-        if (_controllerConfigBaseline != null && HasPendingConfigChanges)
-        {
-            snapshot.DraftSettings = CreateIoFlowDraftSettings(SettingsDataView);
-            snapshot.DraftBaselineSignature = CreateIoFlowDraftSignature(_controllerConfigBaseline);
-        }
-        _ioFlowGraphStore.Save(snapshot);
+        // Until settings arrive, the graph lacks configured inputs and rule nodes.
+        _ioFlowGraphStore.Save(IoFlowGraph.CreateLayoutSnapshot(),
+            preserveUnmatchedNodePositions: !replaceLayout
+                && (_controllerConfigBaseline == null || _awaitingInitialMathSettingsHydration));
     }
 
     private void OnIoFlowGraphChanged(bool controllerSettingsChanged)
@@ -343,15 +332,11 @@ public partial class MainWindowViewModel
         }
 
         _ioFlowHasUnsavedControllerChanges = false;
-        if (_ioFlowDraftAwaitingReconciliation == null) _ioFlowSnapshotMismatchWarning = string.Empty;
+        _ioFlowSnapshotMismatchWarning = string.Empty;
 
-        // Keep the layout stable across sessions: when a stored snapshot exists but could not
-        // be applied (e.g. signature mismatch at startup before connecting), reuse its node
-        // locations and leave the stored snapshot untouched instead of overwriting it with
-        // the auto-arranged default layout produced above.
-        if (_ioFlowGraphStore.TryLoad(out IoFlowGraphSnapshot storedSnapshot))
+        if (_ioFlowGraphStore.TryLoad(out IoFlowGraphLayoutSnapshot storedSnapshot))
         {
-            IoFlowGraph.ApplyNodeLocations(storedSnapshot);
+            IoFlowGraph.ApplyNodePositions(storedSnapshot);
         }
         else
         {
@@ -412,7 +397,7 @@ public partial class MainWindowViewModel
         _ioFlowHasUnsavedControllerChanges = false;
         _ioFlowSnapshotMismatchWarning = string.Empty;
         RecalculatePendingConfigChanges();
-        PersistIoFlowGraphSnapshotLocally();
+        PersistIoFlowGraphSnapshotLocally(replaceLayout: true);
         return true;
     }
 
