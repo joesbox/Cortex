@@ -38,6 +38,15 @@ public sealed partial class IoFlowGraphViewModel
 
     private void RefreshNodeSourceOptions()
     {
+        foreach (OutputNodeViewModel outputNode in OutputNodes)
+        {
+            HashSet<int> usedElsewhere = OutputNodes
+                .Where(other => !ReferenceEquals(other, outputNode))
+                .Select(other => other.ChannelNumber)
+                .ToHashSet();
+            outputNode.RefreshOutputChannelNumbers(usedElsewhere);
+        }
+
         foreach (IoFlowNodeViewModel node in Nodes)
         {
             if (GetSelectableSource(node) is not { } identity) continue;

@@ -161,6 +161,46 @@ namespace Cortex.Models
             set => SetProperty(ref _mathRootRule, value);
         }
 
+        public const byte MathFollowNone = 0xFF;
+
+        private byte _mathFollowChannel = MathFollowNone;
+
+        /// <summary>
+        /// Zero-based index of the MATH channel whose rules this channel shares, or <see cref="MathFollowNone"/>.
+        /// The controller stores followers as RuleCount 0 / RootRule 0x80|owner; Cortex keeps RuleCount/RootRule normalised.
+        /// </summary>
+        public byte MathFollowChannel
+        {
+            get => _mathFollowChannel;
+            set
+            {
+                if (SetProperty(ref _mathFollowChannel, value))
+                    OnPropertyChanged(nameof(IsMathFollower));
+            }
+        }
+
+        public bool IsMathFollower => ChanType == ChannelType.MATH && MathFollowChannel != MathFollowNone;
+
+        public const byte MathFollowFlag = 0x80;
+
+        /// <summary>
+        /// Applies the controller's raw RuleCount/RootRule pair, decoding the follower encoding.
+        /// </summary>
+        public void ApplyControllerMathHeader(byte ruleCount, byte rootRule)
+        {
+            if (ruleCount == 0 && (rootRule & MathFollowFlag) != 0)
+            {
+                MathFollowChannel = (byte)(rootRule & 0x7F);
+                MathRuleCount = 1;
+                MathRootRule = 0;
+                return;
+            }
+
+            MathFollowChannel = MathFollowNone;
+            MathRuleCount = ruleCount;
+            MathRootRule = rootRule;
+        }
+
         public byte MathOutputMode
         {
             get => _mathOutputMode;
@@ -211,6 +251,10 @@ namespace Cortex.Models
         public bool IsIntermittentChannel => ChanType == ChannelType.Intermittent;
 
         public bool IsMathChannel => ChanType == ChannelType.MATH;
+
+        // The controller derives Enabled from the input source; it is display-only and never applied from files.
+        public bool HasConfiguredInputSource => InputControlPin != 0
+            || ChanType is ChannelType.CAN or ChannelType.CAN_PWM or ChannelType.MATH;
 
         public bool HasMathRuntimeError => MathError != 0;
 
@@ -376,6 +420,7 @@ namespace Cortex.Models
             OnPropertyChanged(nameof(IsAnalogueScaledChannel));
             OnPropertyChanged(nameof(IsIntermittentChannel));
             OnPropertyChanged(nameof(IsMathChannel));
+            OnPropertyChanged(nameof(IsMathFollower));
             OnPropertyChanged(nameof(IsAnalogueChannel));
         }
 

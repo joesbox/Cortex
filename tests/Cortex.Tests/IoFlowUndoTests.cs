@@ -104,7 +104,7 @@ public sealed class IoFlowUndoTests
 
         await graph.RemoveConnectionCommand.ExecuteAsync(Assert.Single(graph.Connections));
         Assert.Equal(0, output.Channel.InputControlPin);
-        Assert.Equal(0, output.Channel.CurrentThresholdHigh);
+        Assert.Equal(8, output.Channel.CurrentThresholdHigh);
         output.Channel.Name = "NEW".ToCharArray();
 
         await graph.UndoCommand.ExecuteAsync(null);

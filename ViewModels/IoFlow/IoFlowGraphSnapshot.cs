@@ -21,6 +21,7 @@ public sealed class IoFlowGraphSnapshot
 
     public IoFlowGraphLayoutSnapshot ToLayoutSnapshot() => new()
     {
+        AnalogueInputNodes = Nodes.Where(node => node.Kind == "Analogue").Select(node => node.Id).ToList(),
         Canvases = Canvases,
         SelectedCanvasId = SelectedCanvasId,
         NodePositions = Nodes.Select(node => new IoFlowNodePositionSnapshot
@@ -37,6 +38,8 @@ public sealed class IoFlowGraphSnapshot
 
 public sealed class IoFlowGraphLayoutSnapshot
 {
+    public List<int>? AnalogueInputNodes { get; set; }
+
     public List<IoFlowCanvasSnapshot> Canvases { get; set; } = [];
 
     public int SelectedCanvasId { get; set; } = 1;

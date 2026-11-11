@@ -228,6 +228,7 @@ public sealed partial class IoFlowGraphViewModel
             values.Add(CaptureUndoValue(() => channel.SoftStopTime, value => channel.SoftStopTime = value));
             values.Add(CaptureUndoValue(() => channel.MathRuleCount, value => channel.MathRuleCount = value));
             values.Add(CaptureUndoValue(() => channel.MathRootRule, value => channel.MathRootRule = value));
+            values.Add(CaptureUndoValue(() => channel.MathFollowChannel, value => channel.MathFollowChannel = value));
             values.Add(CaptureUndoValue(() => channel.MathOutputMode, value => channel.MathOutputMode = value));
 
             int channelNumber = channel.ChannelNumber;

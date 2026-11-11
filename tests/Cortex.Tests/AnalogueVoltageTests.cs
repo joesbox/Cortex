@@ -50,6 +50,26 @@ public sealed class AnalogueVoltageTests
         }
     }
 
+    [Fact]
+    public void DigitalModeStatusShowsPolarityFromPullResistor()
+    {
+        var input = new AnalogueInput(1, false, false) { ChanType = AnalogueInput.AnalogueChannelType.RawVoltage };
+        var node = new AnalogueInputNodeViewModel(input, default);
+        Assert.Equal("RawVoltage", node.ModeText);
+
+        var changed = new List<string?>();
+        node.PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+        input.ChanType = AnalogueInput.AnalogueChannelType.Digital;
+        input.PullDownEnable = true;
+        Assert.Equal("Digital active high", node.ModeText);
+
+        changed.Clear();
+        input.PullUpEnable = true;
+        Assert.False(input.PullDownEnable);
+        Assert.Equal("Digital active low", node.ModeText);
+        Assert.Contains(nameof(AnalogueInputNodeViewModel.ModeText), changed);
+    }
+
     [Theory]
     [InlineData(AnalogueInput.AnalogueChannelType.RawVoltage)]
     [InlineData(AnalogueInput.AnalogueChannelType.Digital)]

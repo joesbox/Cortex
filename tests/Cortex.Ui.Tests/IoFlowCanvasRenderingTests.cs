@@ -662,7 +662,7 @@ public sealed class IoFlowCanvasRenderingTests
             var led = Assert.Single(view.GetVisualDescendants().OfType<Ellipse>(), item => item.Classes.Contains("outputActiveLed"));
             var header = led.GetVisualAncestors().OfType<Grid>().First();
             Assert.Contains(header.GetVisualDescendants().OfType<TextBlock>(), item => item.Text == graph.OutputNodes[0].Title);
-            Assert.Contains(header.GetVisualDescendants().OfType<TextBlock>(), item => item.Text == "Active:");
+            Assert.Contains(header.GetVisualDescendants().OfType<TextBlock>(), item => item.Text == graph.OutputNodes[0].OutputStatusText);
         }
         finally
         {

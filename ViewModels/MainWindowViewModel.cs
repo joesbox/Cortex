@@ -551,6 +551,7 @@ namespace Cortex.ViewModels
 
         private readonly System.Timers.Timer _uiUpdateTimer;
         private DataStructures? _pendingLiveData;
+        private int _uiUpdateQueued;
         private readonly object _pendingDataLock = new();
         private bool _hasPendingData = false;
         private bool _hasReceivedLiveData;
@@ -2483,7 +2484,7 @@ namespace Cortex.ViewModels
         new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.AnalogueScaled, Label = "Analogue scaled PWM" },
         new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.CAN, Label = "CAN Digital" },
         new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.CAN_PWM, Label = "CAN PWM" },
-        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.MATH, Label = "MATH" },
+        new ChannelTypeDisplay { ChannelType = OutputChannel.ChannelType.MATH, Label = "RULE BASED" },
     };
 
             MathOutputModes = new ObservableCollection<string>
@@ -2745,6 +2746,11 @@ namespace Cortex.ViewModels
 
         private void ConfigSaved(object? sender, EventArgs e)
         {
+            if (!Dispatcher.UIThread.CheckAccess())
+            {
+                Dispatcher.UIThread.Post(() => ConfigSaved(sender, e));
+                return;
+            }
             IsSendingConfig = false;
             _controllerConfigBaseline = _configurationBeingSaved ?? DeepCopyDataStructures(SettingsDataView);
             _configurationBeingSaved = null;
@@ -2768,6 +2774,11 @@ namespace Cortex.ViewModels
 
         private void ConfigSaveCompleted(object? sender, ConfigurationSaveCompletedEventArgs e)
         {
+            if (!Dispatcher.UIThread.CheckAccess())
+            {
+                Dispatcher.UIThread.Post(() => ConfigSaveCompleted(sender, e));
+                return;
+            }
             if (!e.Succeeded)
             {
                 IsSendingConfig = false;
@@ -3405,8 +3416,9 @@ namespace Cortex.ViewModels
             MathValidationErrorMessage = string.Empty;
             PrepareCellularSettingsForSave();
 
+            bool hadPendingCustomCanChanges = HasPendingCustomCanChanges();
             bool customCanSaved = true;
-            if (HasPendingCustomCanChanges())
+            if (hadPendingCustomCanChanges)
             {
                 customCanSaved = await PersistPendingCustomCanChangesAsync();
                 if (!customCanSaved)
@@ -3423,8 +3435,11 @@ namespace Cortex.ViewModels
                 if (customCanSaved)
                 {
                     PersistIoFlowGraphSnapshotForController();
-                    SystemDateTime = $"Last updated: {DateTime.Now:yyyy/MM/dd HH:mm:ss}";
-                    StartBackgroundTask(FlashLastUpdatedAsync(), "Last-updated highlight");
+                    if (hadPendingCustomCanChanges)
+                    {
+                        SystemDateTime = $"Last updated: {DateTime.Now:yyyy/MM/dd HH:mm:ss}";
+                        StartBackgroundTask(FlashLastUpdatedAsync(), "Last-updated highlight");
+                    }
                 }
 
                 return;
@@ -3434,7 +3449,20 @@ namespace Cortex.ViewModels
             _configurationBeingSaved = DeepCopyDataStructures(SettingsDataView);
             _ioFlowSnapshotBeingSaved = IoFlowGraph.CreateSnapshot();
             _portService.UpdateSettingsData(_configurationBeingSaved);
-            _portService.StartSendConfig();
+            try
+            {
+                await _portService.StartSendConfigAsync();
+            }
+            catch (Exception ex) when (ex is IOException || ex is InvalidOperationException)
+            {
+                IsSendingConfig = false;
+                _configurationBeingSaved = null;
+                _ioFlowSnapshotBeingSaved = null;
+                _portService?.UpdateSettingsData(SettingsDataView);
+                AddLog("Settings could not be saved.", ex.Message);
+                _configSaveCompletionTcs?.TrySetResult(false);
+                _configSaveCompletionTcs = null;
+            }
         }
 
         private bool TryValidateMathConfiguration(out string validationError)
@@ -3448,6 +3476,24 @@ namespace Cortex.ViewModels
                 }
 
                 channel.EnsureMathRuleSlots();
+
+                if (channel.IsMathFollower)
+                {
+                    OutputChannel? owner = SettingsDataView.ChannelsStaticData.ElementAtOrDefault(channel.MathFollowChannel);
+                    if (channel.MathFollowChannel == channelIndex || owner == null || !owner.IsMathChannel || owner.IsMathFollower)
+                    {
+                        validationError = $"Channel {channelIndex + 1}: Shared logic must come from another output that has its own logic rules.";
+                        return false;
+                    }
+
+                    if (channel.MathOutputMode > (byte)OutputChannel.MathOutputModeType.PWM)
+                    {
+                        validationError = $"Channel {channelIndex + 1}: Output mode is invalid.";
+                        return false;
+                    }
+
+                    continue;
+                }
 
                 if (channel.MathRuleCount < 1 || channel.MathRuleCount > Constants.NUM_MATH_RULE_SLOTS)
                 {
@@ -3813,6 +3859,11 @@ namespace Cortex.ViewModels
                 return;
             }
 
+            if (IsLogBusy || IsTestingCellularConnection || IsCustomCanBusy)
+            {
+                return;
+            }
+
             if (IsSendingConfig || IsOpenRemoteProvisioningInProgress)
             {
                 SetCellularConnectionHealthStatus("Checking", shouldLog: true);
@@ -3827,7 +3878,11 @@ namespace Cortex.ViewModels
             try
             {
                 CellularParameters? testSettings = SettingsDataView.CellularParamsStaticData;
-                string? diagnostic = await _portService.RequestCellularTestAsync(testSettings, 12000);
+                var (wasRequested, diagnostic) = await _portService.TryPollCellularHealthAsync(testSettings);
+                if (!wasRequested)
+                {
+                    return;
+                }
                 string status = ClassifyCellularConnectionHealthStatus(diagnostic, out string? reason);
 
                 if (status.Equals("Needs attention", StringComparison.OrdinalIgnoreCase) &&
@@ -4694,17 +4749,10 @@ namespace Cortex.ViewModels
                 return;
             }
 
-            DataStructures? dataToProcess = null;
             bool hasPendingData;
-
             lock (_pendingDataLock)
             {
                 hasPendingData = _hasPendingData;
-                if (hasPendingData)
-                {
-                    dataToProcess = _pendingLiveData;
-                    _hasPendingData = false;
-                }
             }
 
             if (!hasPendingData && (!_hasReceivedLiveData || !IsConnected || !CommsEstablished))
@@ -4712,26 +4760,50 @@ namespace Cortex.ViewModels
                 return;
             }
 
-            // Now marshal to UI thread ONCE per timer tick
+            // Never queue another UI update while one is pending, otherwise slow UI
+            // work builds a dispatcher backlog and the display falls further behind.
+            if (Interlocked.CompareExchange(ref _uiUpdateQueued, 1, 0) != 0)
+            {
+                return;
+            }
+
             Avalonia.Threading.Dispatcher.UIThread.Post(() =>
             {
-                if (hasPendingData && dataToProcess != null)
+                try
                 {
-                    UpdateUIWithData(dataToProcess);
-                    return;
-                }
+                    DataStructures? dataToProcess = null;
+                    lock (_pendingDataLock)
+                    {
+                        if (_hasPendingData)
+                        {
+                            dataToProcess = _pendingLiveData;
+                            _hasPendingData = false;
+                        }
+                    }
 
-                if (IsLiveChartPaused)
+                    if (dataToProcess != null)
+                    {
+                        UpdateUIWithData(dataToProcess);
+                        return;
+                    }
+
+                    if (IsLiveChartPaused)
+                    {
+                        return;
+                    }
+
+                    UpdateCharts(LiveDataView, appendNewSamples: false);
+                }
+                finally
                 {
-                    return;
+                    Volatile.Write(ref _uiUpdateQueued, 0);
                 }
-
-                UpdateCharts(LiveDataView, appendNewSamples: false);
             });
         }
 
         private void UpdateUIWithData(DataStructures data)
         {
+            IoFlowGraph.ControllerChannels = _portService?.HasLoadedStaticSnapshot == true ? data.ChannelsStaticData : null;
             // Update live data in place
             UpdateLiveDataInPlace(data);
             UpdateMathStatusPollingSelection();
@@ -4879,6 +4951,12 @@ namespace Cortex.ViewModels
                         anyUpdated = true;
                     }
 
+                    if (staticChannel.MathFollowChannel != liveChannel.MathFollowChannel)
+                    {
+                        staticChannel.MathFollowChannel = liveChannel.MathFollowChannel;
+                        anyUpdated = true;
+                    }
+
                     if (staticChannel.MathOutputMode != liveChannel.MathOutputMode)
                     {
                         staticChannel.MathOutputMode = liveChannel.MathOutputMode;
@@ -4978,6 +5056,11 @@ namespace Cortex.ViewModels
                 if (!channel.IsMathChannel)
                 {
                     continue;
+                }
+
+                if (channel.IsMathFollower)
+                {
+                    return true;
                 }
 
                 channel.EnsureMathRuleSlots();
@@ -5173,6 +5256,11 @@ namespace Cortex.ViewModels
                 if (target.MathRootRule != source.MathRootRule)
                 {
                     target.MathRootRule = source.MathRootRule;
+                }
+
+                if (target.MathFollowChannel != source.MathFollowChannel)
+                {
+                    target.MathFollowChannel = source.MathFollowChannel;
                 }
 
                 if (target.MathOutputMode != source.MathOutputMode)

@@ -63,6 +63,30 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
     }
 
     [Fact]
+    public void FailedConnectionDisposesServiceBeforeDroppingIt()
+    {
+        SerialPortService? attemptedService = null;
+        _viewModel.IsConnected = true;
+        _viewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(MainWindowViewModel.IsConnected) && !_viewModel.IsConnected)
+            {
+                attemptedService = (SerialPortService?)GetField("_portService").GetValue(_viewModel);
+            }
+        };
+
+        _viewModel.ConnectCommand.Execute("CORTEX_INVALID_TEST_PORT");
+
+        Assert.NotNull(attemptedService);
+        Assert.Null(GetField("_portService").GetValue(_viewModel));
+        Assert.True((bool)typeof(SerialPortService).GetField("_isDisposed",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(attemptedService)!);
+        Assert.True(((Task)typeof(SerialPortService).GetField("_parseLoopTask",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(attemptedService)!).IsCompleted);
+        Assert.False(_viewModel.IsConnected);
+    }
+
+    [Fact]
     public async Task ConfigFileRestoresPendingLogicAndEnablesSave()
     {
         var graph = _viewModel.IoFlowGraph;
@@ -504,7 +528,7 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
     public async Task SavingCustomCanBaselineDoesNotClearUnrelatedPendingChannelChanges()
     {
         await _viewModel.SetCustomCanMessageTxStateAsync(0, 0, true);
-        _viewModel.SettingsDataView.ChannelsStaticData[0].Enabled ^= 1;
+        _viewModel.SettingsDataView.ChannelsStaticData[0].CurrentThresholdHigh += 1;
 
         typeof(MainWindowViewModel).GetMethod("SyncCustomCanBaselineSnapshot", BindingFlags.NonPublic | BindingFlags.Instance)!
             .Invoke(_viewModel, null);

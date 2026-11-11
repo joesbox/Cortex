@@ -31,17 +31,19 @@ namespace Cortex.Services
         private DateTimeOffset _accessTokenExpiresAt = DateTimeOffset.MinValue;
 
         public ProvisioningApiClient()
+            : this(
+                new HttpClient { Timeout = TimeSpan.FromSeconds(30) },
+                new Uri((Environment.GetEnvironmentVariable("CORTEX_KEYCLOAK_URL") ?? DefaultKeycloakBaseUrl).TrimEnd('/') + "/"))
         {
             string provisioningBaseUrl = Environment.GetEnvironmentVariable("CORTEX_PROVISIONING_API") ?? DefaultProvisioningBaseUrl;
-            string keycloakBaseUrl = Environment.GetEnvironmentVariable("CORTEX_KEYCLOAK_URL") ?? DefaultKeycloakBaseUrl;
-
-            _keycloakBaseUri = new Uri(keycloakBaseUrl.TrimEnd('/') + "/");
-            _client = new HttpClient
-            {
-                BaseAddress = new Uri(provisioningBaseUrl.TrimEnd('/') + "/"),
-                Timeout = TimeSpan.FromSeconds(30),
-            };
+            _client.BaseAddress = new Uri(provisioningBaseUrl.TrimEnd('/') + "/");
             _client.DefaultRequestHeaders.UserAgent.ParseAdd("Cortex");
+        }
+
+        public ProvisioningApiClient(HttpClient client, Uri keycloakBaseUri)
+        {
+            _client = client ?? throw new ArgumentNullException(nameof(client));
+            _keycloakBaseUri = keycloakBaseUri ?? throw new ArgumentNullException(nameof(keycloakBaseUri));
         }
 
         public string SignedInRealm { get; private set; } = string.Empty;
@@ -56,6 +58,9 @@ namespace Cortex.Services
 
         private bool HasUsableAccessToken =>
             !string.IsNullOrEmpty(_accessToken) && DateTimeOffset.UtcNow < _accessTokenExpiresAt;
+
+        private static bool IsRejectedRefreshToken(HttpRequestException exception) =>
+            exception.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.Unauthorized;
 
         public async Task SignInAsync(string realm, string username, string password, bool staySignedIn, CancellationToken cancellationToken = default)
         {
@@ -100,7 +105,7 @@ namespace Cortex.Services
                 SignedInUsername = username;
                 return true;
             }
-            catch (Exception)
+            catch (HttpRequestException ex) when (IsRejectedRefreshToken(ex))
             {
                 SignOut();
                 return false;
@@ -114,9 +119,12 @@ namespace Cortex.Services
 
             if (!response.IsSuccessStatusCode)
             {
-                throw new InvalidOperationException(response.StatusCode == HttpStatusCode.Unauthorized
-                    ? "OpenRemote rejected that realm, username or password."
-                    : $"Sign in failed ({(int)response.StatusCode}).");
+                throw new HttpRequestException(
+                    response.StatusCode == HttpStatusCode.Unauthorized
+                        ? "OpenRemote rejected that realm, username or password."
+                        : $"Sign in failed ({(int)response.StatusCode}).",
+                    null,
+                    response.StatusCode);
             }
 
             string body = await response.Content.ReadAsStringAsync(cancellationToken);
@@ -156,7 +164,7 @@ namespace Cortex.Services
                         ["refresh_token"] = _refreshToken,
                     }, cancellationToken);
                 }
-                catch (Exception ex)
+                catch (HttpRequestException ex) when (IsRejectedRefreshToken(ex))
                 {
                     SignOut();
                     throw new InvalidOperationException("Your OpenRemote session expired. Sign in again.", ex);

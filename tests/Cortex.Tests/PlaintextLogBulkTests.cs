@@ -259,6 +259,38 @@ public class PlaintextLogBulkTests
     }
 
     [Fact]
+    public async Task ExactReadCancelsEvenWhenStreamIgnoresCancellation()
+    {
+        using var stream = new NonCancellingStream();
+        using var cancellation = new CancellationTokenSource();
+        byte[] buffer = new byte[1];
+        var read = (Task)typeof(SerialPortService).GetMethod("ReadExactlyAsync",
+            BindingFlags.NonPublic | BindingFlags.Static)!
+            .Invoke(null, [stream, buffer, 0, 1, cancellation.Token])!;
+        Assert.False(read.IsCompleted);
+
+        cancellation.Cancel();
+        try
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => read.WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+        finally
+        {
+            stream.CompleteRead();
+        }
+    }
+
+    private sealed class NonCancellingStream : MemoryStream
+    {
+        private readonly TaskCompletionSource<int> _read = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            new(_read.Task);
+
+        public void CompleteRead() => _read.TrySetResult(0);
+    }
+
+    [Fact]
     public async Task BulkReader_CancellationCannotSucceedWithoutAcknowledgement()
     {
         using var service = new SerialPortService("COM1");

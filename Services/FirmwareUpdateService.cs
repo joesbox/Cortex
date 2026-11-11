@@ -270,7 +270,7 @@ namespace Cortex.Services
                 throw new InvalidOperationException("Signature file is empty.");
             }
 
-            serialPortService.BeginFirmwareUpdateSession();
+            await serialPortService.BeginFirmwareUpdateSessionAsync();
             try
             {
                 await UploadAssetAsync(serialPortService, (byte)0, firmwareBytes, 45, 72, progress, cancellationToken, "Transferring firmware to controller...");

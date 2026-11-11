@@ -45,7 +45,7 @@ public sealed class IoFlowMathSyncTests
     }
 
     [Fact]
-    public async Task TraditionalEditRetainsStandaloneRulesSharedWithAnotherOutput()
+    public async Task TraditionalEditOfSharedRulesKeepsSecondOutputFollowing()
     {
         DataStructures settings = new();
         IoFlowGraphViewModel graph = new();
@@ -60,18 +60,19 @@ public sealed class IoFlowMathSyncTests
         await graph.ConnectNodes(rules[1], graph.OutputNodes[1]);
         OutputChannel firstChannel = graph.OutputNodes[0].Channel;
         OutputChannel secondChannel = graph.OutputNodes[1].Channel;
+        Assert.True(secondChannel.IsMathFollower);
+        Assert.Equal(firstChannel.ChannelNumber - 1, secondChannel.MathFollowChannel);
 
         firstChannel.MathRules[0].OperandAConstant = 27;
         graph.SynchronizeMathChannelFromSettings(firstChannel);
-        rules[0].Rule.OperandAConstant = 42;
 
-        Assert.Contains(rules[0], graph.MathRuleNodes);
-        Assert.Contains(rules[1], graph.MathRuleNodes);
+        Assert.True(secondChannel.IsMathFollower);
         Assert.Equal(27, firstChannel.MathRules[0].OperandAConstant);
-        Assert.Equal(42, secondChannel.MathRules[0].OperandAConstant);
-        Assert.Single(graph.CreateSnapshot().OutputRootLogicNodeByChannel);
-        Assert.Same(firstChannel.MathRules[0], graph.MathRuleNodes.Single(node =>
-            node.OwnerChannelNumber == firstChannel.ChannelNumber && node.RuleIndex == 0).Rule);
+        Assert.Empty(graph.CreateSnapshot().OutputRootLogicNodeByChannel);
+        MathRuleNodeViewModel ownedRoot = graph.MathRuleNodes.Single(node =>
+            node.OwnerChannelNumber == firstChannel.ChannelNumber && node.RuleIndex == firstChannel.MathRootRule);
+        Assert.Contains(graph.Connections, wire =>
+            ReferenceEquals(wire.Source.Node, ownedRoot) && ReferenceEquals(wire.Target.Node, graph.OutputNodes[1]));
     }
 
     [Fact]

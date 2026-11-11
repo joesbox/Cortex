@@ -1,6 +1,7 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using Cortex.Models;
 using Avalonia.Media;
+using Avalonia.Threading;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -15,6 +16,7 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
     private static readonly IBrush ActiveOutputLedBrush = new SolidColorBrush(Color.Parse("#FF52E08A"));
     private static readonly IBrush InactiveOutputLedBrush = new SolidColorBrush(Color.Parse("#FF68717D"));
     private static readonly IBrush UnknownOutputLedBrush = new SolidColorBrush(Color.Parse("#FFB78A4A"));
+    private static readonly IBrush FaultOutputLedBrush = new SolidColorBrush(Color.Parse("#FFFF5B5B"));
 
     private static readonly OutputChannelTypeOption[] DigitalTypeOptions =
     [
@@ -71,7 +73,12 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
 
     public string MathOutputModeSummary => ((OutputChannel.MathOutputModeType)Channel.MathOutputMode).ToString();
 
-    public IReadOnlyList<int> OutputChannelNumbers => _availableChannels.Select(channel => channel.ChannelNumber).OrderBy(channelNumber => channelNumber).ToList();
+    private IReadOnlyList<int>? _outputChannelNumbers;
+    private bool _selectingChannel;
+    private int _channelNumbersRefreshVersion;
+
+    public IReadOnlyList<int> OutputChannelNumbers => _outputChannelNumbers
+        ?? _availableChannels.Select(channel => channel.ChannelNumber).OrderBy(channelNumber => channelNumber).ToList();
 
     public int SelectedOutputChannelNumber
     {
@@ -83,10 +90,42 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
                 return;
             }
 
-            if (_channelSelectionHandler?.Invoke(this, value) != true)
+            _selectingChannel = true;
+            try
             {
-                OnPropertyChanged();
+                if (_channelSelectionHandler?.Invoke(this, value) != true)
+                {
+                    OnPropertyChanged();
+                }
             }
+            finally
+            {
+                _selectingChannel = false;
+            }
+        }
+    }
+
+    public void RefreshOutputChannelNumbers(IReadOnlySet<int> channelsUsedElsewhere)
+    {
+        int version = ++_channelNumbersRefreshVersion;
+        if (_selectingChannel)
+            // Finish the ComboBox selection event before replacing its items.
+            Dispatcher.UIThread.Post(Apply);
+        else
+            Apply();
+
+        void Apply()
+        {
+            if (version != _channelNumbersRefreshVersion) return;
+            List<int> numbers = _availableChannels
+                .Select(channel => channel.ChannelNumber)
+                .Where(number => number == Channel.ChannelNumber || !channelsUsedElsewhere.Contains(number))
+                .OrderBy(number => number)
+                .ToList();
+            if (_outputChannelNumbers != null && _outputChannelNumbers.SequenceEqual(numbers)) return;
+            _outputChannelNumbers = numbers;
+            OnPropertyChanged(nameof(OutputChannelNumbers));
+            OnPropertyChanged(nameof(SelectedOutputChannelNumber));
         }
     }
 
@@ -136,11 +175,44 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
     }
 
     private bool? _isOutputActive;
+    private byte _liveErrorFlags;
+    private bool? _controllerHasInputSource;
 
     public bool? IsOutputActive => _isOutputActive;
 
+    // Disabled means no input source is configured; an off output with an input is Inactive.
+    private bool IsUnconfigured => !(_controllerHasInputSource ?? Channel.HasConfiguredInputSource);
+
+    public string OutputStatusText
+    {
+        get
+        {
+            if (_liveErrorFlags != 0)
+            {
+                var statuses = new List<string>();
+                if ((_liveErrorFlags & 1) != 0) statuses.Add("Over current");
+                if ((_liveErrorFlags & 2) != 0) statuses.Add("Under current");
+                if ((_liveErrorFlags & 4) != 0) statuses.Add("Driver fault");
+                if ((_liveErrorFlags & 8) != 0) statuses.Add("Retry lockout");
+                if ((_liveErrorFlags & 0x10) != 0) statuses.Add("Over temperature");
+                if ((_liveErrorFlags & 0x20) != 0) statuses.Add("Math error");
+                if ((_liveErrorFlags & 0xC0) != 0) statuses.Add("Fault");
+                return string.Join(", ", statuses);
+            }
+            return _isOutputActive switch
+            {
+                true => "Active",
+                false when IsUnconfigured => "Disabled",
+                false => "Inactive",
+                null => "Unknown",
+            };
+        }
+    }
+
     public string OutputActiveToolTip => _isOutputActive switch
     {
+        _ when _liveErrorFlags != 0 => OutputStatusText,
+        false when IsUnconfigured => "Channel is disabled: no input configured",
         true => "Output is on",
         false => "Output is off",
         null => "Waiting for controller status",
@@ -148,18 +220,26 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
 
     public IBrush OutputLedBrush => _isOutputActive switch
     {
+        _ when _liveErrorFlags != 0 => FaultOutputLedBrush,
         true => ActiveOutputLedBrush,
         false => InactiveOutputLedBrush,
         null => UnknownOutputLedBrush,
     };
 
-    public void UpdateLiveState(OutputChannel? liveChannel)
+    public void UpdateLiveState(OutputChannel? liveChannel, OutputChannel? controllerChannel = null)
     {
         bool? isOutputActive = liveChannel is null ? null : liveChannel.Enabled != 0;
-        if (_isOutputActive != isOutputActive)
+        byte errorFlags = liveChannel?.ErrorFlags ?? 0;
+        bool? controllerHasInputSource = controllerChannel?.HasConfiguredInputSource;
+        // Draft edits can change the fallback, so always refresh text when no controller config is known.
+        if (_isOutputActive != isOutputActive || _liveErrorFlags != errorFlags
+            || _controllerHasInputSource != controllerHasInputSource || controllerHasInputSource is null)
         {
             _isOutputActive = isOutputActive;
+            _liveErrorFlags = errorFlags;
+            _controllerHasInputSource = controllerHasInputSource;
             OnPropertyChanged(nameof(IsOutputActive));
+            OnPropertyChanged(nameof(OutputStatusText));
             OnPropertyChanged(nameof(OutputActiveToolTip));
             OnPropertyChanged(nameof(OutputLedBrush));
         }
@@ -350,6 +430,7 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
         Channel.PropertyChanged -= Channel_PropertyChanged;
         _channel = channel;
         Channel.PropertyChanged += Channel_PropertyChanged;
+        UpdateLiveState(null);
 
         Title = BuildNodeTitle(channel);
         SetDefaultBorderHex(ConnectorPinDisplayItem.GetOutputColorHex(Channel.ChanType));
@@ -591,6 +672,11 @@ public sealed partial class OutputNodeViewModel : IoFlowNodeViewModel
 
     private void Channel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (e.PropertyName == nameof(OutputChannel.Enabled))
+        {
+            OnPropertyChanged(nameof(OutputStatusText));
+            OnPropertyChanged(nameof(OutputActiveToolTip));
+        }
         if (e.PropertyName == nameof(OutputChannel.MathOutputMode))
             OnPropertyChanged(nameof(MathOutputModeSummary));
 

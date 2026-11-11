@@ -110,7 +110,6 @@ namespace Cortex.Services
                     targetChannel.ChanType = sourceChannel.ChanType ?? targetChannel.ChanType;
                     targetChannel.Category = sourceChannel.Category ?? targetChannel.Category;
                     targetChannel.PWMSetDuty = sourceChannel.PWMSetDuty ?? targetChannel.PWMSetDuty;
-                    targetChannel.Enabled = sourceChannel.Enabled ?? targetChannel.Enabled;
                     if (sourceChannel.Name != null)
                     {
                         targetChannel.Name = ToFixedName(sourceChannel.Name);
@@ -155,6 +154,7 @@ namespace Cortex.Services
                     targetChannel.IntermittentOffTime = sourceChannel.IntermittentOffTime ?? targetChannel.IntermittentOffTime;
                     targetChannel.MathRuleCount = sourceChannel.MathRuleCount ?? targetChannel.MathRuleCount;
                     targetChannel.MathRootRule = sourceChannel.MathRootRule ?? targetChannel.MathRootRule;
+                    targetChannel.MathFollowChannel = sourceChannel.MathFollowChannel ?? OutputChannel.MathFollowNone;
                     targetChannel.MathOutputMode = sourceChannel.MathOutputMode ?? targetChannel.MathOutputMode;
                     targetChannel.MathCalculatedRootValue = sourceChannel.MathCalculatedRootValue ?? targetChannel.MathCalculatedRootValue;
                     targetChannel.MathError = sourceChannel.MathError ?? targetChannel.MathError;
@@ -341,7 +341,6 @@ namespace Cortex.Services
                     ChanType = channel.ChanType,
                     Category = channel.Category,
                     PWMSetDuty = channel.PWMSetDuty,
-                    Enabled = channel.Enabled,
                     Name = ToStringName(channel.Name),
                     AnalogRaw = channel.AnalogRaw,
                     CurrentValue = channel.CurrentValue,
@@ -372,6 +371,7 @@ namespace Cortex.Services
                     IntermittentOffTime = channel.IntermittentOffTime,
                     MathRuleCount = channel.MathRuleCount,
                     MathRootRule = channel.MathRootRule,
+                    MathFollowChannel = channel.MathFollowChannel == OutputChannel.MathFollowNone ? null : channel.MathFollowChannel,
                     MathOutputMode = channel.MathOutputMode,
                     MathCalculatedRootValue = channel.MathCalculatedRootValue,
                     MathError = channel.MathError,
@@ -457,14 +457,12 @@ namespace Cortex.Services
                     UseTLS = settingsData.CellularParamsStaticData.UseTLS,
                     APN = settingsData.CellularParamsStaticData.APN,
                     APNUser = settingsData.CellularParamsStaticData.APNUser,
-                    APNPassword = settingsData.CellularParamsStaticData.APNPassword,
                     OpenRemoteHost = settingsData.CellularParamsStaticData.OpenRemoteHost,
                     OpenRemotePort = settingsData.CellularParamsStaticData.OpenRemotePort,
                     OpenRemoteRealm = settingsData.CellularParamsStaticData.OpenRemoteRealm,
                     OpenRemoteAssetId = settingsData.CellularParamsStaticData.OpenRemoteAssetId,
                     OpenRemoteAssetName = settingsData.CellularParamsStaticData.OpenRemoteAssetName,
                     MQTTUsername = settingsData.CellularParamsStaticData.MQTTUsername,
-                    MQTTPassword = settingsData.CellularParamsStaticData.MQTTPassword,
                     KeepAliveSeconds = settingsData.CellularParamsStaticData.KeepAliveSeconds,
                     PublishIntervalMs = settingsData.CellularParamsStaticData.PublishIntervalMs,
                     TelemetryUploadMask = settingsData.CellularParamsStaticData.TelemetryUploadMask,
@@ -583,6 +581,7 @@ namespace Cortex.Services
 
         public byte? PWMSetDuty { get; set; }
 
+        // Legacy field: Enabled is derived by the controller; read for old files but ignored.
         public byte? Enabled { get; set; }
 
         public string? Name { get; set; }
@@ -658,6 +657,9 @@ namespace Cortex.Services
         public byte? MathRuleCount { get; set; }
 
         public byte? MathRootRule { get; set; }
+
+        /// <summary>Zero-based owner channel index when this channel shares another channel's rules.</summary>
+        public byte? MathFollowChannel { get; set; }
 
         public byte? MathOutputMode { get; set; }
 
@@ -837,6 +839,7 @@ namespace Cortex.Services
 
         public string? APNUser { get; set; }
 
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string? APNPassword { get; set; }
 
         public string? OpenRemoteHost { get; set; }
@@ -853,6 +856,7 @@ namespace Cortex.Services
 
         public string? MQTTUsername { get; set; }
 
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string? MQTTPassword { get; set; }
 
         public ushort? KeepAliveSeconds { get; set; }

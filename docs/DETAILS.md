@@ -98,9 +98,32 @@ PWM duty/ranges and timing settings. Protection and timing settings are availabl
 for maths and unconnected outputs. Analogue threshold
 direction is selectable; analogue source properties include calibration ranges and
 NTC beta/nominal resistance, including for logging-only sources.
-The channel enabled switch edits the stored controller `Enabled` flag and also
-disables the node's configuration controls. It remains accessible while disabled.
-
+Connecting an input enables the output; deleting the input wire disables it
+without clearing protection or timing settings. Unconnected outputs remain
+configurable. The LED and status text show
+active, inactive, disabled, over/under current, driver fault, retry lockout,
+over temperature or maths error. Live activity is separate from stored enable.
+"Disabled" means no input source is configured: no input pin, and not a CAN or
+rule-based type. An output that has an input but is off, including an active-low
+analogue input at 5 V, shows "Inactive". The check uses the serial service's
+confirmed static controller snapshot, because the static settings copy inside
+the live data view is never refreshed. Until a snapshot loads, it falls back to
+the editor's input.
+The controller derives the channel `Enabled` flag from "has an input source" at
+load and on every input pass. Cortex never sends it (channel parameter 4 is
+ignored by the controller), and config files no longer store it. Cortex reads it
+only for display.
+The output-channel selector lists only channels not already on the canvas, and
+refuses a channel that is already in use. One input node (digital, analogue or
+rule) can drive several outputs. Wiring a rule root to a second output makes that
+output a follower of the owning output's rules. This uses channel parameter 46
+(follow channel). On the controller, it is stored as `RuleCount=0` and
+`RootRule=0x80|owner`. Followers keep their own digital/PWM mode, current limits
+and timing, and share the owner's result, including toggle and hysteresis state.
+Removing a follower's wire disables only that output. Removing the owner's wire
+promotes the first follower to own the rules and re-points the rest. Deleting
+the rule nodes disconnects every follower. Controllers without parameter 46
+reject follower configurations.
 Use Add maths node to build rules and chains. The rule directly wired to an
 output supplies its final result; reconnecting selects that rule automatically.
 The internal controller root index is not exposed in flow text.
@@ -117,12 +140,41 @@ that assignment. Frame/signal definitions remain in CAN Messages.
 Standalone serial reads (including firmware/version queries after connection)
 reset receive buffers, not loaded settings flags. Clearing those flags stopped
 live polling after initial hydration. Only actual controller session loss clears
-snapshot state. Math status polling follows all controller math channels rather
+snapshot state. Standalone ACK writes, build-date queries, firmware diagnostics
+and log resets share the request gate, and queries preserve an enclosing
+session's polling suspension. Override packets use their own packet buffer.
+Parser dispatch is serialized across normal reception and log recovery.
+Failed connection attempts dispose the serial service and its parser task.
+
+Background cellular health checks skip busy transports rather than queueing
+behind another request. Configuration-save, firmware-update and log-transfer
+startup wait for an outstanding standalone request before suspending polling.
+Configuration saves fail after a missing acknowledgement instead of blindly
+retrying a potentially applied write; a late final ACK cannot turn that failure
+into success. Read back the controller before retrying a timed-out save.
+
+Math status polling follows all controller math channels rather
 than the legacy editor's selected channel. A read-only COM18 test reproduced
 the freeze before this fix and verified continued live and math updates for a
 minute in I/O Flow after opening Settings and switching through CAN Messages.
 Tab entry did not create pending configuration changes. No configuration or
 output commands were sent during this check.
+
+The log map reconnects its view-model subscriptions whenever the log view is
+reattached, including after switching away and back. Loaded GPS data therefore
+continues to refresh the route without needing a new data context. Logs with
+only one valid GPS time bucket display a marker without constructing an invalid
+single-coordinate route line. Headless UI regressions cover both cases using
+synthetic coordinates.
+
+Live polling keeps exactly one `r` request in flight. The next `r` is chained
+only after its live response arrives, not after digital, math or CAN status
+frames. Previously every received frame chained a request, so each periodic
+status reply added a permanent extra request. On COM18 that grew by about 4
+requests every 3 seconds to more than 630 live frames/s, and the live view and
+I/O Flow mini charts fell further and further behind. Outstanding requests are
+assumed lost after 1 s. The 50 ms UI timer queues at most one dispatcher update
+and reads the newest sample when that update runs.
 
 Maths runtime details use separate, vertically stacked operand A, operand B and
 rule-result sections in the properties panel. Unary operations
@@ -193,8 +245,9 @@ currently wired to the rule plus an inline constant. Reconnecting or deleting
 an operand wire changes only that operand; the same source can feed both A and B.
 Deleting a source replaces its uses with constant zero and updates the pending
 controller rules, including channels not currently displayed.
-Analogue nodes may remain unconnected for calibration and logging configuration;
-their settings and local canvas positions persist without an output assignment.
+Analogue nodes may remain unconnected for calibration, CAN telemetry and logging
+configuration; their settings, canvas membership and local positions persist
+without an output assignment, including after saving or reconnecting.
 Decoded CAN RX signals each have their own math-only source node, separate from
 the system CAN input used for CAN-controlled outputs. System values also have
 math-only source nodes. The context menu adds these sources. Disabled/non-RX
@@ -350,6 +403,13 @@ or cryptographically authenticated. Cancelling a download stops the controller
 transfer and drains queued packets through its acknowledgement, preserving the
 unlocked connection so another file can be downloaded immediately. A malformed
 stream, lost connection or failed cancellation handshake requires reconnecting.
+Bulk-read waits observe the stall deadline even when a stream ignores its
+cancellation token. A stall closes the port to abort the native read and
+requires reconnecting; it does not attempt chunk fallback on the closed port.
+For other recoverable legacy bulk failures, chunk fallback reopens the selected
+log before reading, so the file starts at the beginning rather than a partial
+bulk-transfer offset. Physical Windows serial-driver behavior still requires
+the opt-in hardware checks.
 
 Cancellation regression tests are in `tests/Cortex.Tests/PlaintextLogBulkTests.cs`.
 Controller log-list sizes of `0xFFFFFFFF` mean unavailable metadata and display

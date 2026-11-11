@@ -254,6 +254,10 @@ public sealed partial class IoFlowGraphViewModel
     {
         if (snapshot.NodePositions == null || snapshot.NodePositions.Any(position => position == null))
             return false;
+        if (snapshot.AnalogueInputNodes is { } analogueNodes &&
+            (analogueNodes.Any(id => id < 1 || id > Cortex.Models.Constants.NUM_ANALOGUE_INPUTS)
+                || analogueNodes.Distinct().Count() != analogueNodes.Count))
+            return false;
 
         var identities = new HashSet<(string Kind, int Id, byte Option)>();
         return IsCanvasLayoutValid(snapshot.ToGraphSnapshot()) && snapshot.NodePositions.All(position =>

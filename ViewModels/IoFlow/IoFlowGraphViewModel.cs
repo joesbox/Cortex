@@ -38,6 +38,9 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
 
     public bool UseControllerConfigurationValues { get; set; }
 
+    // Persisted controller config for output status; the live Enabled byte is runtime on/off state.
+    public IReadOnlyList<OutputChannel>? ControllerChannels { get; set; }
+
     public bool IsApplyingMathRulesFromGraph => _isApplyingMathRulesFromGraph;
 
     public Func<string, string, string, string, Task<bool>>? ConfirmAction { get; set; }
@@ -325,7 +328,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
             .Where(node => node.OwnerChannelNumber == channel.ChannelNumber)
             .ToList();
 
-        int activeRuleCount = channel.ChanType == OutputChannel.ChannelType.MATH
+        int activeRuleCount = channel.ChanType == OutputChannel.ChannelType.MATH && !channel.IsMathFollower
             ? Math.Clamp((int)channel.MathRuleCount, 1, Constants.NUM_MATH_RULE_SLOTS)
             : 0;
 
@@ -393,7 +396,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
         {
             if (remainingRules.Length == 0)
             {
-                ResetOutputChannelToIoFlowDefaults(channel);
+                DisconnectOutputChannel(channel, promoteFollowers: false);
             }
             else
             {
@@ -785,7 +788,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
                 }
             }
 
-            if (channel.ChanType != OutputChannel.ChannelType.MATH)
+            if (channel.ChanType != OutputChannel.ChannelType.MATH || channel.IsMathFollower)
             {
                 continue;
             }
@@ -826,7 +829,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
                 }
             }
 
-            if (channel.ChanType != OutputChannel.ChannelType.MATH)
+            if (channel.ChanType != OutputChannel.ChannelType.MATH || channel.IsMathFollower)
             {
                 continue;
             }
@@ -864,6 +867,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
     public IoFlowGraphLayoutSnapshot CreateLayoutSnapshot()
     {
         IoFlowGraphLayoutSnapshot layout = CreateSnapshot().ToLayoutSnapshot();
+        layout.AnalogueInputNodes = AnalogueNodes.Select(node => node.InputNumber).ToList();
         foreach (var (channelNumber, rootId) in _outputRootLogicNodeByChannel)
         {
             MathRuleNodeViewModel? root = MathRuleNodes.FirstOrDefault(node => node.IsStandalone && node.LogicNodeId == rootId);
@@ -1192,6 +1196,16 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
         if (!IsNodePositionsValid(snapshot))
             throw new ArgumentException("Invalid I/O Flow canvas layout or node positions.", nameof(snapshot));
 
+        if (_settings != null)
+        {
+            foreach (int inputNumber in snapshot.AnalogueInputNodes
+                ?? snapshot.NodePositions.Where(node => node.Kind == "Analogue").Select(node => node.Id).ToList())
+            {
+                AnalogueInput? input = _settings.AnalogueInputsStaticData.FirstOrDefault(input => input.InputNumber == inputNumber);
+                if (input != null && AnalogueNodes.All(node => node.InputNumber != inputNumber))
+                    Nodes.Add(new AnalogueInputNodeViewModel(input, new Point(430, 50)));
+            }
+        }
         ApplyNodeLocations(snapshot.ToGraphSnapshot());
     }
 
@@ -1558,6 +1572,11 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
 
         if (target is OutputNodeViewModel outputTarget)
         {
+            if (source is MathRuleNodeViewModel sharedRoot && GetSharedRuleOwner(sharedRoot, outputTarget.ChannelNumber) != null)
+            {
+                return !WouldCreateOutputRootCycle(sharedRoot, outputTarget.ChannelNumber);
+            }
+
             if (outputTarget.Channel.ChanType == OutputChannel.ChannelType.MATH)
             {
                 return source is MathRuleNodeViewModel mathRule
@@ -1755,6 +1774,11 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
             return false;
         }
 
+        if (channel.IsMathFollower)
+        {
+            return HasOutputDependencyPath(channel.MathFollowChannel + 1, targetChannelNumber, visitedChannels);
+        }
+
         int ruleCount = Math.Clamp((int)channel.MathRuleCount, 0, Math.Min(channel.MathRules.Count, Constants.NUM_MATH_RULE_SLOTS));
         if (channel.MathRootRule >= ruleCount)
         {
@@ -1858,7 +1882,34 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
 
         if (target is OutputNodeViewModel outputTarget)
         {
-            if (source is MathRuleNodeViewModel sourceRule)
+            if (source is MathRuleNodeViewModel sharedRoot
+                && GetSharedRuleOwner(sharedRoot, outputTarget.ChannelNumber) is OutputChannel ruleOwner)
+            {
+                if (outputTarget.Channel.IsMathFollower && outputTarget.Channel.MathFollowChannel == ruleOwner.ChannelNumber - 1)
+                {
+                    return;
+                }
+
+                bool hasOwnSource = outputTarget.Channel.InputControlPin != 0
+                    || (outputTarget.Channel.ChanType is OutputChannel.ChannelType.MATH or OutputChannel.ChannelType.CAN or OutputChannel.ChannelType.CAN_PWM
+                        && !outputTarget.Channel.IsMathFollower);
+                if (hasOwnSource)
+                {
+                    bool replace = ConfirmAction != null
+                        && await ConfirmAction(
+                            "Replace Output Input",
+                            $"Output {outputTarget.ChannelNumber} already has an input connection. Replace it so it shares Output {ruleOwner.ChannelNumber}'s logic?",
+                            "REPLACE",
+                            "CANCEL");
+                    if (!replace)
+                    {
+                        return;
+                    }
+                }
+
+                MakeMathFollower(outputTarget.Channel, ruleOwner);
+            }
+            else if (source is MathRuleNodeViewModel sourceRule)
             {
                 if (outputTarget.Channel.InputControlPin != 0)
                 {
@@ -1881,6 +1932,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
                     return;
                 }
 
+                outputTarget.Channel.MathFollowChannel = OutputChannel.MathFollowNone;
                 outputTarget.Channel.InputControlPin = 0;
                 if (sourceRule.IsStandalone)
                 {
@@ -1893,7 +1945,9 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
             }
             else if (source is CanInputNodeViewModel)
             {
+                PromoteFollowersOf(outputTarget.Channel);
                 _outputRootLogicNodeByChannel.Remove(outputTarget.ChannelNumber);
+                outputTarget.Channel.MathFollowChannel = OutputChannel.MathFollowNone;
                 outputTarget.Channel.InputControlPin = 0;
 
                 if (outputTarget.Channel.ChanType is not (OutputChannel.ChannelType.CAN or OutputChannel.ChannelType.CAN_PWM))
@@ -1903,7 +1957,9 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
             }
             else if (TryGetInputPin(source, out byte pin))
             {
+                PromoteFollowersOf(outputTarget.Channel);
                 _outputRootLogicNodeByChannel.Remove(outputTarget.ChannelNumber);
+                outputTarget.Channel.MathFollowChannel = OutputChannel.MathFollowNone;
                 if (!outputTarget.ConfigureInputPin(pin))
                 {
                     ShowAddNodeWarning("The selected input is not compatible with this output channel.");
@@ -1961,16 +2017,23 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
 
         if (target is OutputNodeViewModel outputTarget)
         {
-            if (TryGetInputPin(source, out byte pin) && outputTarget.Channel.InputControlPin == pin)
+            if (outputTarget.Channel.IsMathFollower)
+            {
+                if (source is MathRuleNodeViewModel)
+                {
+                    ResetOutputChannelSource(outputTarget.Channel);
+                }
+            }
+            else if (TryGetInputPin(source, out byte pin) && outputTarget.Channel.InputControlPin == pin)
             {
                 _outputRootLogicNodeByChannel.Remove(outputTarget.ChannelNumber);
-                ResetOutputChannelToIoFlowDefaults(outputTarget.Channel);
+                DisconnectOutputChannel(outputTarget.Channel);
             }
             else if (source is CanInputNodeViewModel
                 && (outputTarget.Channel.ChanType == OutputChannel.ChannelType.CAN || outputTarget.Channel.ChanType == OutputChannel.ChannelType.CAN_PWM))
             {
                 _outputRootLogicNodeByChannel.Remove(outputTarget.ChannelNumber);
-                ResetOutputChannelToIoFlowDefaults(outputTarget.Channel);
+                DisconnectOutputChannel(outputTarget.Channel);
             }
             else if (source is MathRuleNodeViewModel sourceRule
                 && ((sourceRule.OwnerChannelNumber == outputTarget.ChannelNumber
@@ -1978,8 +2041,8 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
                     || (_outputRootLogicNodeByChannel.TryGetValue(outputTarget.ChannelNumber, out int mappedRoot)
                         && mappedRoot == sourceRule.LogicNodeId)))
             {
+                DisconnectOutputChannel(outputTarget.Channel);
                 _outputRootLogicNodeByChannel.Remove(outputTarget.ChannelNumber);
-                ResetOutputChannelToIoFlowDefaults(outputTarget.Channel);
                 SynchronizeMathChannelFromSettings(outputTarget.Channel, notifyGraphChanged: false);
             }
         }
@@ -2174,9 +2237,12 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
     private static bool MathConfigurationMatches(OutputChannel configured, OutputChannel live)
     {
         if (live.ChanType != OutputChannel.ChannelType.MATH
-            || configured.MathRuleCount != live.MathRuleCount
-            || configured.MathRootRule != live.MathRootRule
+            || configured.IsMathFollower != live.IsMathFollower
             || configured.MathOutputMode != live.MathOutputMode) return false;
+        if (configured.IsMathFollower)
+            return configured.MathFollowChannel == live.MathFollowChannel;
+        if (configured.MathRuleCount != live.MathRuleCount
+            || configured.MathRootRule != live.MathRootRule) return false;
         for (int i = 0; i < configured.MathRuleCount; i++)
         {
             if (i >= configured.MathRules.Count || i >= live.MathRules.Count
@@ -2360,6 +2426,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
 
         HashSet<int> usedDigitalInputs = GetUsedDigitalInputNumbers();
         HashSet<int> usedAnalogueInputs = GetUsedAnalogueInputNumbers();
+        usedAnalogueInputs.UnionWith(layout.Nodes.Where(node => node.Kind == "Analogue").Select(node => node.Id));
 
         foreach (DigitalInput input in _settings.DigitalInputsStaticData.Where(item => usedDigitalInputs.Contains(item.InputNumber)))
         {
@@ -2463,7 +2530,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
                     OutputChannel? channel = _settings?.ChannelsStaticData.FirstOrDefault(item => item.ChannelNumber == channelNumber);
                     if (channel != null)
                     {
-                        ResetOutputChannelToIoFlowDefaults(channel);
+                        DisconnectOutputChannel(channel, promoteFollowers: false);
                         foreach (OutputChannel.MathRule rule in channel.MathRules)
                         {
                             RestoreMathRuleValues(rule, default);
@@ -2532,7 +2599,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
             {
                 foreach (OutputChannel channel in _settings.ChannelsStaticData.Where(channel => channel.InputControlPin == removedInputPin))
                 {
-                    channel.InputControlPin = 0;
+                    DisconnectOutputChannel(channel);
                     controllerSettingsChanged = true;
                 }
             }
@@ -2881,12 +2948,13 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
             int index = node.ChannelNumber - 1;
             if (index < 0 || index >= liveChannels.Count)
             {
+                node.UpdateLiveState(null);
                 node.LiveHistory.Record(timestamp, null);
                 continue;
             }
 
             OutputChannel liveChannel = liveChannels[index];
-            node.UpdateLiveState(liveChannel);
+            node.UpdateLiveState(liveChannel, ControllerChannels?.ElementAtOrDefault(index));
             node.UpdateLiveCurrent(liveChannel.CurrentValue);
             node.LiveHistory.Record(timestamp, liveChannel.CurrentValue);
 
@@ -3098,7 +3166,16 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
                 AddConnection(desiredConnections, canNode, outputNode, "CAN message → output");
             }
 
-            if (outputNode.Channel.ChanType == OutputChannel.ChannelType.MATH)
+            if (outputNode.Channel.IsMathFollower)
+            {
+                OutputChannel? owner = settings.ChannelsStaticData.ElementAtOrDefault(outputNode.Channel.MathFollowChannel);
+                MathRuleNodeViewModel? sharedRoot = owner == null ? null : GetRootRuleNodeForChannel(owner);
+                if (sharedRoot != null)
+                {
+                    AddConnection(desiredConnections, sharedRoot, outputNode, $"Shared logic (OUT {owner!.ChannelNumber})");
+                }
+            }
+            else if (outputNode.Channel.ChanType == OutputChannel.ChannelType.MATH)
             {
                 AddMathConnections(desiredConnections, outputNode);
             }
@@ -3379,14 +3456,14 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
         }
 
         OutputNodeViewModel? existingNode = OutputNodes.FirstOrDefault(outputNode => !ReferenceEquals(outputNode, node) && ReferenceEquals(outputNode.Channel, selectedChannel));
-        OutputChannel previousChannel = node.Channel;
-
-        ClearUndoHistory();
         if (existingNode != null)
         {
-            existingNode.AssignChannel(previousChannel);
+            ShowAddNodeWarning($"Output {channelNumber} is already on the canvas.");
+            RefreshNodeSourceOptions();
+            return false;
         }
 
+        ClearUndoHistory();
         node.AssignChannel(selectedChannel);
 
         RebuildConnections(_settings);
@@ -3442,37 +3519,169 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
         KeepConnectedNodesOnSameCanvas();
     }
 
-    private static void ResetOutputChannelToIoFlowDefaults(OutputChannel channel)
+    private void DisconnectOutputChannel(OutputChannel channel, bool promoteFollowers = true)
     {
-        channel.ChanType = OutputChannel.ChannelType.Digital;
-        channel.Category = OutputChannel.ChannelCategory.Auxiliary;
+        if (promoteFollowers)
+            PromoteFollowersOf(channel);
+        else
+            DisconnectFollowersOf(channel);
+
+        ResetOutputChannelSource(channel);
+    }
+
+    private static void ResetOutputChannelSource(OutputChannel channel)
+    {
+        if (channel.ChanType is OutputChannel.ChannelType.MATH or OutputChannel.ChannelType.CAN or OutputChannel.ChannelType.CAN_PWM)
+            channel.ChanType = OutputChannel.ChannelType.Digital;
         channel.InputControlPin = 0;
-        channel.PWMSetDuty = 0;
-        channel.RetryCount = 0;
-        channel.CurrentThresholdLow = 0;
-        channel.CurrentThresholdHigh = 0;
-        channel.InrushDelay = 0;
-        channel.InrushCurrentLimit = 0;
-        channel.OnThreshold = 0;
-        channel.OffThreshold = 0;
-        channel.ScaleMin = 0;
-        channel.ScaleMax = 0;
-        channel.PWMMin = 0;
-        channel.PWMMax = 100;
-        channel.IntermittentOnTime = 0;
-        channel.IntermittentOffTime = 0;
-        channel.DelayedOn = 0;
-        channel.DelayedOnTime = 0;
-        channel.DelayedOff = 0;
-        channel.DelayedOffTime = 0;
-        channel.DelayedOffTrigger = 0;
-        channel.SoftStartEnabled = 0;
-        channel.SoftStartTime = 0;
-        channel.SoftStopEnabled = 0;
-        channel.SoftStopTime = 0;
-        channel.MathRuleCount = 1;
-        channel.MathRootRule = 0;
-        channel.MathOutputMode = 0;
+        if (channel.MathFollowChannel != OutputChannel.MathFollowNone)
+        {
+            channel.MathFollowChannel = OutputChannel.MathFollowNone;
+            channel.MathRuleCount = 1;
+            channel.MathRootRule = 0;
+        }
+    }
+
+    private List<OutputChannel> GetMathFollowers(OutputChannel owner)
+    {
+        if (_settings == null)
+            return [];
+        byte ownerIndex = (byte)(owner.ChannelNumber - 1);
+        return _settings.ChannelsStaticData
+            .Where(channel => channel != owner && channel.IsMathFollower && channel.MathFollowChannel == ownerIndex)
+            .OrderBy(channel => channel.ChannelNumber)
+            .ToList();
+    }
+
+    private void DisconnectFollowersOf(OutputChannel owner)
+    {
+        foreach (OutputChannel follower in GetMathFollowers(owner))
+            ResetOutputChannelSource(follower);
+    }
+
+    /// <summary>
+    /// Moves an owner's rules to its first follower so the remaining outputs keep sharing the same logic.
+    /// </summary>
+    private void PromoteFollowersOf(OutputChannel owner)
+    {
+        List<OutputChannel> followers = GetMathFollowers(owner);
+        if (followers.Count == 0)
+            return;
+
+        if (owner.ChanType != OutputChannel.ChannelType.MATH || owner.IsMathFollower)
+        {
+            foreach (OutputChannel follower in followers)
+                ResetOutputChannelSource(follower);
+            return;
+        }
+
+        OutputChannel promoted = followers[0];
+        owner.EnsureMathRuleSlots();
+        promoted.EnsureMathRuleSlots();
+        Dictionary<int, Point> ruleLocations = MathRuleNodes
+            .Where(node => node.OwnerChannelNumber == owner.ChannelNumber)
+            .ToDictionary(node => node.RuleIndex, node => node.Location);
+
+        bool wasApplying = _isApplyingMathRulesFromGraph;
+        _isApplyingMathRulesFromGraph = true;
+        try
+        {
+            promoted.MathFollowChannel = OutputChannel.MathFollowNone;
+            promoted.MathRuleCount = owner.MathRuleCount;
+            promoted.MathRootRule = owner.MathRootRule;
+            for (int index = 0; index < promoted.MathRules.Count && index < owner.MathRules.Count; index++)
+                RestoreMathRuleValues(promoted.MathRules[index], CaptureMathRuleValues(owner.MathRules[index]));
+
+            byte promotedIndex = (byte)(promoted.ChannelNumber - 1);
+            foreach (OutputChannel follower in followers.Skip(1))
+                follower.MathFollowChannel = promotedIndex;
+        }
+        finally
+        {
+            _isApplyingMathRulesFromGraph = wasApplying;
+        }
+
+        // A standalone logic tree is simply re-pointed; owned rules get new nodes where the owner's were.
+        if (_outputRootLogicNodeByChannel.TryGetValue(owner.ChannelNumber, out int rootLogicNodeId))
+        {
+            _outputRootLogicNodeByChannel.Remove(owner.ChannelNumber);
+            _outputRootLogicNodeByChannel[promoted.ChannelNumber] = rootLogicNodeId;
+            return;
+        }
+
+        SynchronizeMathChannelFromSettings(promoted, notifyGraphChanged: false);
+        foreach (MathRuleNodeViewModel node in MathRuleNodes.Where(node => node.OwnerChannelNumber == promoted.ChannelNumber))
+        {
+            if (ruleLocations.TryGetValue(node.RuleIndex, out Point location))
+                node.Location = location;
+        }
+    }
+
+    /// <summary>
+    /// Returns the channel whose rules <paramref name="ruleNode"/> roots when it can be shared with another output.
+    /// </summary>
+    private OutputChannel? GetSharedRuleOwner(MathRuleNodeViewModel ruleNode, int targetChannelNumber)
+    {
+        if (_settings == null)
+            return null;
+
+        if (!ruleNode.IsStandalone)
+        {
+            OutputChannel? owner = ruleNode.OwnerChannel;
+            return owner != null
+                && owner.ChannelNumber != targetChannelNumber
+                && owner.ChanType == OutputChannel.ChannelType.MATH
+                && !owner.IsMathFollower
+                && ruleNode.RuleIndex == owner.MathRootRule
+                && !_outputRootLogicNodeByChannel.ContainsKey(owner.ChannelNumber)
+                ? owner
+                : null;
+        }
+
+        foreach ((int channelNumber, int logicNodeId) in _outputRootLogicNodeByChannel.OrderBy(pair => pair.Key))
+        {
+            if (logicNodeId != ruleNode.LogicNodeId || channelNumber == targetChannelNumber)
+                continue;
+            OutputChannel? owner = _settings.ChannelsStaticData.FirstOrDefault(channel => channel.ChannelNumber == channelNumber);
+            if (owner is { ChanType: OutputChannel.ChannelType.MATH, IsMathFollower: false })
+                return owner;
+        }
+
+        return null;
+    }
+
+    private MathRuleNodeViewModel? GetRootRuleNodeForChannel(OutputChannel channel)
+    {
+        if (_outputRootLogicNodeByChannel.TryGetValue(channel.ChannelNumber, out int rootLogicNodeId))
+            return MathRuleNodes.FirstOrDefault(node => node.IsStandalone && node.LogicNodeId == rootLogicNodeId);
+
+        return MathRuleNodes.FirstOrDefault(node =>
+            node.OwnerChannelNumber == channel.ChannelNumber && node.RuleIndex == channel.MathRootRule);
+    }
+
+    private void MakeMathFollower(OutputChannel follower, OutputChannel owner)
+    {
+        byte ownerIndex = (byte)(owner.ChannelNumber - 1);
+        foreach (OutputChannel existingFollower in GetMathFollowers(follower))
+            existingFollower.MathFollowChannel = ownerIndex;
+
+        bool wasApplying = _isApplyingMathRulesFromGraph;
+        _isApplyingMathRulesFromGraph = true;
+        try
+        {
+            _outputRootLogicNodeByChannel.Remove(follower.ChannelNumber);
+            follower.InputControlPin = 0;
+            follower.ChanType = OutputChannel.ChannelType.MATH;
+            follower.MathRuleCount = 1;
+            follower.MathRootRule = 0;
+            follower.MathFollowChannel = ownerIndex;
+        }
+        finally
+        {
+            _isApplyingMathRulesFromGraph = wasApplying;
+        }
+
+        SynchronizeMathChannelFromSettings(follower, notifyGraphChanged: false);
     }
 
     private void AddOutputNodeWithOptionalMath(OutputChannel channel, bool useSpawnLocation = false, int? canvasId = null)
@@ -3488,7 +3697,7 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
             Nodes.Add(outputNode);
         }
 
-        if (channel.ChanType != OutputChannel.ChannelType.MATH)
+        if (channel.ChanType != OutputChannel.ChannelType.MATH || channel.IsMathFollower)
         {
             return;
         }

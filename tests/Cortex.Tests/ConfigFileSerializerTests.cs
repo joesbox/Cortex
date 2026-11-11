@@ -117,6 +117,30 @@ public class ConfigFileSerializerTests
         Assert.Contains("CellularParameters", json);
     }
 
+    [Fact]
+    public void SerializeSettings_OmitsCellularPasswords_AndImportPreservesTargetPasswords()
+    {
+        var source = new DataStructures();
+        source.CellularParamsStaticData.APNPassword = "apn-secret";
+        source.CellularParamsStaticData.MQTTPassword = "mqtt-secret";
+
+        string json = ConfigFileSerializer.SerializeSettings(source);
+
+        Assert.DoesNotContain("apn-secret", json);
+        Assert.DoesNotContain("mqtt-secret", json);
+        Assert.DoesNotContain("\"APNPassword\"", json);
+        Assert.DoesNotContain("\"MQTTPassword\"", json);
+        Assert.True(ConfigFileSerializer.TryDeserialize(json, out var snapshot, out _));
+
+        var target = new DataStructures();
+        target.CellularParamsStaticData.APNPassword = "existing-apn";
+        target.CellularParamsStaticData.MQTTPassword = "existing-mqtt";
+        ConfigFileSerializer.ApplySnapshot(target, snapshot!);
+
+        Assert.Equal("existing-apn", target.CellularParamsStaticData.APNPassword);
+        Assert.Equal("existing-mqtt", target.CellularParamsStaticData.MQTTPassword);
+    }
+
     // ApplySnapshot — channel name
 
     [Fact]

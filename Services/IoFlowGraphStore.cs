@@ -35,6 +35,7 @@ public sealed class IoFlowGraphStore
             {
                 var identities = layout.NodePositions.Select(node => (node.Kind, node.Id, node.Option)).ToHashSet();
                 var canvasIds = layout.Canvases.Select(canvas => canvas.Id).ToHashSet();
+                layout.AnalogueInputNodes ??= previous.AnalogueInputNodes;
                 layout.NodePositions.AddRange(previous.NodePositions.Where(node =>
                     canvasIds.Contains(node.CanvasId) && !identities.Contains((node.Kind, node.Id, node.Option))));
             }
@@ -102,7 +103,8 @@ public sealed class IoFlowGraphStore
                 return false;
             }
 
-            Save(legacy);
+            migratedLayout.AnalogueInputNodes = legacy.Nodes.Where(node => node.Kind == "Analogue").Select(node => node.Id).Distinct().ToList();
+            Save(migratedLayout);
             snapshot = migratedLayout;
             return true;
         }

@@ -45,12 +45,18 @@ public sealed partial class AnalogueInputNodeViewModel : IoFlowNodeViewModel
         Title = $"Analogue Input {input.InputNumber}";
         OnPropertyChanged(nameof(Input));
         OnPropertyChanged(nameof(InputNumber));
+        OnPropertyChanged(nameof(ModeText));
         OnPropertyChanged(nameof(FilteredAnalogueUnits));
         OnPropertyChanged(nameof(ChartLabel));
         UpdateLiveState(null);
     }
 
     public int InputNumber => Input.InputNumber;
+
+    // Matches firmware ReadAnalogueInputAsDigital: pull-up means active low at the connector.
+    public string ModeText => Input.ChanType == AnalogueInput.AnalogueChannelType.Digital
+        ? Input.PullUpEnable ? "Digital active low" : "Digital active high"
+        : Input.ChanType.ToString();
 
     public IReadOnlyList<byte> AnalogueCalibrationPointOptions => CalibrationPointOptions;
 
@@ -86,7 +92,10 @@ public sealed partial class AnalogueInputNodeViewModel : IoFlowNodeViewModel
             LiveHistory.Clear();
             OnPropertyChanged(nameof(FilteredAnalogueUnits));
             OnPropertyChanged(nameof(ChartLabel));
+            OnPropertyChanged(nameof(ModeText));
         }
+        else if (e.PropertyName == nameof(AnalogueInput.PullUpEnable))
+            OnPropertyChanged(nameof(ModeText));
         else if (e.PropertyName == nameof(AnalogueInput.Units))
             LiveHistory.Clear();
     }

@@ -115,6 +115,7 @@ public class SerialPortService : IDisposable
     private const int IoFlowStatusPollIntervalMs = 200;
     private const int DigitalInputStatusProbeTimeoutMs = 2500;
     private const int StandaloneCommandDrainDelayMs = 25;
+    private const int MaximumBufferedFrameBytes = 65536 + 13;
     private const int OpenRemoteProvisioningMaxRequestBytes = 6143;
     private const int SecureControlResponseMaxPlaintextBytes = 128;
 
@@ -183,11 +184,16 @@ public class SerialPortService : IDisposable
     private readonly object _logChunkLock = new object();
     private readonly SemaphoreSlim _logChunkRequestLock = new SemaphoreSlim(1, 1);
     private readonly SemaphoreSlim _standaloneRequestLock = new SemaphoreSlim(1, 1);
+    private readonly object _parseLock = new();
     private readonly List<byte> _secureIncomingBuffer = new List<byte>();
     private readonly object _serialReceiveLock = new();
     private volatile bool _suspendLiveRequestPolling;
     private volatile bool _logTransferSessionActive;
     private long _lastLiveRequestSentTick;
+    // Live requests awaiting a response. Chaining only at zero stops non-live frames from
+    // adding extra requests that would build a growing backlog of stale live frames.
+    private int _liveRequestsInFlight;
+    private const int LiveRequestResponseTimeoutMs = 1000;
     private long _lastLiveStatusFrameTick;
     private long _lastDigitalInputStatusRequestSentTick;
     private long _lastDigitalInputStatusFrameTick;
@@ -1703,7 +1709,7 @@ public class SerialPortService : IDisposable
     {
         while (count > 0)
         {
-            int read = await stream.ReadAsync(buffer.AsMemory(offset, count), token);
+            int read = await stream.ReadAsync(buffer.AsMemory(offset, count), token).AsTask().WaitAsync(token);
             if (read <= 0)
             {
                 throw new IOException("Serial stream closed during log transfer.");
@@ -1764,6 +1770,20 @@ public class SerialPortService : IDisposable
         for (int i = 0; i <= buffer.Count - 2; i++)
         {
             if (buffer[i] == Constants.SERIAL_TRAILER1 && buffer[i + 1] == Constants.SERIAL_TRAILER2)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool ContainsLaterFrameHeader()
+    {
+        for (int i = 1; i < receivedDataBuffer.Count - 1; i++)
+        {
+            if (receivedDataBuffer[i] == Constants.SERIAL_HEADER1 &&
+                receivedDataBuffer[i + 1] == Constants.SERIAL_HEADER2)
             {
                 return true;
             }
@@ -1841,6 +1861,7 @@ public class SerialPortService : IDisposable
         _packetReady = false;
         lastCommandSent = '\0';
         _lastLiveRequestSentTick = 0;
+        Volatile.Write(ref _liveRequestsInFlight, 0);
         _lastLiveStatusFrameTick = 0;
         _lastMathStatusRequestSentTick = 0;
         _lastMathStatusFrameTick = 0;
@@ -1863,6 +1884,7 @@ public class SerialPortService : IDisposable
         _controllerCapabilities = ControllerProtocolCapabilities.V09;
         ResetSecureSession();
         _lastLiveRequestSentTick = 0;
+        Volatile.Write(ref _liveRequestsInFlight, 0);
         _lastLiveStatusFrameTick = 0;
         _lastDigitalInputStatusRequestSentTick = 0;
         _lastDigitalInputStatusFrameTick = 0;
@@ -2153,6 +2175,15 @@ public class SerialPortService : IDisposable
         return null;
     }
 
+    public async Task BeginLogTransferSessionAsync()
+    {
+        await RunStandaloneRequestAsync(() =>
+        {
+            BeginLogTransferSession();
+            return Task.FromResult(true);
+        });
+    }
+
     public void BeginLogTransferSession()
     {
         if (_logTransferSessionActive)
@@ -2302,66 +2333,61 @@ public class SerialPortService : IDisposable
                 receivedDataBuffer[2] == (byte)Constants.COMMAND_ID_DIGITAL_INPUT_STATUS)
             {
                 int stateCount = receivedDataBuffer[3];
-                if (stateCount <= 0 || stateCount > Constants.NUM_DIGITAL_INPUTS)
+                if (stateCount > 0 && stateCount <= Constants.NUM_DIGITAL_INPUTS)
                 {
-                    receivedDataBuffer.RemoveAt(0);
-                    _packetReady = BufferContainsTrailer(receivedDataBuffer);
-                    return false;
-                }
-
-                int packetLength = stateCount + 10;
-                if (receivedDataBuffer.Count < packetLength)
-                {
-                    return false;
-                }
-
-                int trailerIndex = 4 + stateCount;
-                bool invalidDigitalStatusFrame =
-                    receivedDataBuffer[trailerIndex] != Constants.SERIAL_TRAILER1 ||
-                    receivedDataBuffer[trailerIndex + 1] != Constants.SERIAL_TRAILER2;
-
-                for (int i = 0; i < stateCount && !invalidDigitalStatusFrame; i++)
-                {
-                    byte state = receivedDataBuffer[4 + i];
-                    if (state > 1)
+                    int packetLength = stateCount + 10;
+                    if (receivedDataBuffer.Count < packetLength && !ContainsLaterFrameHeader())
                     {
-                        invalidDigitalStatusFrame = true;
+                        return false;
+                    }
+
+                    if (receivedDataBuffer.Count >= packetLength)
+                    {
+                        int trailerIndex = 4 + stateCount;
+                        bool invalidDigitalStatusFrame =
+                            receivedDataBuffer[trailerIndex] != Constants.SERIAL_TRAILER1 ||
+                            receivedDataBuffer[trailerIndex + 1] != Constants.SERIAL_TRAILER2;
+
+                        for (int i = 0; i < stateCount && !invalidDigitalStatusFrame; i++)
+                        {
+                            byte state = receivedDataBuffer[4 + i];
+                            if (state > 1)
+                            {
+                                invalidDigitalStatusFrame = true;
+                            }
+                        }
+
+                        int localCheckSum = 0;
+                        for (int i = 0; i < packetLength - 4; i++)
+                        {
+                            localCheckSum += receivedDataBuffer[i];
+                        }
+
+                        uint receivedCheckSum =
+                            (uint)(receivedDataBuffer[packetLength - 4]
+                            | (receivedDataBuffer[packetLength - 3] << 8)
+                            | (receivedDataBuffer[packetLength - 2] << 16)
+                            | (receivedDataBuffer[packetLength - 1] << 24));
+
+                        if (!invalidDigitalStatusFrame && localCheckSum == receivedCheckSum)
+                        {
+                            dataLength = packetLength;
+                            if (dataLength > dataBytes.Length)
+                            {
+                                dataBytes = new byte[dataLength * 2];
+                            }
+
+                            for (int i = 0; i < dataLength; i++)
+                            {
+                                dataBytes[i] = receivedDataBuffer[i];
+                            }
+
+                            receivedDataBuffer.RemoveRange(0, dataLength);
+                            _packetReady = BufferContainsTrailer(receivedDataBuffer);
+                            return true;
+                        }
                     }
                 }
-
-                int localCheckSum = 0;
-                for (int i = 0; i < packetLength - 4; i++)
-                {
-                    localCheckSum += receivedDataBuffer[i];
-                }
-
-                uint receivedCheckSum =
-                    (uint)(receivedDataBuffer[packetLength - 4]
-                    | (receivedDataBuffer[packetLength - 3] << 8)
-                    | (receivedDataBuffer[packetLength - 2] << 16)
-                    | (receivedDataBuffer[packetLength - 1] << 24));
-
-                if (invalidDigitalStatusFrame || localCheckSum != receivedCheckSum)
-                {
-                    receivedDataBuffer.RemoveAt(0);
-                    _packetReady = BufferContainsTrailer(receivedDataBuffer);
-                    return false;
-                }
-
-                dataLength = packetLength;
-                if (dataLength > dataBytes.Length)
-                {
-                    dataBytes = new byte[dataLength * 2];
-                }
-
-                for (int i = 0; i < dataLength; i++)
-                {
-                    dataBytes[i] = receivedDataBuffer[i];
-                }
-
-                receivedDataBuffer.RemoveRange(0, dataLength);
-                _packetReady = BufferContainsTrailer(receivedDataBuffer);
-                return true;
             }
 
             // Fast path for streamed LOG_CHUNK frames:
@@ -2378,126 +2404,164 @@ public class SerialPortService : IDisposable
                 {
                     if (receivedDataBuffer.Count < packetLength)
                     {
-                        return false;
+                        if (!ContainsLaterFrameHeader())
+                        {
+                            return false;
+                        }
+                    }
+                    else
+                    {
+                        int localCheckSum = 0;
+                        for (int i = 0; i < packetLength - 4; i++)
+                        {
+                            localCheckSum += receivedDataBuffer[i];
+                        }
+
+                        uint receivedCheckSum =
+                            (uint)(receivedDataBuffer[packetLength - 4]
+                            | (receivedDataBuffer[packetLength - 3] << 8)
+                            | (receivedDataBuffer[packetLength - 2] << 16)
+                            | (receivedDataBuffer[packetLength - 1] << 24));
+
+                        if (localCheckSum == receivedCheckSum)
+                        {
+                            dataLength = packetLength;
+                            if (dataLength > dataBytes.Length)
+                            {
+                                dataBytes = new byte[dataLength * 2];
+                            }
+
+                            for (int i = 0; i < dataLength; i++)
+                            {
+                                dataBytes[i] = receivedDataBuffer[i];
+                            }
+
+                            receivedDataBuffer.RemoveRange(0, dataLength);
+                            _packetReady = BufferContainsTrailer(receivedDataBuffer);
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            int validHeaderIndex = -1;
+            int validPacketLength = 0;
+            for (int candidateHeaderIndex = 0; candidateHeaderIndex <= receivedDataBuffer.Count - 8; candidateHeaderIndex++)
+            {
+                if (receivedDataBuffer[candidateHeaderIndex] != Constants.SERIAL_HEADER1 ||
+                    receivedDataBuffer[candidateHeaderIndex + 1] != Constants.SERIAL_HEADER2)
+                {
+                    continue;
+                }
+
+                for (int trailerIndex = candidateHeaderIndex + 2; trailerIndex <= receivedDataBuffer.Count - 6; trailerIndex++)
+                {
+                    if (receivedDataBuffer[trailerIndex] != Constants.SERIAL_TRAILER1 ||
+                        receivedDataBuffer[trailerIndex + 1] != Constants.SERIAL_TRAILER2)
+                    {
+                        continue;
                     }
 
+                    int packetLength = trailerIndex + 6 - candidateHeaderIndex;
                     int localCheckSum = 0;
-                    for (int i = 0; i < packetLength - 4; i++)
+                    for (int i = candidateHeaderIndex; i < trailerIndex + 2; i++)
                     {
                         localCheckSum += receivedDataBuffer[i];
                     }
 
+                    int checksumIndex = trailerIndex + 2;
                     uint receivedCheckSum =
-                        (uint)(receivedDataBuffer[packetLength - 4]
-                        | (receivedDataBuffer[packetLength - 3] << 8)
-                        | (receivedDataBuffer[packetLength - 2] << 16)
-                        | (receivedDataBuffer[packetLength - 1] << 24));
+                        (uint)(receivedDataBuffer[checksumIndex]
+                        | (receivedDataBuffer[checksumIndex + 1] << 8)
+                        | (receivedDataBuffer[checksumIndex + 2] << 16)
+                        | (receivedDataBuffer[checksumIndex + 3] << 24));
 
-                    if (localCheckSum == receivedCheckSum)
+                    if (localCheckSum != receivedCheckSum)
                     {
-                        dataLength = packetLength;
-                        if (dataLength > dataBytes.Length)
+                        continue;
+                    }
+
+                    validHeaderIndex = candidateHeaderIndex;
+                    validPacketLength = packetLength;
+                    break;
+                }
+
+                if (validHeaderIndex >= 0)
+                {
+                    break;
+                }
+            }
+
+            if (validHeaderIndex < 0)
+            {
+                if (_logTransferSessionActive && receivedDataBuffer.Count >= 8)
+                {
+                    int candidateHeader = -1;
+                    int candidateTrailer = -1;
+                    for (int i = 0; i <= receivedDataBuffer.Count - 2; i++)
+                    {
+                        if (candidateHeader < 0 && receivedDataBuffer[i] == Constants.SERIAL_HEADER1 &&
+                            receivedDataBuffer[i + 1] == Constants.SERIAL_HEADER2)
                         {
-                            dataBytes = new byte[dataLength * 2];
+                            candidateHeader = i;
                         }
 
-                        for (int i = 0; i < dataLength; i++)
+                        if (candidateTrailer < 0 && receivedDataBuffer[i] == Constants.SERIAL_TRAILER1 &&
+                            receivedDataBuffer[i + 1] == Constants.SERIAL_TRAILER2)
                         {
-                            dataBytes[i] = receivedDataBuffer[i];
+                            candidateTrailer = i;
                         }
 
-                        receivedDataBuffer.RemoveRange(0, dataLength);
-                        _packetReady = BufferContainsTrailer(receivedDataBuffer);
-                        return true;
+                        if (candidateHeader >= 0 && candidateTrailer >= 0)
+                        {
+                            break;
+                        }
+                    }
+
+                    long now = Environment.TickCount64;
+                    bool shouldLogPending =
+                        now - _lastPendingFrameLogTick >= 500 ||
+                        Math.Abs(receivedDataBuffer.Count - _lastPendingFrameLogBytes) >= 256 ||
+                        candidateTrailer >= 0;
+                    if (shouldLogPending)
+                    {
+                        _lastPendingFrameLogTick = now;
+                        _lastPendingFrameLogBytes = receivedDataBuffer.Count;
+                        int headLen = Math.Min(8, receivedDataBuffer.Count);
+                        int tailLen = Math.Min(8, receivedDataBuffer.Count);
+                        string headHex = BitConverter.ToString(receivedDataBuffer.Take(headLen).ToArray());
+                        string tailHex = BitConverter.ToString(receivedDataBuffer.Skip(receivedDataBuffer.Count - tailLen).Take(tailLen).ToArray());
+                        LogProtocolDebug($"RX frame pending bytes={receivedDataBuffer.Count} headerIdx={candidateHeader} trailerIdx={candidateTrailer} head={headHex} tail={tailHex}");
                     }
                 }
+
+                if (receivedDataBuffer.Count > MaximumBufferedFrameBytes)
+                {
+                    receivedDataBuffer.RemoveRange(0, receivedDataBuffer.Count - MaximumBufferedFrameBytes);
+                    _packetReady = BufferContainsTrailer(receivedDataBuffer);
+                }
+                return false;
             }
 
-            for (int trailerIndex = 2; trailerIndex <= receivedDataBuffer.Count - 6; trailerIndex++)
+            if (validHeaderIndex > 0)
             {
-                if (receivedDataBuffer[trailerIndex] != Constants.SERIAL_TRAILER1 || receivedDataBuffer[trailerIndex + 1] != Constants.SERIAL_TRAILER2)
-                {
-                    continue;
-                }
-
-                int packetLength = trailerIndex + 2 + 4;
-
-                int localCheckSum = 0;
-                for (int i = 0; i < packetLength - 4; i++)
-                {
-                    localCheckSum += receivedDataBuffer[i];
-                }
-
-                uint receivedCheckSum =
-                    (uint)(receivedDataBuffer[packetLength - 4]
-                    | (receivedDataBuffer[packetLength - 3] << 8)
-                    | (receivedDataBuffer[packetLength - 2] << 16)
-                    | (receivedDataBuffer[packetLength - 1] << 24));
-
-                if (localCheckSum != receivedCheckSum)
-                {
-                    continue;
-                }
-
-                dataLength = packetLength;
-                if (dataLength > dataBytes.Length)
-                {
-                    dataBytes = new byte[dataLength * 2];
-                }
-
-                for (int i = 0; i < dataLength; i++)
-                {
-                    dataBytes[i] = receivedDataBuffer[i];
-                }
-
-                receivedDataBuffer.RemoveRange(0, dataLength);
-
-                _packetReady = BufferContainsTrailer(receivedDataBuffer);
-
-                return true;
+                receivedDataBuffer.RemoveRange(0, validHeaderIndex);
             }
 
-            if (_logTransferSessionActive && receivedDataBuffer.Count >= 8)
+            dataLength = validPacketLength;
+            if (dataLength > dataBytes.Length)
             {
-                int candidateHeader = -1;
-                int candidateTrailer = -1;
-                for (int i = 0; i <= receivedDataBuffer.Count - 2; i++)
-                {
-                    if (candidateHeader < 0 && receivedDataBuffer[i] == Constants.SERIAL_HEADER1 && receivedDataBuffer[i + 1] == Constants.SERIAL_HEADER2)
-                    {
-                        candidateHeader = i;
-                    }
-
-                    if (candidateTrailer < 0 && receivedDataBuffer[i] == Constants.SERIAL_TRAILER1 && receivedDataBuffer[i + 1] == Constants.SERIAL_TRAILER2)
-                    {
-                        candidateTrailer = i;
-                    }
-
-                    if (candidateHeader >= 0 && candidateTrailer >= 0)
-                    {
-                        break;
-                    }
-                }
-
-                long now = Environment.TickCount64;
-                bool shouldLogPending =
-                    (now - _lastPendingFrameLogTick) >= 500 ||
-                    Math.Abs(receivedDataBuffer.Count - _lastPendingFrameLogBytes) >= 256 ||
-                    candidateTrailer >= 0;
-
-                if (shouldLogPending)
-                {
-                    _lastPendingFrameLogTick = now;
-                    _lastPendingFrameLogBytes = receivedDataBuffer.Count;
-                    int headLen = Math.Min(8, receivedDataBuffer.Count);
-                    int tailLen = Math.Min(8, receivedDataBuffer.Count);
-                    string headHex = BitConverter.ToString(receivedDataBuffer.Take(headLen).ToArray());
-                    string tailHex = BitConverter.ToString(receivedDataBuffer.Skip(receivedDataBuffer.Count - tailLen).Take(tailLen).ToArray());
-                    LogProtocolDebug($"RX frame pending bytes={receivedDataBuffer.Count} headerIdx={candidateHeader} trailerIdx={candidateTrailer} head={headHex} tail={tailHex}");
-                }
+                dataBytes = new byte[dataLength * 2];
             }
 
-            return false;
+            for (int i = 0; i < dataLength; i++)
+            {
+                dataBytes[i] = receivedDataBuffer[i];
+            }
+
+            receivedDataBuffer.RemoveRange(0, dataLength);
+            _packetReady = BufferContainsTrailer(receivedDataBuffer);
+            return true;
         }
     }
 
@@ -2542,6 +2606,7 @@ public class SerialPortService : IDisposable
             target.IntermittentOffTime = source.IntermittentOffTime;
             target.MathRuleCount = source.MathRuleCount;
             target.MathRootRule = source.MathRootRule;
+            target.MathFollowChannel = source.MathFollowChannel;
             target.MathOutputMode = source.MathOutputMode;
             target.MathCalculatedRootValue = source.MathCalculatedRootValue;
             target.MathError = source.MathError;
@@ -2865,8 +2930,7 @@ public class SerialPortService : IDisposable
             if (targetChannel != null)
             {
                 targetChannel.ChanType = (ChannelType)channelType;
-                targetChannel.MathRuleCount = ruleCount;
-                targetChannel.MathRootRule = rootRule;
+                targetChannel.ApplyControllerMathHeader(ruleCount, rootRule);
                 targetChannel.MathOutputMode = outputMode;
                 targetChannel.MathCalculatedRootValue = rootValue;
                 targetChannel.MathError = channelMathError;
@@ -3299,6 +3363,14 @@ public class SerialPortService : IDisposable
     /// <returns>True if a full data packet received and processed</returns>
     private bool processData()
     {
+        lock (_parseLock)
+        {
+            return ProcessDataCore();
+        }
+    }
+
+    private bool ProcessDataCore()
+    {
         bool retVal = false;
         if (!TryDequeueNextFramedPacket())
         {
@@ -3334,6 +3406,7 @@ public class SerialPortService : IDisposable
                     // Request response for channel and system data
                     case (byte)Constants.COMMAND_ID_REQUEST:
                         _lastLiveStatusFrameTick = Environment.TickCount64;
+                        CompleteLiveRequest();
                         _awaitingPostLogRefreshStatusFrame = false;
                         _postLogRefreshRequestRetryCount = 0;
                         ParseLiveStatusPacket();
@@ -3506,7 +3579,7 @@ public class SerialPortService : IDisposable
             }
 
             DataUpdated?.Invoke(dataStructures);
-
+            retVal = true;
         }
         else
         {
@@ -3514,7 +3587,10 @@ public class SerialPortService : IDisposable
         }
         if (!sendingConfig && !_suspendLiveRequestPolling)
         {
-            SendCommand(Constants.COMMAND_ID_REQUEST);
+            if (CanChainLiveRequest(Environment.TickCount64))
+            {
+                SendCommand(Constants.COMMAND_ID_REQUEST);
+            }
             if (_ioFlowStatusPollingEnabled && HasLoadedStaticSnapshot && !UpdateStaticData && !_logTransferSessionActive)
             {
                 RequestRuntimeStatusPacketsIfDue(Environment.TickCount64, 1500);
@@ -3537,12 +3613,19 @@ public class SerialPortService : IDisposable
         };
     }
 
+    private bool IsSuppressedFollowerParameter(int channel, int parameter)
+    {
+        // Followers share their owner's rules; the controller derives RuleCount/RootRule from the follow marker.
+        return (parameter is 33 or 34 || (parameter >= 36 && parameter <= Constants.LAST_MATH_RULE_PARAM_INDEX))
+            && settingsData.ChannelsStaticData[channel].IsMathFollower;
+    }
+
     private bool AdvanceConfigCursor()
     {
         switch (settingIndex)
         {
             case 0: // Channel data
-                if (parameterIndex >= 36 && parameterIndex <= Constants.LAST_CHANNEL_PARAM_INDEX)
+                if (parameterIndex >= 36 && parameterIndex <= Constants.LAST_MATH_RULE_PARAM_INDEX)
                 {
                     mathRuleIndex++;
                     if (mathRuleIndex >= Constants.NUM_MATH_RULE_SLOTS)
@@ -3710,7 +3793,7 @@ public class SerialPortService : IDisposable
             switch (settingIndex)
             {
             case 0: // Channel data
-                switch (parameterIndex)
+                switch (IsSuppressedFollowerParameter(channelIndex, parameterIndex) ? -1 : parameterIndex)
                 {
                     case 0: // Channel type
                         if (!ShouldLetAnalogueInputAutoSyncChannelType(channelIndex) &&
@@ -3764,19 +3847,7 @@ public class SerialPortService : IDisposable
                             }
                         }
                         break;
-                    case 4: // Enabled
-                        // Live Enabled is the effective output state, not the persisted enable setting.
-                        if (dataStructures.ChannelsStaticData[channelIndex].Enabled != settingsData.ChannelsStaticData[channelIndex].Enabled)
-                        {
-                            configChanged = true;
-                            AddData((byte)settingIndex, true);
-                            AddData((byte)parameterIndex, true);
-                            AddData((byte)channelIndex, true);
-                            AddData(settingsData.ChannelsStaticData[channelIndex].Enabled, true);
-                            AddData(0, true); // Padding
-                            AddData(0, true); // Padding
-                            AddData(0, true); // Padding
-                        }
+                    case 4: // Enabled: derived by the controller from the input source; never written.
                         break;
                     case 5: // Group number
                         if (dataStructures.ChannelsLiveData[channelIndex].GroupNumber != settingsData.ChannelsStaticData[channelIndex].GroupNumber)
@@ -3837,7 +3908,7 @@ public class SerialPortService : IDisposable
                             AddData((byte)settingIndex, true);
                             AddData((byte)parameterIndex, true);
                             AddData((byte)channelIndex, true);
-                            byte[] floatBytes = BitConverter.GetBytes((int)settingsData.ChannelsStaticData[channelIndex].InrushDelay * 1000);
+                            byte[] floatBytes = BitConverter.GetBytes((int)Math.Round(settingsData.ChannelsStaticData[channelIndex].InrushDelay * 1000.0f));
                             foreach (byte b in floatBytes)
                             {
                                 AddData(b, true);
@@ -4329,6 +4400,21 @@ public class SerialPortService : IDisposable
                             foreach (byte b in floatBytes)
                             {
                                 AddData(b, true);
+                            }
+                        }
+                        break;
+                    case Constants.CHANNEL_PARAM_MATH_FOLLOW_CHANNEL:
+                        {
+                            OutputChannel live = dataStructures.ChannelsLiveData[channelIndex];
+                            OutputChannel target = settingsData.ChannelsStaticData[channelIndex];
+                            byte targetFollow = target.IsMathFollower ? target.MathFollowChannel : OutputChannel.MathFollowNone;
+                            if (live.MathFollowChannel != targetFollow)
+                            {
+                                configChanged = true;
+                                AddData((byte)settingIndex, true);
+                                AddData((byte)parameterIndex, true);
+                                AddData((byte)channelIndex, true);
+                                AddData(targetFollow, true);
                             }
                         }
                         break;
@@ -5011,6 +5097,10 @@ public class SerialPortService : IDisposable
         bool success = response == Constants.COMMAND_ID_CONFIM;
         if (command == Constants.COMMAND_ID_SAVECHANGES)
         {
+            if (!_configurationSaveActive)
+            {
+                return false;
+            }
             if (!success)
             {
                 if (_saveRetryCount++ < 1)
@@ -5730,6 +5820,15 @@ public class SerialPortService : IDisposable
 
     public void Send(string text) => _serialPort.WriteLine(text);
 
+    public async Task StartSendConfigAsync()
+    {
+        await RunStandaloneRequestAsync(() =>
+        {
+            StartSendConfig();
+            return Task.FromResult(true);
+        });
+    }
+
     public void StartSendConfig()
     {
         lock (_configurationSaveLock)
@@ -5856,6 +5955,7 @@ public class SerialPortService : IDisposable
             if (commandId == Constants.COMMAND_ID_REQUEST)
             {
                 _lastLiveRequestSentTick = Environment.TickCount64;
+                Interlocked.Increment(ref _liveRequestsInFlight);
             }
             if (commandId == Constants.COMMAND_ID_REQUEST_STATIC)
             {
@@ -5874,6 +5974,34 @@ public class SerialPortService : IDisposable
                 _lastCustomCanStatusRequestSentTick = Environment.TickCount64;
             }
         }
+    }
+
+    private void CompleteLiveRequest()
+    {
+        int current;
+        do
+        {
+            current = Volatile.Read(ref _liveRequestsInFlight);
+            if (current <= 0) return;
+        }
+        while (Interlocked.CompareExchange(ref _liveRequestsInFlight, current - 1, current) != current);
+    }
+
+    private bool CanChainLiveRequest(long now)
+    {
+        if (Volatile.Read(ref _liveRequestsInFlight) <= 0)
+        {
+            return true;
+        }
+
+        // Assume outstanding requests were lost rather than stalling live data.
+        if (now - Interlocked.Read(ref _lastLiveRequestSentTick) >= LiveRequestResponseTimeoutMs)
+        {
+            Volatile.Write(ref _liveRequestsInFlight, 0);
+            return true;
+        }
+
+        return false;
     }
 
     public void EnsureLiveRequestPolling(int idleThresholdMs = 1500, int reconnectThresholdMs = 5000, int handshakeRetryMs = 1000)
@@ -5939,9 +6067,7 @@ public class SerialPortService : IDisposable
         UpdateDigitalInputStatusSupport(now, idleThresholdMs);
         UpdateCustomCanStatusSupport(now, idleThresholdMs);
 
-        long lastActivityTick = Math.Max(_lastLiveRequestSentTick, _lastLiveStatusFrameTick);
-
-        if (lastActivityTick != 0 && (now - lastActivityTick) >= reconnectThresholdMs)
+        if (HasLostLiveResponse(now, _lastLiveStatusFrameTick, reconnectThresholdMs))
         {
             LoggingService.AddLog("Controller comms lost. Reconnecting...");
             MarkControllerSessionLost(requestStaticSnapshot: true);
@@ -5949,8 +6075,10 @@ public class SerialPortService : IDisposable
             return;
         }
 
+        long lastActivityTick = Math.Max(_lastLiveRequestSentTick, _lastLiveStatusFrameTick);
         if (lastActivityTick == 0 || (now - lastActivityTick) >= idleThresholdMs)
         {
+            Volatile.Write(ref _liveRequestsInFlight, 0);
             SendCommand(Constants.COMMAND_ID_REQUEST);
         }
 
@@ -5969,6 +6097,9 @@ public class SerialPortService : IDisposable
 
         RequestRuntimeStatusPacketsIfDue(now, idleThresholdMs);
     }
+
+    private static bool HasLostLiveResponse(long now, long lastLiveStatusFrameTick, int reconnectThresholdMs) =>
+        lastLiveStatusFrameTick != 0 && now - lastLiveStatusFrameTick >= reconnectThresholdMs;
 
     private void RequestRuntimeStatusPacketsIfDue(long now, int idleThresholdMs)
     {
@@ -6515,55 +6646,94 @@ public class SerialPortService : IDisposable
 
     private async Task<bool> AwaitStandaloneAckAsync(char commandId, Action sendAction, int timeoutMs, bool discardBeforeSend = true, int preCommandDelayMs = StandaloneCommandDrainDelayMs)
     {
-        if (!_serialPort.IsOpen)
-        {
-            return false;
-        }
+        return await RunStandaloneRequestAsync(() =>
+            AwaitStandaloneAckCoreAsync(commandId, sendAction, timeoutMs, discardBeforeSend, preCommandDelayMs));
+    }
 
-        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
-        _suspendLiveRequestPolling = true;
-        ResetLogReceiveState(discardSerialInput: discardBeforeSend);
-
-        if (preCommandDelayMs > 0)
-        {
-            await Task.Delay(preCommandDelayMs);
-        }
-
-        if (!_serialPort.IsOpen)
-        {
-            return false;
-        }
-
-        if (discardBeforeSend)
-        {
-            ResetLogReceiveState(discardSerialInput: true);
-        }
-
-        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _standaloneCommandAckTcs = tcs;
-        _standaloneCommandAckId = commandId;
-
+    private async Task<T> RunStandaloneRequestAsync<T>(Func<Task<T>> operation)
+    {
+        await _standaloneRequestLock.WaitAsync();
         try
         {
-            sendAction();
-
-            Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
-            if (completedTask != tcs.Task)
+            lock (_configurationSaveLock)
             {
-                MarkControllerSessionLost(requestStaticSnapshot: true);
-                return false;
+                if (_configurationSaveActive)
+                {
+                    throw new InvalidOperationException("Wait for the controller settings save to finish before sending another command.");
+                }
             }
-
-            return await tcs.Task;
+            return await operation();
         }
         finally
         {
-            if (_standaloneCommandAckTcs == tcs)
+            _standaloneRequestLock.Release();
+        }
+    }
+
+    private async Task<bool> AwaitStandaloneAckCoreAsync(char commandId, Action sendAction, int timeoutMs, bool discardBeforeSend, int preCommandDelayMs)
+    {
+        if (!_serialPort.IsOpen)
+        {
+            return false;
+        }
+
+        return await WithLiveRequestPollingSuspendedAsync(async () =>
+        {
+            ResetLogReceiveState(discardSerialInput: discardBeforeSend);
+
+            if (preCommandDelayMs > 0)
             {
-                _standaloneCommandAckTcs = null;
-                _standaloneCommandAckId = '\0';
+                await Task.Delay(preCommandDelayMs);
             }
 
+            if (!_serialPort.IsOpen)
+            {
+                return false;
+            }
+
+            if (discardBeforeSend)
+            {
+                ResetLogReceiveState(discardSerialInput: true);
+            }
+
+            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _standaloneCommandAckTcs = tcs;
+            _standaloneCommandAckId = commandId;
+
+            try
+            {
+                sendAction();
+
+                Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
+                if (completedTask != tcs.Task)
+                {
+                    MarkControllerSessionLost(requestStaticSnapshot: true);
+                    return false;
+                }
+
+                return await tcs.Task;
+            }
+            finally
+            {
+                if (_standaloneCommandAckTcs == tcs)
+                {
+                    _standaloneCommandAckTcs = null;
+                    _standaloneCommandAckId = '\0';
+                }
+            }
+        });
+    }
+
+    private async Task<bool> WithLiveRequestPollingSuspendedAsync(Func<Task<bool>> operation)
+    {
+        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
+        _suspendLiveRequestPolling = true;
+        try
+        {
+            return await operation();
+        }
+        finally
+        {
             ResetLogReceiveState(discardSerialInput: false);
             _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
             if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
@@ -6571,6 +6741,15 @@ public class SerialPortService : IDisposable
                 EnsureLiveRequestPolling();
             }
         }
+    }
+
+    public async Task BeginFirmwareUpdateSessionAsync()
+    {
+        await RunStandaloneRequestAsync(() =>
+        {
+            BeginFirmwareUpdateSession();
+            return Task.FromResult(true);
+        });
     }
 
     public void BeginFirmwareUpdateSession()
@@ -6610,6 +6789,7 @@ public class SerialPortService : IDisposable
         }
 
         await _standaloneRequestLock.WaitAsync();
+        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
         try
         {
             bool preserveSecureSession = _secureSession.IsSessionOpen;
@@ -6644,8 +6824,8 @@ public class SerialPortService : IDisposable
                     ResetLogReceiveState(discardSerialInput: false);
                 }
 
-                _suspendLiveRequestPolling = false;
-                if (_serialPort.IsOpen && !sendingConfig)
+                _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
+                if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
                 {
                     EnsureLiveRequestPolling();
                 }
@@ -6659,11 +6839,17 @@ public class SerialPortService : IDisposable
 
     public async Task<string?> RequestBuildDateAsync(int timeoutMs = 3000)
     {
+        return await RunStandaloneRequestAsync(() => RequestBuildDateCoreAsync(timeoutMs));
+    }
+
+    private async Task<string?> RequestBuildDateCoreAsync(int timeoutMs)
+    {
         if (!_serialPort.IsOpen)
         {
             return null;
         }
 
+        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
         bool preserveSecureSession = _secureSession.IsSessionOpen;
         _suspendLiveRequestPolling = true;
         if (!preserveSecureSession)
@@ -6696,8 +6882,8 @@ public class SerialPortService : IDisposable
                 ResetLogReceiveState(discardSerialInput: false);
             }
 
-            _suspendLiveRequestPolling = false;
-            if (_serialPort.IsOpen && !sendingConfig)
+            _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
+            if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
             {
                 EnsureLiveRequestPolling();
             }
@@ -6705,6 +6891,11 @@ public class SerialPortService : IDisposable
     }
 
     public async Task<string?> RequestFirmwareDiagnosticAsync(int timeoutMs = 3000)
+    {
+        return await RunStandaloneRequestAsync(() => RequestFirmwareDiagnosticCoreAsync(timeoutMs));
+    }
+
+    private async Task<string?> RequestFirmwareDiagnosticCoreAsync(int timeoutMs)
     {
         if (!_serialPort.IsOpen)
         {
@@ -6768,20 +6959,46 @@ public class SerialPortService : IDisposable
 
     public async Task<string?> RequestCellularTestAsync(CellularParameters? cellularSettings = null, int timeoutMs = 3000)
     {
+        return await RunStandaloneRequestAsync(() => RequestCellularTestCoreAsync(cellularSettings, timeoutMs));
+    }
+
+    public async Task<(bool WasRequested, string? Diagnostic)> TryPollCellularHealthAsync(CellularParameters? cellularSettings, int timeoutMs = 12000)
+    {
+        if (!await _standaloneRequestLock.WaitAsync(0))
+        {
+            return (false, null);
+        }
+
+        try
+        {
+            if (_isDisposed || !_serialPort.IsOpen || _suspendLiveRequestPolling || _logTransferSessionActive)
+            {
+                return (false, null);
+            }
+
+            return (true, await RequestCellularTestCoreAsync(cellularSettings, timeoutMs));
+        }
+        finally
+        {
+            _standaloneRequestLock.Release();
+        }
+    }
+
+    private async Task<string?> RequestCellularTestCoreAsync(CellularParameters? cellularSettings, int timeoutMs)
+    {
         if (!_serialPort.IsOpen)
         {
             return null;
         }
 
-        await _standaloneRequestLock.WaitAsync();
         bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
         _suspendLiveRequestPolling = true;
-        ResetStandaloneReceiveState(discardSerialInput: true);
         var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _cellularTestTcs = tcs;
 
         try
         {
+            ResetStandaloneReceiveState(discardSerialInput: true);
+            _cellularTestTcs = tcs;
             SendCellularTestCommand(cellularSettings);
             Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
             if (completedTask != tcs.Task)
@@ -6806,7 +7023,6 @@ public class SerialPortService : IDisposable
                 SendCommand(Constants.COMMAND_ID_REQUEST);
             }
 
-            _standaloneRequestLock.Release();
         }
     }
 
@@ -7125,6 +7341,7 @@ public class SerialPortService : IDisposable
         bool preserveSecureSession = _secureSession.IsSessionOpen;
 
         await _standaloneRequestLock.WaitAsync();
+        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
         _suspendLiveRequestPolling = true;
         try
         {
@@ -7264,10 +7481,10 @@ public class SerialPortService : IDisposable
                 _packetReady = false;
             }
 
-            _suspendLiveRequestPolling = false;
+            _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
 
             // Resume live polling immediately after a log-list refresh.
-            if (_serialPort.IsOpen && !_logTransferSessionActive && !sendingConfig)
+            if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !_logTransferSessionActive && !sendingConfig)
             {
                 _awaitingPostLogRefreshStatusFrame = true;
                 _postLogRefreshRequestRetryCount = 0;
@@ -7489,12 +7706,10 @@ public class SerialPortService : IDisposable
         }
         catch (OperationCanceledException ex)
         {
-            if (secure)
-            {
-                Close();
-                ResetSecureSession();
-            }
-            throw new IOException("Log download stalled. Reconnect to the PDM before retrying.", ex);
+            // Close aborts a pending native read even when the driver ignores its token.
+            Close();
+            ResetSecureSession();
+            throw new TimeoutException("Log download stalled. Reconnect to the PDM before retrying.", ex);
         }
         catch
         {
@@ -7680,6 +7895,11 @@ public class SerialPortService : IDisposable
 
     public async Task<bool> ResetLogStorageAsync(int timeoutMs = 5000)
     {
+        return await RunStandaloneRequestAsync(() => ResetLogStorageCoreAsync(timeoutMs));
+    }
+
+    private async Task<bool> ResetLogStorageCoreAsync(int timeoutMs)
+    {
         if (!_serialPort.IsOpen)
         {
             return false;
@@ -7744,25 +7964,7 @@ public class SerialPortService : IDisposable
             return;
         }
 
-        _sendBuffer.Clear();
-        checkSumSend = 0;
-
-        // Build packet
-        AddData(Constants.SERIAL_HEADER1, true);
-        AddData(Constants.SERIAL_HEADER2, true);
-        AddData(0, true);  // settingIndex = 0 (Channel data)
-        AddData(1, true);  // parameterIndex = 1 (Override)
-        AddData((byte)channelIndex, true);
-        AddData(overrideState ? (byte)1 : (byte)0, true);
-        AddData(Constants.SERIAL_TRAILER1, true);
-        AddData(Constants.SERIAL_TRAILER2, true);
-        AddData((byte)(checkSumSend & 0xFF), false);
-        AddData((byte)((checkSumSend >> 8) & 0xFF), false);
-        AddData((byte)((checkSumSend >> 16) & 0xFF), false);
-        AddData((byte)((checkSumSend >> 24) & 0xFF), false);
-
-        byte[] overridePacket = _sendBuffer.ToArray();
-        _sendBuffer.Clear();
+        byte[] overridePacket = BuildOverridePacket(channelIndex, overrideState);
 
         try
         {
@@ -7781,6 +7983,9 @@ public class SerialPortService : IDisposable
             LoggingService.AddLog($"Override command failed: {ex.Message}");
         }
     }
+
+    private static byte[] BuildOverridePacket(int channelIndex, bool overrideState) =>
+        BuildStandaloneConfigPacket(0, 1, (byte)channelIndex, [overrideState ? (byte)1 : (byte)0]);
 }
 
 public sealed class LogChunkResponse

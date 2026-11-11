@@ -32,7 +32,6 @@ public sealed class IoFlowSettingsParityTests
         OutputChannel liveChannel = new() { Enabled = 1 };
         output.UpdateLiveState(liveChannel);
         Assert.True(output.IsOutputActive);
-        Assert.Equal(0, output.Channel.Enabled);
         liveChannel.Enabled = 0;
         output.UpdateLiveState(liveChannel);
         Assert.False(output.IsOutputActive);

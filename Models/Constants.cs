@@ -84,7 +84,11 @@
 
         public const int LOG_FILE_NAME_LENGTH = 24;
 
-        public const int LAST_CHANNEL_PARAM_INDEX = 45;
+        public const int LAST_MATH_RULE_PARAM_INDEX = 45;
+
+        public const int CHANNEL_PARAM_MATH_FOLLOW_CHANNEL = 46;
+
+        public const int LAST_CHANNEL_PARAM_INDEX = 46;
 
         public const int LAST_ANALOGUE_PARAM_INDEX = 12;
 

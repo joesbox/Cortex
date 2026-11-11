@@ -524,7 +524,7 @@ namespace Cortex.Models
                 OutputChannel.ChannelType.AnalogueScaled => "Analogue scaled PWM",
                 OutputChannel.ChannelType.CAN => "CAN digital output",
                 OutputChannel.ChannelType.CAN_PWM => "CAN PWM output",
-                OutputChannel.ChannelType.MATH => "MATH output",
+                OutputChannel.ChannelType.MATH => "RULE BASED output",
                 _ => channelType.ToString(),
             };
         }

@@ -46,7 +46,7 @@
                         <ContentControl.DataTemplates>
                             <DataTemplate DataType="{x:Type io:OutputNodeViewModel}">
                                 <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
-                                    <TextBlock Text="Active:" FontSize="14" VerticalAlignment="Center" />
+                                    <TextBlock Text="{Binding OutputStatusText}" FontSize="14" VerticalAlignment="Center" MaxWidth="120" TextWrapping="Wrap" />
                                     <Ellipse Classes="outputActiveLed" Width="12" Height="12" Fill="{Binding OutputLedBrush}" ToolTip.Tip="{Binding OutputActiveToolTip}" />
                                 </StackPanel>
                             </DataTemplate>
@@ -68,7 +68,7 @@
                         </DataTemplate>
                         <DataTemplate DataType="{x:Type io:AnalogueInputNodeViewModel}">
                             <StackPanel Spacing="3">
-                                <TextBlock Text="{Binding Input.ChanType, StringFormat='Mode: {0}'}" />
+                                <TextBlock Text="{Binding ModeText, StringFormat='Mode: {0}'}" />
                                 <TextBlock Text="{Binding Input.Units, StringFormat='Units: {0}'}" />
                                 <TextBlock IsVisible="{Binding Input.IsCalibrationMode}" Text="{Binding Input.CalibrationPoints, StringFormat='Calibration: {0} points'}" />
                                 <TextBlock Text="{Binding LiveVoltageText, StringFormat='Connector: {0}'}" ToolTip.Tip="Connector-side voltage (0-5 V), scaled by the PDM firmware." />

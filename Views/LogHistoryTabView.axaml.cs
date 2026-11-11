@@ -60,6 +60,7 @@ public partial class LogHistoryTabView : UserControl
             InitializeLogMap();
 
             DataContextChanged += (_, _) => AttachToViewModel();
+            AttachedToVisualTree += (_, _) => AttachToViewModel();
             DetachedFromVisualTree += (_, _) => DetachFromViewModel();
         }
 
@@ -423,25 +424,29 @@ public partial class LogHistoryTabView : UserControl
                 pointFeatures.Add(pointFeature);
             }
 
-            GeometryFeature routeFeature = new()
+            if (routeCoordinates.Count >= 2)
             {
-                Geometry = new LineString(routeCoordinates.ToArray()),
-            };
-            routeFeature.Styles.Add(new VectorStyle
-            {
-                Line = new Pen(Color.White, 7f),
-                Outline = null,
-            });
-            routeFeature.Styles.Add(new VectorStyle
-            {
-                Line = new Pen(Color.FromArgb(255, 33, 150, 243), 3f),
-                Outline = null,
-            });
+                GeometryFeature routeFeature = new()
+                {
+                    Geometry = new LineString(routeCoordinates.ToArray()),
+                };
+                routeFeature.Styles.Add(new VectorStyle
+                {
+                    Line = new Pen(Color.White, 7f),
+                    Outline = null,
+                });
+                routeFeature.Styles.Add(new VectorStyle
+                {
+                    Line = new Pen(Color.FromArgb(255, 33, 150, 243), 3f),
+                    Outline = null,
+                });
 
-            _logRouteLayer = new MemoryLayer("Historical Route")
-            {
-                Features = [routeFeature],
-            };
+                _logRouteLayer = new MemoryLayer("Historical Route")
+                {
+                    Features = [routeFeature],
+                };
+                _logMap.Map.Layers.Add(_logRouteLayer);
+            }
 
             _logPointLayer = new MemoryLayer("Historical Route Points")
             {
@@ -460,7 +465,6 @@ public partial class LogHistoryTabView : UserControl
                 Style = null,
             };
 
-            _logMap.Map.Layers.Add(_logRouteLayer);
             _logMap.Map.Layers.Add(_logPointLayer);
             _logMap.Map.Layers.Add(_logHighlightLayer);
 

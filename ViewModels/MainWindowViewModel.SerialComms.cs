@@ -84,6 +84,7 @@ namespace Cortex.ViewModels
             _portService.DataUpdated -= _portService_DataUpdated;
             _portService.ConfigurationSaved -= ConfigSaved;
             _portService.ConfigurationSaveCompleted -= ConfigSaveCompleted;
+            _portService.Dispose();
             _portService = null;
         }
 
@@ -371,6 +372,7 @@ namespace Cortex.ViewModels
             _isSecureUnlockWorkflowActive = false;
             _isSecureKeepaliveInProgress = false;
             _hasReceivedLiveData = false;
+            IoFlowGraph.ControllerChannels = null;
             ResetLiveChartHistory();
             ResetLiveChartSeries();
             AddLog("Disconnected from PDM.");
@@ -391,4 +393,3 @@ namespace Cortex.ViewModels
         }
     }
 }
-

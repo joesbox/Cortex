@@ -505,7 +505,7 @@ namespace Cortex.ViewModels
 
                     AddLog($"Opening controller log: {SelectedLogFile.FileName}");
 
-                    _portService.BeginLogTransferSession();
+                    await _portService.BeginLogTransferSessionAsync();
                     bool transferOpened = false;
                     try
                     {
@@ -516,7 +516,7 @@ namespace Cortex.ViewModels
                         }
 
                         transferOpened = true;
-                        content = await ReadLogFromControllerAsync(token);
+                        content = await ReadLogFromControllerAsync((byte)selectedIndex, token);
                     }
                     finally
                     {
@@ -829,7 +829,7 @@ namespace Cortex.ViewModels
             }
         }
 
-        private async Task<string> ReadLogFromControllerAsync(CancellationToken token)
+        private async Task<string> ReadLogFromControllerAsync(byte logIndex, CancellationToken token)
         {
             if (_portService == null)
             {
@@ -855,9 +855,13 @@ namespace Cortex.ViewModels
             }
             catch (Exception ex) when (!secureDownload && (ex is IOException || ex is InvalidOperationException))
             {
-                AddLog($"Stream download failed. Trying alternative download mode...");
+                AddLog("Stream download failed. Trying alternative download mode...", ex.Message);
                 _portService.CancelLogTransfer();
                 await Task.Delay(50, token);
+                if (!await _portService.OpenLogTransferAsync(logIndex))
+                {
+                    throw new IOException("Controller refused to reopen the log for alternative download mode.", ex);
+                }
                 return await ReadLogFromControllerPullAsync(token);
             }
         }
