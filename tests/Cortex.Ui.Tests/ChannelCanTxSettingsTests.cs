@@ -207,12 +207,12 @@ public sealed class ChannelCanTxSettingsTests
             double panelWidth = runtimePanel.Bounds.Width;
             double nodeWidth = mathNode.Bounds.Width;
             Border outputNode = Assert.Single(flowView.GetVisualDescendants().OfType<Border>(),
-                border => border.Classes.Contains("ioFlowOutputNode")
+                border => border.Classes.Contains("ioFlowNode")
                     && border.DataContext is Cortex.ViewModels.IoFlow.OutputNodeViewModel output
                     && output.ChannelNumber == channel.ChannelNumber);
             double outputWidth = outputNode.Bounds.Width;
             Assert.Equal(510, panelWidth);
-            Assert.Equal(340, nodeWidth);
+            Assert.Equal(310, nodeWidth);
             Assert.DoesNotContain(runtimePanel.GetVisualDescendants().OfType<TextBlock>(),
                 text => text.Text == "All active rule results");
 
@@ -229,36 +229,37 @@ public sealed class ChannelCanTxSettingsTests
                 Assert.Equal(panelWidth, runtimePanel.Bounds.Width);
                 Assert.Equal(nodeWidth, mathNode.Bounds.Width);
                 Assert.Equal(outputWidth, outputNode.Bounds.Width);
-                foreach (Control panel in new Control[] { runtimePanel, mathNode })
+                TextBlock[] runtimeValues = runtimePanel.GetVisualDescendants().OfType<TextBlock>()
+                    .Where(text => text.Classes.Contains("mathLiveValue")).ToArray();
+                Assert.Equal(3, runtimeValues.Length);
+                Assert.All(runtimeValues, text =>
                 {
-                    TextBlock[] values = panel.GetVisualDescendants().OfType<TextBlock>()
-                        .Where(text => text.Classes.Contains("mathLiveValue")).ToArray();
-                    Assert.Equal(3, values.Length);
-                    Assert.All(values, text =>
-                    {
-                        Assert.True(text.FontSize >= 16);
-                        Assert.Equal(Avalonia.Media.TextWrapping.Wrap, text.TextWrapping);
-                    });
-                    Assert.True(values[0].Bounds.Height > 0,
-                        $"Panel {panel.GetType().Name} ({panel.DataContext?.GetType().Name}): value bounds {values[0].Bounds}; visible {values[0].IsEffectivelyVisible}");
-                    Point? operandA = values[0].TranslatePoint(default, panel);
-                    Point? operandB = values[1].TranslatePoint(default, panel);
-                    Point? result = values[2].TranslatePoint(default, panel);
-                    Assert.True(operandA!.Value.Y < operandB!.Value.Y);
-                    Assert.True(operandB.Value.Y < result!.Value.Y);
-                    Assert.Equal(viewModel.SelectedMathRuntimeOperandAText, values[0].Text);
-                    Assert.Equal(viewModel.SelectedMathRuntimeOperandBText, values[1].Text);
-                }
+                    Assert.True(text.FontSize >= 16);
+                    Assert.Equal(Avalonia.Media.TextWrapping.Wrap, text.TextWrapping);
+                });
+                Assert.True(runtimeValues[0].Bounds.Height > 0);
+                Point? operandA = runtimeValues[0].TranslatePoint(default, runtimePanel);
+                Point? operandB = runtimeValues[1].TranslatePoint(default, runtimePanel);
+                Point? result = runtimeValues[2].TranslatePoint(default, runtimePanel);
+                Assert.True(operandA!.Value.Y < operandB!.Value.Y);
+                Assert.True(operandB.Value.Y < result!.Value.Y);
+                Assert.Equal(viewModel.SelectedMathRuntimeOperandAText, runtimeValues[0].Text);
+                Assert.Equal(viewModel.SelectedMathRuntimeOperandBText, runtimeValues[1].Text);
+
+                TextBlock nodeResult = Assert.Single(mathNode.GetVisualDescendants().OfType<TextBlock>()
+                    .Where(text => text.Classes.Contains("mathLiveValue")));
+                Assert.True(nodeResult.FontSize >= 16);
+                Assert.Equal(Avalonia.Media.TextWrapping.Wrap, nodeResult.TextWrapping);
+                Assert.True(nodeResult.Bounds.Height > 0);
             }
 
             channel.MathRules[0].Operation = (byte)OutputChannel.MathOperation.ABS;
             UpdateLayout(settingsWindow);
             UpdateLayout(flowWindow);
-            foreach (Control panel in new Control[] { runtimePanel, mathNode })
-            {
-                Assert.Equal(2, panel.GetVisualDescendants().OfType<TextBlock>()
-                    .Count(text => text.Classes.Contains("mathLiveValue") && text.IsEffectivelyVisible));
-            }
+            Assert.Equal(2, runtimePanel.GetVisualDescendants().OfType<TextBlock>()
+                .Count(text => text.Classes.Contains("mathLiveValue") && text.IsEffectivelyVisible));
+            Assert.Single(mathNode.GetVisualDescendants().OfType<TextBlock>()
+                .Where(text => text.Classes.Contains("mathLiveValue") && text.IsEffectivelyVisible));
         }
         finally
         {

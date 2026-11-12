@@ -1140,6 +1140,7 @@ namespace Cortex.ViewModels
         private bool _suppressDirtyTracking;
         private bool _suppressTimeZoneSelectionWriteBack;
         private bool _awaitingInitialMathSettingsHydration;
+        private bool _configSavePreparationInProgress;
         private DataStructures? _controllerConfigBaseline;
         private DataStructures? _configurationBeingSaved;
         private IoFlowGraphSnapshot? _ioFlowSnapshotBeingSaved;
@@ -1147,7 +1148,6 @@ namespace Cortex.ViewModels
         private DateTime _nextCellularHealthPollUtc = DateTime.MinValue;
         private DateTime _suppressCellularNeedsAttentionUntilUtc = DateTime.MinValue;
         private int _isCellularHealthPollInProgress;
-        private string _lastLoggedCellularHealthStatus = string.Empty;
         private double _activeLogFilterStartMs = double.NaN;
         private double _activeLogFilterEndMs = double.NaN;
         private double _lastRenderedLogViewportStartMs = double.NaN;
@@ -2787,9 +2787,14 @@ namespace Cortex.ViewModels
                 _portService?.UpdateSettingsData(SettingsDataView);
             }
 
-            _configSaveCompletionTcs?.TrySetResult(e.Succeeded);
-            _configSaveCompletionTcs = null;
+            CompleteConfigSaveRequest(e.Succeeded);
             OnPropertyChanged(nameof(CanTestCellularConnection));
+        }
+
+        private void CompleteConfigSaveRequest(bool succeeded)
+        {
+            _configSaveCompletionTcs?.TrySetResult(succeeded);
+            _configSaveCompletionTcs = null;
         }
 
         public async Task FlashLastUpdatedAsync()
@@ -3386,82 +3391,148 @@ namespace Cortex.ViewModels
         }
 
         [RelayCommand]
-        private async Task SendConfig()
+        private Task SendConfig() => SendConfigAsync(trackedRequest: false);
+
+        private async Task SendConfigAsync(bool trackedRequest)
         {
-            if (IsSendingConfig)
+            if (_configSavePreparationInProgress || IsSendingConfig)
+            {
+                if (trackedRequest)
+                {
+                    CompleteConfigSaveRequest(false);
+                }
+                return;
+            }
+
+            if (!trackedRequest && _configSaveCompletionTcs != null)
             {
                 return;
             }
 
             if (!IsConnected || _portService == null)
             {
-                return;
-            }
-
-            if (!IoFlowGraph.ReconcileMathConfiguration())
-            {
-                MathValidationErrorMessage = IoFlowGraph.AddNodeWarning;
-                AddLog("Cannot save maths canvas.", MathValidationErrorMessage);
-                return;
-            }
-            RecalculatePendingConfigChanges();
-
-            if (!TryValidateMathConfiguration(out string validationError))
-            {
-                MathValidationErrorMessage = validationError;
-                AddLog("Cannot save MATH configuration.", validationError);
-                return;
-            }
-
-            MathValidationErrorMessage = string.Empty;
-            PrepareCellularSettingsForSave();
-
-            bool hadPendingCustomCanChanges = HasPendingCustomCanChanges();
-            bool customCanSaved = true;
-            if (hadPendingCustomCanChanges)
-            {
-                customCanSaved = await PersistPendingCustomCanChangesAsync();
-                if (!customCanSaved)
+                if (trackedRequest)
                 {
+                    CompleteConfigSaveRequest(false);
+                }
+                return;
+            }
+
+            _configSavePreparationInProgress = true;
+            try
+            {
+                if (!IoFlowGraph.ReconcileMathConfiguration())
+                {
+                    MathValidationErrorMessage = IoFlowGraph.AddNodeWarning;
+                    AddLog("Cannot save maths canvas.", MathValidationErrorMessage);
+                    if (trackedRequest)
+                    {
+                        CompleteConfigSaveRequest(false);
+                    }
+                    return;
+                }
+                RecalculatePendingConfigChanges();
+
+                if (!TryValidateMathConfiguration(out string validationError))
+                {
+                    MathValidationErrorMessage = validationError;
+                    AddLog("Cannot save MATH configuration.", validationError);
+                    if (trackedRequest)
+                    {
+                        CompleteConfigSaveRequest(false);
+                    }
                     return;
                 }
 
-                SyncCustomCanBaselineSnapshot();
-                RecalculatePendingConfigChanges();
-            }
+                MathValidationErrorMessage = string.Empty;
+                PrepareCellularSettingsForSave();
 
-            if (!HasPendingConfigChanges)
-            {
-                if (customCanSaved)
+                bool hadPendingCustomCanChanges = HasPendingCustomCanChanges();
+                bool customCanSaved = true;
+                if (hadPendingCustomCanChanges)
                 {
-                    PersistIoFlowGraphSnapshotForController();
-                    if (hadPendingCustomCanChanges)
+                    customCanSaved = await PersistPendingCustomCanChangesAsync();
+                    if (!customCanSaved)
                     {
-                        SystemDateTime = $"Last updated: {DateTime.Now:yyyy/MM/dd HH:mm:ss}";
-                        StartBackgroundTask(FlashLastUpdatedAsync(), "Last-updated highlight");
+                        if (trackedRequest)
+                        {
+                            CompleteConfigSaveRequest(false);
+                        }
+                        return;
                     }
+
+                    SyncCustomCanBaselineSnapshot();
+                    RecalculatePendingConfigChanges();
                 }
 
-                return;
+                if (!HasPendingConfigChanges)
+                {
+                    if (customCanSaved)
+                    {
+                        PersistIoFlowGraphSnapshotForController();
+                        if (hadPendingCustomCanChanges)
+                        {
+                            SystemDateTime = $"Last updated: {DateTime.Now:yyyy/MM/dd HH:mm:ss}";
+                            StartBackgroundTask(FlashLastUpdatedAsync(), "Last-updated highlight");
+                        }
+                    }
+
+                    if (trackedRequest)
+                    {
+                        CompleteConfigSaveRequest(true);
+                    }
+                    return;
+                }
+
+                IsSendingConfig = true;
+                try
+                {
+                    _configurationBeingSaved = DeepCopyDataStructures(SettingsDataView);
+                    _ioFlowSnapshotBeingSaved = IoFlowGraph.CreateSnapshot();
+                    _portService.UpdateSettingsData(_configurationBeingSaved);
+                    await _portService.StartSendConfigAsync();
+                }
+                catch (Exception ex)
+                {
+                    IsSendingConfig = false;
+                    _configurationBeingSaved = null;
+                    _ioFlowSnapshotBeingSaved = null;
+                    _portService?.UpdateSettingsData(SettingsDataView);
+                    AddLog("Settings could not be saved.", ex.Message);
+                    CompleteConfigSaveRequest(false);
+                }
+            }
+            finally
+            {
+                _configSavePreparationInProgress = false;
+            }
+        }
+
+        private async Task<bool> SendConfigAndWaitForCompletionAsync()
+        {
+            if (_configSaveCompletionTcs != null || _configSavePreparationInProgress || IsSendingConfig)
+            {
+                return false;
             }
 
-            IsSendingConfig = true;
-            _configurationBeingSaved = DeepCopyDataStructures(SettingsDataView);
-            _ioFlowSnapshotBeingSaved = IoFlowGraph.CreateSnapshot();
-            _portService.UpdateSettingsData(_configurationBeingSaved);
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _configSaveCompletionTcs = completion;
             try
             {
-                await _portService.StartSendConfigAsync();
+                await SendConfigAsync(trackedRequest: true);
+                return await completion.Task.WaitAsync(TimeSpan.FromSeconds(35));
             }
-            catch (Exception ex) when (ex is IOException || ex is InvalidOperationException)
+            catch (TimeoutException)
             {
-                IsSendingConfig = false;
-                _configurationBeingSaved = null;
-                _ioFlowSnapshotBeingSaved = null;
-                _portService?.UpdateSettingsData(SettingsDataView);
-                AddLog("Settings could not be saved.", ex.Message);
-                _configSaveCompletionTcs?.TrySetResult(false);
-                _configSaveCompletionTcs = null;
+                AddLog("Settings save did not complete.", "The controller did not confirm the save in time.");
+                return false;
+            }
+            finally
+            {
+                if (ReferenceEquals(_configSaveCompletionTcs, completion))
+                {
+                    _configSaveCompletionTcs = null;
+                }
             }
         }
 
@@ -3849,13 +3920,13 @@ namespace Cortex.ViewModels
         {
             if (_portService == null || !IsConnected || !CommsEstablished)
             {
-                SetCellularConnectionHealthStatus("Offline", shouldLog: true);
+                SetCellularConnectionHealthStatus("Offline");
                 return;
             }
 
             if (!IsConnectedPdmRegistered)
             {
-                SetCellularConnectionHealthStatus("Offline", shouldLog: true);
+                SetCellularConnectionHealthStatus("Offline");
                 return;
             }
 
@@ -3866,7 +3937,7 @@ namespace Cortex.ViewModels
 
             if (IsSendingConfig || IsOpenRemoteProvisioningInProgress)
             {
-                SetCellularConnectionHealthStatus("Checking", shouldLog: true);
+                SetCellularConnectionHealthStatus("Checking");
                 return;
             }
 
@@ -3877,27 +3948,25 @@ namespace Cortex.ViewModels
 
             try
             {
-                CellularParameters? testSettings = SettingsDataView.CellularParamsStaticData;
-                var (wasRequested, diagnostic) = await _portService.TryPollCellularHealthAsync(testSettings);
+                var (wasRequested, diagnostic) = await _portService.TryPollCellularHealthAsync();
                 if (!wasRequested)
                 {
                     return;
                 }
-                string status = ClassifyCellularConnectionHealthStatus(diagnostic, out string? reason);
+                string status = ClassifyCellularConnectionHealthStatus(diagnostic, out _);
 
                 if (status.Equals("Needs attention", StringComparison.OrdinalIgnoreCase) &&
                     DateTime.UtcNow < _suppressCellularNeedsAttentionUntilUtc)
                 {
                     status = "Checking";
-                    reason = null;
                 }
 
-                SetCellularConnectionHealthStatus(status, shouldLog: true, reason: reason);
+                SetCellularConnectionHealthStatus(status);
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"Cellular health poll failed: {ex}");
-                SetCellularConnectionHealthStatus("Needs attention", shouldLog: true, reason: "status check failed");
+                SetCellularConnectionHealthStatus("Needs attention");
             }
             finally
             {
@@ -3905,27 +3974,9 @@ namespace Cortex.ViewModels
             }
         }
 
-        private void SetCellularConnectionHealthStatus(string status, bool shouldLog, string? reason = null)
+        private void SetCellularConnectionHealthStatus(string status)
         {
-            bool changed = !string.Equals(CellularConnectionHealthStatus, status, StringComparison.OrdinalIgnoreCase);
             CellularConnectionHealthStatus = status;
-
-            if (!shouldLog || !SettingsDataView.SystemParamsStaticData.AllowData)
-            {
-                return;
-            }
-
-            if (changed || !string.Equals(_lastLoggedCellularHealthStatus, status, StringComparison.OrdinalIgnoreCase))
-            {
-                _lastLoggedCellularHealthStatus = status;
-                if (status.Equals("Needs attention", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(reason))
-                {
-                    AddLog($"Connectivity status: {status} ({reason}).");
-                    return;
-                }
-
-                AddLog($"Connectivity status: {status}.");
-            }
         }
 
         private static string ClassifyCellularConnectionHealthStatus(string? diagnostic, out string? reason)
@@ -4477,11 +4528,18 @@ namespace Cortex.ViewModels
             IsPinLockBusy = true;
             try
             {
+                if (!_portService.IsSecureSessionAuthorized)
+                {
+                    PinLockStatusMessage = "PIN lock cannot be disabled because the secure session is not unlocked. Reconnect and unlock the PDM, then try again.";
+                    AddLog(PinLockStatusMessage);
+                    return;
+                }
+
                 SecureManagementResponse? response = await _portService.SecureDisablePinAsync();
                 if (response == null || response.Result != SecureControlResult.Ok)
                 {
                     PinLockStatusMessage = response == null
-                        ? "Disable PIN failed."
+                        ? "The PDM did not return a valid response to the PIN disable request. Check the connection and try again."
                         : $"Disable PIN returned {response.Result}.";
                     PinLockRetryAfterMs = response?.RetryAfterMs ?? 0;
                     AddLog(PinLockStatusMessage);
@@ -4888,6 +4946,10 @@ namespace Cortex.ViewModels
                 }
 
                 IsInitialSnapshotLoaded = true;
+                if (IsOpenRemoteSignedIn)
+                {
+                    StartBackgroundTask(RefreshConnectedPdmStatusAsync(), "Connected PDM registration status refresh");
+                }
 
                 if (IsFactoryResetInProgress)
                 {
@@ -7058,7 +7120,7 @@ namespace Cortex.ViewModels
                 PinLockStatusMessage = "PIN lock unavailable.";
                 ResetCellularTestStatus();
                 _suppressCellularNeedsAttentionUntilUtc = DateTime.MinValue;
-                SetCellularConnectionHealthStatus("Offline", shouldLog: true);
+                SetCellularConnectionHealthStatus("Offline");
                 _nextCellularHealthPollUtc = DateTime.MinValue;
                 ResetFirmwareUpdateState();
             }
@@ -7066,12 +7128,12 @@ namespace Cortex.ViewModels
             {
                 if (IsConnectedPdmRegistered)
                 {
-                    SetCellularConnectionHealthStatus("Checking", shouldLog: true);
+                    SetCellularConnectionHealthStatus("Checking");
                     ScheduleCellularHealthPoll(immediate: true);
                 }
                 else
                 {
-                    SetCellularConnectionHealthStatus("Offline", shouldLog: false);
+                    SetCellularConnectionHealthStatus("Offline");
                     _nextCellularHealthPollUtc = DateTime.MinValue;
                 }
 
@@ -7101,7 +7163,7 @@ namespace Cortex.ViewModels
                 IsFirmwareUpdateAvailable = false;
                 IsCheckingFirmwareUpdate = false;
                 _suppressCellularNeedsAttentionUntilUtc = DateTime.MinValue;
-                SetCellularConnectionHealthStatus("Offline", shouldLog: true);
+                SetCellularConnectionHealthStatus("Offline");
                 _nextCellularHealthPollUtc = DateTime.MinValue;
                 NotifyFirmwareInfoChanged();
                 UpdateFirmwareButtonPresentation();
@@ -7110,13 +7172,13 @@ namespace Cortex.ViewModels
 
             if (IsConnectedPdmRegistered)
             {
-                SetCellularConnectionHealthStatus("Checking", shouldLog: true);
+                SetCellularConnectionHealthStatus("Checking");
                 ScheduleCellularHealthPoll(immediate: true);
                 StartBackgroundTask(PollCellularHealthStatusAsync(), "Cellular health poll");
             }
             else
             {
-                SetCellularConnectionHealthStatus("Offline", shouldLog: false);
+                SetCellularConnectionHealthStatus("Offline");
                 _nextCellularHealthPollUtc = DateTime.MinValue;
             }
 

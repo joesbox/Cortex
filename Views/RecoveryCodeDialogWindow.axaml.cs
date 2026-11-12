@@ -9,7 +9,6 @@ namespace Cortex.Views
         private readonly SelectableTextBlock _recoveryCodeText;
         private readonly Button _copyButton;
         private readonly TextBlock _statusText;
-        private readonly Button _closeButton;
         private readonly Button _doneButton;
         private readonly CheckBox _acknowledgeCheckBox;
 
@@ -20,7 +19,6 @@ namespace Cortex.Views
             _recoveryCodeText = GetRequiredControl<SelectableTextBlock>("RecoveryCodeText");
             _copyButton = GetRequiredControl<Button>("CopyButton");
             _statusText = GetRequiredControl<TextBlock>("StatusText");
-            _closeButton = GetRequiredControl<Button>("CloseButton");
             _doneButton = GetRequiredControl<Button>("DoneButton");
             _acknowledgeCheckBox = GetRequiredControl<CheckBox>("AcknowledgeCheckBox");
 
@@ -38,7 +36,6 @@ namespace Cortex.Views
                 _statusText.Text = "Recovery code copied to clipboard.";
             };
 
-            _closeButton.Click += (_, _) => Close(false);
             _doneButton.Click += (_, _) =>
             {
                 if (_acknowledgeCheckBox.IsChecked != true)

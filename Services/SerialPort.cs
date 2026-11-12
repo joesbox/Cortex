@@ -992,7 +992,7 @@ public class SerialPortService : IDisposable
         Stopwatch wait = Stopwatch.StartNew();
         while (_serialPort.IsOpen && wait.ElapsedMilliseconds < maxWaitMs)
         {
-            await Task.Delay(quietMs);
+            await Task.Delay(quietMs).ConfigureAwait(false);
             if (_serialPort.BytesToRead == 0)
             {
                 return;
@@ -1009,19 +1009,21 @@ public class SerialPortService : IDisposable
         }
     }
 
-    private byte[]? ReadSecureFrameBlocking(int timeoutMs, bool allowEnvelope, byte? expectedControlOperation = null)
+    private static async Task<byte[]?> ReadSecureFrameAsync(
+        Func<bool> isOpen, Func<int> bytesToRead, Func<int> readByte,
+        Func<byte[], int, int, int> read, int timeoutMs, bool allowEnvelope, byte? expectedControlOperation)
     {
         Stopwatch stopwatch = Stopwatch.StartNew();
 
-        while (_serialPort.IsOpen && stopwatch.ElapsedMilliseconds <= timeoutMs)
+        while (isOpen() && stopwatch.ElapsedMilliseconds <= timeoutMs)
         {
-            if (_serialPort.BytesToRead <= 0)
+            if (bytesToRead() <= 0)
             {
-                Thread.Sleep(2);
+                await Task.Delay(2).ConfigureAwait(false);
                 continue;
             }
 
-            int first = _serialPort.ReadByte();
+            int first = readByte();
             if (first < 0)
             {
                 continue;
@@ -1030,7 +1032,7 @@ public class SerialPortService : IDisposable
             if ((byte)first == (byte)Constants.SECURE_CONTROL_FRAME_PREFIX)
             {
                 byte[] headerTail = new byte[4];
-                if (!TryReadExactBlocking(headerTail, timeoutMs, stopwatch))
+                if (!await TryReadExactAsync(headerTail, isOpen, bytesToRead, read, timeoutMs, stopwatch).ConfigureAwait(false))
                 {
                     return null;
                 }
@@ -1049,7 +1051,7 @@ public class SerialPortService : IDisposable
                 }
 
                 byte[] payload = new byte[payloadLength];
-                if (payloadLength > 0 && !TryReadExactBlocking(payload, timeoutMs, stopwatch))
+                if (payloadLength > 0 && !await TryReadExactAsync(payload, isOpen, bytesToRead, read, timeoutMs, stopwatch).ConfigureAwait(false))
                 {
                     return null;
                 }
@@ -1071,7 +1073,7 @@ public class SerialPortService : IDisposable
             }
 
             byte[] envelopeHeaderTail = new byte[6];
-            if (!TryReadExactBlocking(envelopeHeaderTail, timeoutMs, stopwatch))
+            if (!await TryReadExactAsync(envelopeHeaderTail, isOpen, bytesToRead, read, timeoutMs, stopwatch).ConfigureAwait(false))
             {
                 return null;
             }
@@ -1084,7 +1086,7 @@ public class SerialPortService : IDisposable
 
             int remainingBytes = plaintextLength + Constants.SECURE_TAG_LENGTH;
             byte[] payloadAndTag = new byte[remainingBytes];
-            if (!TryReadExactBlocking(payloadAndTag, timeoutMs, stopwatch))
+            if (!await TryReadExactAsync(payloadAndTag, isOpen, bytesToRead, read, timeoutMs, stopwatch).ConfigureAwait(false))
             {
                 return null;
             }
@@ -1099,30 +1101,33 @@ public class SerialPortService : IDisposable
         return null;
     }
 
-    private bool TryReadExactBlocking(byte[] buffer, int timeoutMs, Stopwatch stopwatch)
+    private static async Task<bool> TryReadExactAsync(
+        byte[] buffer, Func<bool> isOpen, Func<int> bytesToRead,
+        Func<byte[], int, int, int> read, int timeoutMs, Stopwatch stopwatch)
     {
         int offset = 0;
-        while (offset < buffer.Length && _serialPort.IsOpen)
+        while (offset < buffer.Length && isOpen())
         {
             if (stopwatch.ElapsedMilliseconds > timeoutMs)
             {
                 return false;
             }
 
-            if (_serialPort.BytesToRead <= 0)
+            int available = bytesToRead();
+            if (available <= 0)
             {
-                Thread.Sleep(1);
+                await Task.Delay(1).ConfigureAwait(false);
                 continue;
             }
 
-            int read = _serialPort.Read(buffer, offset, buffer.Length - offset);
-            if (read <= 0)
+            int count = read(buffer, offset, Math.Min(available, buffer.Length - offset));
+            if (count <= 0)
             {
-                Thread.Sleep(1);
+                await Task.Delay(1).ConfigureAwait(false);
                 continue;
             }
 
-            offset += read;
+            offset += count;
         }
 
         return offset == buffer.Length;
@@ -1135,7 +1140,7 @@ public class SerialPortService : IDisposable
             return null;
         }
 
-        await _standaloneRequestLock.WaitAsync();
+        await _standaloneRequestLock.WaitAsync().ConfigureAwait(false);
         try
         {
             bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
@@ -1145,7 +1150,7 @@ public class SerialPortService : IDisposable
             {
                 try
                 {
-                    return await ExecuteStreamedSecureManagementRequestAsync(operation, payload, timeoutMs);
+                    return await ExecuteStreamedSecureManagementRequestAsync(operation, payload, timeoutMs).ConfigureAwait(false);
                 }
                 finally
                 {
@@ -1153,29 +1158,43 @@ public class SerialPortService : IDisposable
                 }
             }
 
-            _suspendDataReceivedReads = true;
-
-            bool preserveSecureSequence = encryptedRequest && _secureSession.IsSessionOpen;
-            if (!preserveSecureSequence)
+            lock (_serialReceiveLock)
             {
-                ResetLogReceiveState(discardSerialInput: true);
-                await WaitForQuietSerialInputAsync();
+                _suspendDataReceivedReads = true;
             }
 
             try
             {
-                byte[] requestBytes = encryptedRequest
-                    ? EncryptSecureEnvelope(
-                        BuildSecureEncryptedControlRequest(operation, payload),
-                        _secureSession.ClientToDeviceKey,
-                        _secureSession.SessionId,
-                        _secureSession.TxSequence++)
-                    : BuildSecureControlRequest(operation, payload);
+                bool preserveSecureSequence = encryptedRequest && _secureSession.IsSessionOpen;
+                if (!preserveSecureSequence)
+                {
+                    ResetLogReceiveState(discardSerialInput: true);
+                    await WaitForQuietSerialInputAsync().ConfigureAwait(false);
+                }
 
-                await _serialPort.BaseStream.WriteAsync(requestBytes, 0, requestBytes.Length);
-                await _serialPort.BaseStream.FlushAsync();
+                lock (_configurationSaveLock)
+                {
+                    if (_configurationSaveActive || !_serialPort.IsOpen)
+                    {
+                        return null;
+                    }
 
-                byte[]? frame = ReadSecureFrameBlocking(timeoutMs, allowEnvelope: encryptedRequest, expectedControlOperation: (byte)operation);
+                    byte[] requestBytes = encryptedRequest
+                        ? EncryptSecureEnvelope(
+                            BuildSecureEncryptedControlRequest(operation, payload),
+                            _secureSession.ClientToDeviceKey,
+                            _secureSession.SessionId,
+                            _secureSession.TxSequence++)
+                        : BuildSecureControlRequest(operation, payload);
+
+                    _serialPort.Write(requestBytes, 0, requestBytes.Length);
+                }
+
+                await _serialPort.BaseStream.FlushAsync().ConfigureAwait(false);
+
+                byte[]? frame = await ReadSecureFrameAsync(
+                    () => _serialPort.IsOpen, () => _serialPort.BytesToRead,
+                    _serialPort.ReadByte, _serialPort.Read, timeoutMs, encryptedRequest, (byte)operation).ConfigureAwait(false);
                 if (frame == null)
                 {
                     return null;
@@ -1183,6 +1202,12 @@ public class SerialPortService : IDisposable
 
                 if (frame.Length > 0 && frame[0] == (byte)Constants.SECURE_CONTROL_FRAME_PREFIX)
                 {
+                    if (encryptedRequest)
+                    {
+                        LogProtocolDebug($"SEC RX reject-plaintext-control op={(byte)operation} sessionOpen={_secureSession.IsSessionOpen}");
+                        return null;
+                    }
+
                     return frame;
                 }
 
@@ -1202,7 +1227,14 @@ public class SerialPortService : IDisposable
             }
             finally
             {
-                _suspendDataReceivedReads = false;
+                lock (_serialReceiveLock)
+                {
+                    if (!_isShuttingDown && !_isDisposed)
+                    {
+                        _suspendDataReceivedReads = false;
+                        _parseSignal.Set();
+                    }
+                }
                 _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
             }
         }
@@ -5274,7 +5306,19 @@ public class SerialPortService : IDisposable
 
             if (_secureIncomingBuffer[0] != (byte)Constants.SECURE_ENVELOPE_FRAME_PREFIX)
             {
-                payload = [ _secureIncomingBuffer[0] ];
+                byte incomingByte = _secureIncomingBuffer[0];
+                bool plaintextConfigurationAck =
+                    incomingByte == Constants.COMMAND_ID_CONFIM ||
+                    incomingByte == Constants.COMMAND_ID_CHECKSUM_FAIL;
+                if (_secureSession.IsSessionOpen &&
+                    (_configurationSaveActive || _standaloneCommandAckTcs != null || plaintextConfigurationAck))
+                {
+                    LogProtocolDebug($"SEC RX reject-plaintext-during-request byte={incomingByte:X2}");
+                    _secureIncomingBuffer.RemoveAt(0);
+                    return true;
+                }
+
+                payload = [ incomingByte ];
                 _secureIncomingBuffer.RemoveAt(0);
                 return true;
             }
@@ -5284,7 +5328,7 @@ public class SerialPortService : IDisposable
                 return false;
             }
 
-            ushort plaintextLength = BinaryPrimitives.ReadUInt16LittleEndian(_secureIncomingBuffer.ToArray().AsSpan(1, 2));
+            int plaintextLength = _secureIncomingBuffer[1] | (_secureIncomingBuffer[2] << 8);
             if (plaintextLength == 0 || plaintextLength > Constants.SECURE_ENVELOPE_MAX_PLAINTEXT_BYTES)
             {
                 _secureIncomingBuffer.RemoveAt(0);
@@ -5411,16 +5455,24 @@ public class SerialPortService : IDisposable
                 bool secureStreamingTransport = UseSecureStreamingTransport();
                 int processedBytes = 0;
                 const int maxBytesPerCallback = 2048;
+                byte[] secureReadBuffer = secureStreamingTransport ? new byte[maxBytesPerCallback] : Array.Empty<byte>();
                 while (_serialPort.BytesToRead > 0 && _serialPort.IsOpen && processedBytes < maxBytesPerCallback)
                 {
-                    byte readByte = (byte)_serialPort.ReadByte();
-                    processedBytes++;
-
                     if (secureStreamingTransport)
                     {
+                        int count = Math.Min(_serialPort.BytesToRead, maxBytesPerCallback - processedBytes);
+                        int bytesRead = _serialPort.Read(secureReadBuffer, 0, count);
+                        if (bytesRead <= 0)
+                        {
+                            break;
+                        }
+                        processedBytes += bytesRead;
                         lock (_bufferLock)
                         {
-                            _secureIncomingBuffer.Add(readByte);
+                            for (int i = 0; i < bytesRead; i++)
+                            {
+                                _secureIncomingBuffer.Add(secureReadBuffer[i]);
+                            }
                         }
 
                         while (TryReadNextSecureIncomingPayload(out byte[] payload))
@@ -5494,6 +5546,8 @@ public class SerialPortService : IDisposable
                         continue;
                     }
 
+                    byte readByte = (byte)_serialPort.ReadByte();
+                    processedBytes++;
                     lock (_bufferLock)
                     {
                         receivedDataBuffer.Add(readByte);
@@ -5659,31 +5713,28 @@ public class SerialPortService : IDisposable
 
     public bool InitComms()
     {
-        bool retVal = foundECU;
-        if (_serialPort is not null)
+        lock (_serialReceiveLock)
         {
-            if (_serialPort.IsOpen)
+            bool retVal = foundECU;
+            if (_serialPort.IsOpen && !foundECU && !_suspendDataReceivedReads && !_isShuttingDown && !_isDisposed)
             {
-                if (!foundECU)
+                try
                 {
-                    try
-                    {
-                        ResetLogReceiveState(discardSerialInput: true);
-                        SendCommand(Constants.COMMAND_ID_BEGIN);
+                    ResetLogReceiveState(discardSerialInput: true);
+                    SendCommand(Constants.COMMAND_ID_BEGIN);
 
-                        if (_serialPort.BytesToRead > 0)
-                        {
-                            Debug.WriteLine("Data in buffer");
-                        }
-                    }
-                    catch (Exception ex)
+                    if (_serialPort.BytesToRead > 0)
                     {
-                        Debug.WriteLine($"Error sending request: {ex.Message}");
+                        Debug.WriteLine("Data in buffer");
                     }
                 }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Error sending request: {ex.Message}");
+                }
             }
+            return retVal;
         }
-        return retVal;
     }
 
     public bool Open()
@@ -6261,147 +6312,66 @@ public class SerialPortService : IDisposable
 
     private void SendCommandWithByte(char commandId, byte value)
     {
-        if (!_serialPort.IsOpen)
-        {
-            return;
-        }
-
-        bool commandRequiresAuthorization =
-            _secureSession.IsSessionOpen &&
-            _secureSession.PinEnabled &&
-            !_secureSession.IsAuthorized &&
-            !IsPublicRawCommand(commandId);
-
-        if (commandRequiresAuthorization)
-        {
-            LogProtocolDebug($"TX block cmd={(byte)commandId}('{commandId}') sessionOpen={_secureSession.IsSessionOpen} pinEnabled={_secureSession.PinEnabled} auth={_secureSession.IsAuthorized}");
-            return;
-        }
-
-        bool sendEncrypted = ShouldSendCommandOverSecureEnvelope(commandId);
-        byte[] commandPayload = [ (byte)commandId, value ];
-        byte[] data = sendEncrypted
-            ? EncryptSecureEnvelope(
-                commandPayload,
-                _secureSession.ClientToDeviceKey,
-                _secureSession.SessionId,
-                _secureSession.TxSequence++)
-            : commandPayload;
-
-        _serialPort.Write(data, 0, data.Length);
-        lastCommandSent = commandId;
+        SendCommandPayload([ (byte)commandId, value ]);
     }
 
     private void SendCommandWithUInt32(char commandId, byte firstValue, uint value)
     {
-        if (!_serialPort.IsOpen)
-        {
-            return;
-        }
-
-        bool commandRequiresAuthorization =
-            _secureSession.IsSessionOpen &&
-            _secureSession.PinEnabled &&
-            !_secureSession.IsAuthorized &&
-            !IsPublicRawCommand(commandId);
-
-        if (commandRequiresAuthorization)
-        {
-            LogProtocolDebug($"TX block cmd={(byte)commandId}('{commandId}') sessionOpen={_secureSession.IsSessionOpen} pinEnabled={_secureSession.PinEnabled} auth={_secureSession.IsAuthorized}");
-            return;
-        }
-
         byte[] commandPayload = new byte[6];
         commandPayload[0] = (byte)commandId;
         commandPayload[1] = firstValue;
         byte[] valueBytes = BitConverter.GetBytes(value);
         Array.Copy(valueBytes, 0, commandPayload, 2, valueBytes.Length);
 
-        bool sendEncrypted = ShouldSendCommandOverSecureEnvelope(commandId);
-        byte[] data = sendEncrypted
-            ? EncryptSecureEnvelope(
-                commandPayload,
-                _secureSession.ClientToDeviceKey,
-                _secureSession.SessionId,
-                _secureSession.TxSequence++)
-            : commandPayload;
-
-        _serialPort.Write(data, 0, data.Length);
-        lastCommandSent = commandId;
+        SendCommandPayload(commandPayload);
     }
 
     private void SendCommandWithPayload(char commandId, byte[] payload, int payloadLength)
     {
-        if (!_serialPort.IsOpen)
-        {
-            return;
-        }
-
-        bool commandRequiresAuthorization =
-            _secureSession.IsSessionOpen &&
-            _secureSession.PinEnabled &&
-            !_secureSession.IsAuthorized &&
-            !IsPublicRawCommand(commandId);
-
-        if (commandRequiresAuthorization)
-        {
-            LogProtocolDebug($"TX block cmd={(byte)commandId}('{commandId}') sessionOpen={_secureSession.IsSessionOpen} pinEnabled={_secureSession.PinEnabled} auth={_secureSession.IsAuthorized}");
-            return;
-        }
-
         byte[] commandPayload = new byte[payloadLength + 3];
         commandPayload[0] = (byte)commandId;
         commandPayload[1] = (byte)(payloadLength & 0xFF);
         commandPayload[2] = (byte)((payloadLength >> 8) & 0xFF);
         Array.Copy(payload, 0, commandPayload, 3, payloadLength);
 
-        bool sendEncrypted = ShouldSendCommandOverSecureEnvelope(commandId);
-        byte[] data = sendEncrypted
-            ? EncryptSecureEnvelope(
-                commandPayload,
-                _secureSession.ClientToDeviceKey,
-                _secureSession.SessionId,
-                _secureSession.TxSequence++)
-            : commandPayload;
-
-        _serialPort.Write(data, 0, data.Length);
-        lastCommandSent = commandId;
+        SendCommandPayload(commandPayload);
     }
 
     private void SendCommandWithRawPayload(char commandId, byte[] payload)
     {
-        if (!_serialPort.IsOpen)
-        {
-            return;
-        }
-
-        bool commandRequiresAuthorization =
-            _secureSession.IsSessionOpen &&
-            _secureSession.PinEnabled &&
-            !_secureSession.IsAuthorized &&
-            !IsPublicRawCommand(commandId);
-
-        if (commandRequiresAuthorization)
-        {
-            LogProtocolDebug($"TX block cmd={(byte)commandId}('{commandId}') sessionOpen={_secureSession.IsSessionOpen} pinEnabled={_secureSession.PinEnabled} auth={_secureSession.IsAuthorized}");
-            return;
-        }
-
         byte[] commandPayload = new byte[payload.Length + 1];
         commandPayload[0] = (byte)commandId;
         Array.Copy(payload, 0, commandPayload, 1, payload.Length);
 
-        bool sendEncrypted = ShouldSendCommandOverSecureEnvelope(commandId);
-        byte[] data = sendEncrypted
-            ? EncryptSecureEnvelope(
-                commandPayload,
-                _secureSession.ClientToDeviceKey,
-                _secureSession.SessionId,
-                _secureSession.TxSequence++)
-            : commandPayload;
+        SendCommandPayload(commandPayload);
+    }
 
-        _serialPort.Write(data, 0, data.Length);
-        lastCommandSent = commandId;
+    private void SendCommandPayload(byte[] commandPayload)
+    {
+        lock (_configurationSaveLock)
+        {
+            if (!_serialPort.IsOpen)
+            {
+                return;
+            }
+
+            char commandId = (char)commandPayload[0];
+            bool commandRequiresAuthorization =
+                _secureSession.IsSessionOpen &&
+                _secureSession.PinEnabled &&
+                !_secureSession.IsAuthorized &&
+                !IsPublicRawCommand(commandId);
+
+            if (commandRequiresAuthorization)
+            {
+                LogProtocolDebug($"TX block cmd={(byte)commandId}('{commandId}') sessionOpen={_secureSession.IsSessionOpen} pinEnabled={_secureSession.PinEnabled} auth={_secureSession.IsAuthorized}");
+                return;
+            }
+
+            byte[] data = BuildCommandFrame(commandPayload);
+            _serialPort.Write(data, 0, data.Length);
+            lastCommandSent = commandId;
+        }
     }
 
     private static byte[] BuildStandaloneConfigPacket(byte configType, byte parameterIndex, byte dataIndex, byte[] payload)
@@ -6957,12 +6927,20 @@ public class SerialPortService : IDisposable
         _packetReady = false;
     }
 
+    private void ResetCellularTestReceiveState(bool discardSerialInput)
+    {
+        if (!_secureSession.IsSessionOpen)
+        {
+            ResetStandaloneReceiveState(discardSerialInput);
+        }
+    }
+
     public async Task<string?> RequestCellularTestAsync(CellularParameters? cellularSettings = null, int timeoutMs = 3000)
     {
         return await RunStandaloneRequestAsync(() => RequestCellularTestCoreAsync(cellularSettings, timeoutMs));
     }
 
-    public async Task<(bool WasRequested, string? Diagnostic)> TryPollCellularHealthAsync(CellularParameters? cellularSettings, int timeoutMs = 12000)
+    public async Task<(bool WasRequested, string? Diagnostic)> TryPollCellularHealthAsync(int timeoutMs = 12000)
     {
         if (!await _standaloneRequestLock.WaitAsync(0))
         {
@@ -6976,7 +6954,7 @@ public class SerialPortService : IDisposable
                 return (false, null);
             }
 
-            return (true, await RequestCellularTestCoreAsync(cellularSettings, timeoutMs));
+            return (true, await RequestCellularTestCoreAsync(null, timeoutMs));
         }
         finally
         {
@@ -6997,7 +6975,7 @@ public class SerialPortService : IDisposable
 
         try
         {
-            ResetStandaloneReceiveState(discardSerialInput: true);
+            ResetCellularTestReceiveState(discardSerialInput: true);
             _cellularTestTcs = tcs;
             SendCellularTestCommand(cellularSettings);
             Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
@@ -7015,7 +6993,7 @@ public class SerialPortService : IDisposable
                 _cellularTestTcs = null;
             }
 
-            ResetStandaloneReceiveState(discardSerialInput: false);
+            ResetCellularTestReceiveState(discardSerialInput: false);
 
             _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
             if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
@@ -7071,11 +7049,14 @@ public class SerialPortService : IDisposable
 
     private void SendOpenRemoteProvisioningCommand(CellularParameters cellularSettings, string provisioningRequestJson)
     {
-        byte[] data = BuildOpenRemoteProvisioningCommand(cellularSettings, provisioningRequestJson);
-        LoggingService.AddLog("Sending PDM registration request.",
-            details: $"transport={(ShouldSendCommandOverSecureEnvelope(Constants.COMMAND_ID_OPENREMOTE_PROVISION) ? "encrypted" : "legacy")}; pinEnabled={_secureSession.PinEnabled}; frameBytes={data.Length}");
-        _serialPort.Write(data, 0, data.Length);
-        lastCommandSent = Constants.COMMAND_ID_OPENREMOTE_PROVISION;
+        lock (_configurationSaveLock)
+        {
+            byte[] data = BuildOpenRemoteProvisioningCommand(cellularSettings, provisioningRequestJson);
+            LoggingService.AddLog("Sending PDM registration request.",
+                details: $"transport={(ShouldSendCommandOverSecureEnvelope(Constants.COMMAND_ID_OPENREMOTE_PROVISION) ? "encrypted" : "legacy")}; pinEnabled={_secureSession.PinEnabled}; frameBytes={data.Length}");
+            _serialPort.Write(data, 0, data.Length);
+            lastCommandSent = Constants.COMMAND_ID_OPENREMOTE_PROVISION;
+        }
     }
 
     private byte[] BuildOpenRemoteProvisioningCommand(CellularParameters cellularSettings, string provisioningRequestJson)
@@ -7125,14 +7106,17 @@ public class SerialPortService : IDisposable
 
     private void SendCellularTestCommand(CellularParameters? cellularSettings)
     {
-        if (!_serialPort.IsOpen)
+        lock (_configurationSaveLock)
         {
-            return;
-        }
+            if (!_serialPort.IsOpen)
+            {
+                return;
+            }
 
-        byte[] data = BuildCellularTestCommand(cellularSettings);
-        _serialPort.Write(data, 0, data.Length);
-        lastCommandSent = Constants.COMMAND_ID_CELLULAR_TEST;
+            byte[] data = BuildCellularTestCommand(cellularSettings);
+            _serialPort.Write(data, 0, data.Length);
+            lastCommandSent = Constants.COMMAND_ID_CELLULAR_TEST;
+        }
     }
 
     private byte[] BuildCellularTestCommand(CellularParameters? cellularSettings)
@@ -7756,18 +7740,26 @@ public class SerialPortService : IDisposable
             if (!cancelSent && (token.IsCancellationRequested || _bulkLogCancelRequested))
             {
                 byte[] command = [(byte)Constants.COMMAND_ID_LOG_CANCEL];
-                byte[] request = secure
-                    ? EncryptSecureEnvelope(command, _secureSession.ClientToDeviceKey,
-                        _secureSession.SessionId, _secureSession.TxSequence++)
-                    : command;
+                byte[] request;
+                lock (_configurationSaveLock)
+                {
+                    request = secure
+                        ? EncryptSecureEnvelope(command, _secureSession.ClientToDeviceKey,
+                            _secureSession.SessionId, _secureSession.TxSequence++)
+                        : command;
+                }
                 await stream.WriteAsync(request, 0, request.Length, readToken);
                 cancelSent = true;
             }
             if (secure && !cancelSent && !downloadDone && !keepalivePending && Environment.TickCount64 - lastKeepalive >= 1000)
             {
-                byte[] request = EncryptSecureEnvelope(
-                    BuildSecureEncryptedControlRequest(SecureControlOperation.Status, Array.Empty<byte>()),
-                    _secureSession.ClientToDeviceKey, _secureSession.SessionId, _secureSession.TxSequence++);
+                byte[] request;
+                lock (_configurationSaveLock)
+                {
+                    request = EncryptSecureEnvelope(
+                        BuildSecureEncryptedControlRequest(SecureControlOperation.Status, Array.Empty<byte>()),
+                        _secureSession.ClientToDeviceKey, _secureSession.SessionId, _secureSession.TxSequence++);
+                }
                 await stream.WriteAsync(request, 0, request.Length, readToken);
                 lastKeepalive = Environment.TickCount64;
                 keepalivePending = true;

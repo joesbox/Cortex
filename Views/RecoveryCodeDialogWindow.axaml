@@ -15,8 +15,7 @@
 	  <TextBlock x:Name="StatusText" Foreground="Orange" TextWrapping="Wrap" />
 	</Border>
 	<StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10">
-	  <Button x:Name="CloseButton" Content="CLOSE" MinWidth="96" />
-	  <Button x:Name="DoneButton" Content="DONE" MinWidth="96" />
+	  <Button x:Name="DoneButton" Content="DONE" MinWidth="96" IsEnabled="{Binding #AcknowledgeCheckBox.IsChecked}" />
 	</StackPanel>
   </Grid>
 </Window>

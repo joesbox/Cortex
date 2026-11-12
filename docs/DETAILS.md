@@ -147,8 +147,12 @@ Parser dispatch is serialized across normal reception and log recovery.
 Failed connection attempts dispose the serial service and its parser task.
 
 Background cellular health checks skip busy transports rather than queueing
-behind another request. Configuration-save, firmware-update and log-transfer
+behind another request. They request status without sending cellular settings,
+so monitoring does not save configuration or reset the modem connection test.
+Secure-stream status checks leave buffered frames intact. Configuration-save, firmware-update and log-transfer
 startup wait for an outstanding standalone request before suspending polling.
+Secure-stream input is read in batches so large encrypted CAN snapshots do not
+stall live telemetry while bytes are processed one at a time.
 Configuration saves fail after a missing acknowledgement instead of blindly
 retrying a potentially applied write; a late final ACK cannot turn that failure
 into success. Read back the controller before retrying a timed-out save.
@@ -356,6 +360,11 @@ bounds using measured dimensions when available and conservative size estimates
 before rendering. CAN TX placement reserves room for periodic controls. When
 the current viewport has no free space, placement extends the canvas below the
 existing nodes instead of stacking new nodes at an occupied position.
+
+The DBC Import tab's Signal name field filters the signal list as you type,
+using a case-insensitive substring match on signal names. Clear the field to
+show all signals. Hidden signals are removed from the import selection. The
+filter also applies when loading another DBC file.
 
 Incremental DBC imports match stored frames by message name, CAN ID and
 standard/extended ID type. Additional signals use that frame only when their

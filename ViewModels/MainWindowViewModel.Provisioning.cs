@@ -120,17 +120,17 @@ namespace Cortex.ViewModels
             OnPropertyChanged(nameof(CanRenamePdm));
             OnPropertyChanged(nameof(CanUnregisterPdm));
 
-            if (value && IsConnected && CommsEstablished)
+            if (value && IsConnected && CommsEstablished && IsInitialSnapshotLoaded)
             {
                 _suppressCellularNeedsAttentionUntilUtc = DateTime.UtcNow.AddMilliseconds(CellularHealthRegistrationWarmupMs);
-                SetCellularConnectionHealthStatus("Checking", shouldLog: true);
+                SetCellularConnectionHealthStatus("Checking");
                 ScheduleCellularHealthPoll(immediate: true);
                 StartBackgroundTask(PollCellularHealthStatusAsync(), "Cellular health poll");
             }
             else
             {
                 _suppressCellularNeedsAttentionUntilUtc = DateTime.MinValue;
-                SetCellularConnectionHealthStatus("Offline", shouldLog: true);
+                SetCellularConnectionHealthStatus("Offline");
                 _nextCellularHealthPollUtc = DateTime.MinValue;
             }
         }
@@ -331,8 +331,10 @@ namespace Cortex.ViewModels
                 ProvisioningCredentials credentials = await _provisioningApiClient.GetCredentialsAsync(jobId);
                 ApplyProvisioningCredentials(credentials);
 
-                _ = SendConfig();
-                await WaitForConfigSaveAsync();
+                if (!await SendConfigAndWaitForCompletionAsync())
+                {
+                    throw new InvalidOperationException("The controller did not confirm that its settings were saved.");
+                }
 
                 registeredName = completed.AssetName ?? pdmName;
                 registered = true;
@@ -351,7 +353,7 @@ namespace Cortex.ViewModels
 
             if (registered)
             {
-                SetCellularConnectionHealthStatus("Checking", shouldLog: true);
+                SetCellularConnectionHealthStatus("Checking");
             }
         }
 
@@ -375,8 +377,10 @@ namespace Cortex.ViewModels
                 ConnectedPdmStatusMessage = $"Registered as \"{status.AssetName}\".";
                 SetProvisioningStatus($"PDM renamed to \"{status.AssetName}\".");
 
-                _ = SendConfig();
-                await WaitForConfigSaveAsync();
+                if (!await SendConfigAndWaitForCompletionAsync())
+                {
+                    throw new InvalidOperationException("The controller did not confirm that its settings were saved.");
+                }
             }
             catch (Exception ex)
             {
@@ -418,8 +422,10 @@ namespace Cortex.ViewModels
                 ProvisioningUnregisterResult result = await _provisioningApiClient.UnregisterDeviceAsync(clientId);
 
                 ClearOpenRemoteCredentialsOnPdm();
-                _ = SendConfig();
-                await WaitForConfigSaveAsync();
+                if (!await SendConfigAndWaitForCompletionAsync())
+                {
+                    throw new InvalidOperationException("The controller did not confirm that its settings were saved.");
+                }
 
                 IsConnectedPdmRegistered = false;
                 PdmNameInput = string.Empty;
@@ -558,14 +564,6 @@ namespace Cortex.ViewModels
             finally
             {
                 _suppressDirtyTracking = wasSuppressing;
-            }
-        }
-
-        private async Task WaitForConfigSaveAsync()
-        {
-            for (int attempt = 0; attempt < 60 && IsSendingConfig; attempt++)
-            {
-                await Task.Delay(500);
             }
         }
 

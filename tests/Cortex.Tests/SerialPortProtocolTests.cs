@@ -2,6 +2,7 @@ using Cortex.Models;
 using Cortex.Services;
 using System;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using Cortex.ViewModels.IoFlow;
@@ -14,6 +15,133 @@ namespace Cortex.Tests;
 
 public class SerialPortProtocolTests
 {
+    [Fact]
+    public async Task SecureFrameReaderYieldsAndReadsFragmentedControlFrameWithoutUiContext()
+    {
+        var input = new ConcurrentQueue<byte>();
+        byte operation = (byte)SecureControlOperation.Info;
+        byte[] frame = [(byte)Constants.SECURE_CONTROL_FRAME_PREFIX, operation, 0, 3, 0, 10, 11, 12];
+        var context = new DroppingSynchronizationContext();
+        SynchronizationContext? previous = SynchronizationContext.Current;
+        Task<byte[]?> readTask;
+        try
+        {
+            SynchronizationContext.SetSynchronizationContext(context);
+            readTask = StartSecureFrameRead(input, 1000, false, operation);
+            Assert.False(readTask.IsCompleted);
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previous);
+        }
+
+        foreach (byte value in frame.Take(3))
+        {
+            input.Enqueue(value);
+        }
+        await Task.Delay(20);
+        Assert.False(readTask.IsCompleted);
+        foreach (byte value in frame.Skip(3))
+        {
+            input.Enqueue(value);
+        }
+
+        Assert.Equal(frame, await readTask.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(0, context.PostCount);
+    }
+
+    [Fact]
+    public async Task SecureFrameReaderReturnsNullForIncompleteFrameAtDeadline()
+    {
+        var input = new ConcurrentQueue<byte>([(byte)Constants.SECURE_CONTROL_FRAME_PREFIX, (byte)SecureControlOperation.Info]);
+        Task<byte[]?> readTask = StartSecureFrameRead(input, 50, false, (byte)SecureControlOperation.Info);
+
+        Assert.Null(await readTask.WaitAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task SecureFrameReaderReadsFragmentedEncryptedEnvelope()
+    {
+        byte[] frame = [(byte)Constants.SECURE_ENVELOPE_FRAME_PREFIX, 5, 0, 1, 0, 0, 0,
+            .. Enumerable.Range(0, 5 + Constants.SECURE_TAG_LENGTH).Select(i => (byte)i)];
+        var input = new ConcurrentQueue<byte>(frame.Take(4));
+        Task<byte[]?> readTask = StartSecureFrameRead(input, 1000, true, (byte)SecureControlOperation.Status);
+        Assert.False(readTask.IsCompleted);
+
+        foreach (byte value in frame.Skip(4))
+        {
+            input.Enqueue(value);
+        }
+
+        Assert.Equal(frame, await readTask.WaitAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task InitCommsWaitsForReceiveOwnershipTransition()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        object receiveLock = GetField<object>(service, "_serialReceiveLock");
+        var acquired = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        Task holder = Task.Factory.StartNew(() =>
+        {
+            lock (receiveLock)
+            {
+                acquired.SetResult(true);
+                release.Wait();
+            }
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        try
+        {
+            await acquired.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Task<bool> retry = Task.Factory.StartNew(() =>
+            {
+                entered.SetResult(true);
+                return service.InitComms();
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await Task.Delay(100);
+            Assert.False(retry.IsCompleted);
+            release.Set();
+            Assert.False(await retry.WaitAsync(TimeSpan.FromSeconds(2)));
+        }
+        finally
+        {
+            release.Set();
+            await holder.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+    }
+
+    private static Task<byte[]?> StartSecureFrameRead(
+        ConcurrentQueue<byte> input, int timeoutMs, bool allowEnvelope, byte operation)
+    {
+        MethodInfo method = typeof(SerialPortService).GetMethod("ReadSecureFrameAsync", BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("Unable to find ReadSecureFrameAsync.");
+        Func<bool> isOpen = () => true;
+        Func<int> bytesToRead = () => input.Count;
+        Func<int> readByte = () => input.TryDequeue(out byte value) ? value : -1;
+        Func<byte[], int, int, int> read = (buffer, offset, count) =>
+        {
+            int readCount = 0;
+            while (readCount < count && input.TryDequeue(out byte value))
+            {
+                buffer[offset + readCount++] = value;
+            }
+            return readCount;
+        };
+        return (Task<byte[]?>)(method.Invoke(null, [isOpen, bytesToRead, readByte, read, timeoutMs, allowEnvelope, operation])
+            ?? throw new InvalidOperationException("ReadSecureFrameAsync returned null."));
+    }
+
+    private sealed class DroppingSynchronizationContext : SynchronizationContext
+    {
+        public int PostCount;
+
+        public override void Post(SendOrPostCallback d, object? state) => Interlocked.Increment(ref PostCount);
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
@@ -409,6 +537,66 @@ public class SerialPortProtocolTests
             .GetMethod("TryReadNextSecureIncomingPayload", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(service, args)!);
         Assert.Equal(plaintext, (byte[])args[0]);
         Assert.Equal(5u, GetProperty<uint>(session, "RxSequence"));
+    }
+
+    [Fact]
+    public void SecureIncomingBatchPreservesFrameOrderAndFragmentedTail()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        object session = GetField<object>(service, "_secureSession");
+        SetProperty(session, "IsSessionOpen", true);
+        SetProperty(session, "IsAuthorized", true);
+        byte[] key = GetProperty<byte[]>(session, "DeviceToClientKey");
+        byte[] sessionId = GetProperty<byte[]>(session, "SessionId");
+        MethodInfo encrypt = typeof(SerialPortService).GetMethod("EncryptSecureEnvelope", BindingFlags.NonPublic | BindingFlags.Static)!;
+        MethodInfo read = typeof(SerialPortService).GetMethod("TryReadNextSecureIncomingPayload", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        byte[] firstPayload = [10, 11, 12];
+        byte[] secondPayload = [20, 21, 22, 23];
+        byte[] first = (byte[])encrypt.Invoke(null, [firstPayload, key, sessionId, 0u])!;
+        byte[] second = (byte[])encrypt.Invoke(null, [secondPayload, key, sessionId, 1u])!;
+        List<byte> incoming = GetField<List<byte>>(service, "_secureIncomingBuffer");
+        incoming.AddRange(first);
+        incoming.AddRange(second[..10]);
+        object[] args = [Array.Empty<byte>()];
+
+        Assert.True((bool)read.Invoke(service, args)!);
+        Assert.Equal(firstPayload, (byte[])args[0]);
+        Assert.False((bool)read.Invoke(service, args)!);
+        incoming.AddRange(second[10..]);
+        Assert.True((bool)read.Invoke(service, args)!);
+        Assert.Equal(secondPayload, (byte[])args[0]);
+        Assert.Empty(incoming);
+        Assert.Equal(2u, GetProperty<uint>(session, "RxSequence"));
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void PlaintextAckIsDiscardedDuringSecureRequest(bool configurationSaveActive, bool standaloneAckPending)
+    {
+        using var service = new SerialPortService("COM1");
+        object session = GetField<object>(service, "_secureSession");
+        SetProperty(session, "IsSessionOpen", true);
+        SetProperty(session, "IsAuthorized", true);
+        SetField(service, "_configurationSaveActive", configurationSaveActive);
+        if (standaloneAckPending)
+        {
+            SetField(service, "_standaloneCommandAckTcs",
+                new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously));
+        }
+
+        List<byte> incoming = GetField<List<byte>>(service, "_secureIncomingBuffer");
+        incoming.Add((byte)Constants.COMMAND_ID_CONFIM);
+        object[] args = { Array.Empty<byte>() };
+        bool packetAvailable = (bool)typeof(SerialPortService)
+            .GetMethod("TryReadNextSecureIncomingPayload", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .Invoke(service, args)!;
+
+        Assert.True(packetAvailable);
+        Assert.Empty((byte[])args[0]);
+        Assert.Empty(incoming);
+        Assert.Equal(0u, GetProperty<uint>(session, "RxSequence"));
     }
 
     private static void SetProperty(object instance, string name, object value)
@@ -1088,7 +1276,7 @@ public class SerialPortProtocolTests
         await gate.WaitAsync();
         try
         {
-            var task = service.TryPollCellularHealthAsync(null);
+            var task = service.TryPollCellularHealthAsync();
             Assert.True(task.IsCompletedSuccessfully);
             Assert.Equal((false, (string?)null), await task);
             Assert.Equal(0, gate.CurrentCount);
@@ -1248,6 +1436,35 @@ public class SerialPortProtocolTests
         Assert.False(service.UpdateStaticData);
         InvokeInstanceMethod(service, "MarkControllerSessionLost", true);
         Assert.False(service.HasLoadedCustomCanSnapshot);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void CellularStatusPreservesBufferedSecureFrames(bool discardBeforeSend)
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        object session = GetField<object>(service, "_secureSession");
+        SetProperty(session, "IsSessionOpen", true);
+        var buffered = GetField<List<byte>>(service, "receivedDataBuffer");
+        var encrypted = GetField<List<byte>>(service, "_secureIncomingBuffer");
+        byte[] partialFrame = [Constants.SERIAL_HEADER1, Constants.SERIAL_HEADER2, 1, 2, 3];
+        byte[] partialEnvelope = [(byte)Constants.SECURE_ENVELOPE_FRAME_PREFIX, 3];
+        buffered.AddRange(partialFrame);
+        encrypted.AddRange(partialEnvelope);
+
+        InvokeInstanceMethod(service, "ResetCellularTestReceiveState", discardBeforeSend);
+
+        Assert.Equal(partialFrame, buffered);
+        Assert.Equal(partialEnvelope, encrypted);
+    }
+
+    [Fact]
+    public void BackgroundCellularPollCannotAcceptSettingsPayload()
+    {
+        var method = typeof(SerialPortService).GetMethod(nameof(SerialPortService.TryPollCellularHealthAsync))!;
+        Assert.DoesNotContain(method.GetParameters(), parameter => parameter.ParameterType == typeof(CellularParameters));
     }
 
     [Fact]

@@ -62,12 +62,78 @@ public sealed class AnalogueVoltageTests
         input.ChanType = AnalogueInput.AnalogueChannelType.Digital;
         input.PullDownEnable = true;
         Assert.Equal("Digital active high", node.ModeText);
-
         changed.Clear();
         input.PullUpEnable = true;
         Assert.False(input.PullDownEnable);
         Assert.Equal("Digital active low", node.ModeText);
         Assert.Contains(nameof(AnalogueInputNodeViewModel.ModeText), changed);
+    }
+
+    [Fact]
+    public async Task ProvisioningSaveReportsClosedControllerAndClearsSaveState()
+    {
+        using var viewModel = new MainWindowViewModel(new TestAppCloser());
+        foreach (var timerName in new[] { "_uiUpdateTimer", "_pollTimer", "_commsTimer" })
+        {
+            if (typeof(MainWindowViewModel).GetField(timerName, BindingFlags.Instance | BindingFlags.NonPublic)
+                ?.GetValue(viewModel) is System.Timers.Timer timer)
+            {
+                timer.Stop();
+            }
+        }
+
+        using var service = new SerialPortService("COM1");
+        typeof(MainWindowViewModel).GetField("_portService", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(viewModel, service);
+        object baseline = typeof(MainWindowViewModel)
+            .GetMethod("DeepCopyDataStructures", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(viewModel, [viewModel.SettingsDataView])!;
+        typeof(MainWindowViewModel).GetField("_controllerConfigBaseline", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(viewModel, baseline);
+
+        viewModel.SettingsDataView.ChannelsStaticData[0].InrushDelay = 0.5f;
+        viewModel.IsConnected = true;
+
+        var save = (Task<bool>)typeof(MainWindowViewModel)
+            .GetMethod("SendConfigAndWaitForCompletionAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(viewModel, null)!;
+
+        Assert.False(await save.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.False(viewModel.IsSendingConfig);
+        Assert.Null(typeof(MainWindowViewModel).GetField("_configurationBeingSaved", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(viewModel));
+        Assert.Null(typeof(MainWindowViewModel).GetField("_configSaveCompletionTcs", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(viewModel));
+    }
+
+    [Fact]
+    public async Task DisablePinReportsWhenSecureSessionHasBeenLost()
+    {
+        using var viewModel = new MainWindowViewModel(new TestAppCloser());
+        foreach (var timerName in new[] { "_uiUpdateTimer", "_pollTimer", "_commsTimer" })
+        {
+            if (typeof(MainWindowViewModel).GetField(timerName, BindingFlags.Instance | BindingFlags.NonPublic)
+                ?.GetValue(viewModel) is System.Timers.Timer timer)
+            {
+                timer.Stop();
+            }
+        }
+
+        using var service = new SerialPortService("COM1");
+        typeof(MainWindowViewModel).GetField("_portService", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(viewModel, service);
+        typeof(MainWindowViewModel).GetField("isConnected", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(viewModel, true);
+        typeof(MainWindowViewModel).GetField("commsEstablished", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(viewModel, true);
+        viewModel.IsPinLockSupported = true;
+        viewModel.IsPinLockEnabled = true;
+
+        await viewModel.DisablePinLockCommand.ExecuteAsync(null);
+
+        Assert.Contains("secure session is not unlocked", viewModel.PinLockStatusMessage);
+        Assert.True(viewModel.IsPinLockEnabled);
+        Assert.False(viewModel.IsPinLockBusy);
     }
 
     [Theory]

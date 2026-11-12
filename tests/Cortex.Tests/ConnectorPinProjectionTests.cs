@@ -214,12 +214,12 @@ public class ConnectorPinProjectionTests
 
             string[] legendTexts = viewModel.ConnectorLegendItems.Select(item => item.Text).ToArray();
 
-            Assert.Contains("RULE BASED output", legendTexts);
+            Assert.Contains("Rule-based output", legendTexts);
             Assert.Contains("PWM output", legendTexts);
             Assert.DoesNotContain("Digital output", legendTexts);
             Assert.Equal(1, legendTexts.Count(text => text == "PWM output"));
 
-            ConnectorLegendItem mathLegend = viewModel.ConnectorLegendItems.Single(item => item.Text == "RULE BASED output");
+            ConnectorLegendItem mathLegend = viewModel.ConnectorLegendItems.Single(item => item.Text == "Rule-based output");
             ConnectorLegendItem pwmLegend = viewModel.ConnectorLegendItems.Single(item => item.Text == "PWM output");
             SolidColorBrush mathBrush = Assert.IsType<SolidColorBrush>(mathLegend.Background);
             SolidColorBrush pwmBrush = Assert.IsType<SolidColorBrush>(pwmLegend.Background);

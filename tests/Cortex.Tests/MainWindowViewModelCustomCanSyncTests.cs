@@ -11,6 +11,73 @@ namespace Cortex.Tests;
 
 public class MainWindowViewModelCustomCanSyncTests
 {
+    [Theory]
+    [InlineData("temperature", 1)]
+    [InlineData("PER", 1)]
+    [InlineData(" Temperature ", 1)]
+    [InlineData("speed", 1)]
+    [InlineData("engine", 0)]
+    [InlineData("missing", 0)]
+    [InlineData("", 3)]
+    [InlineData("   ", 3)]
+    public void DbcSignalNameFilter_MatchesOnlySignalNamesAndRestoresAllSignals(string filter, int expectedCount)
+    {
+        MainWindowViewModel viewModel = CreateViewModel();
+        try
+        {
+            DbcCanSignalDefinition rpm = new() { MessageName = "Engine_Status", Name = "RPM" };
+            DbcCanSignalDefinition temperature = new() { MessageName = "Engine_Status", Name = "Temperature" };
+            DbcCanSignalDefinition speed = new() { MessageName = "Vehicle_Status", Name = "Speed" };
+            viewModel.ImportedDbcSignals.Add(rpm);
+            viewModel.ImportedDbcSignals.Add(temperature);
+            viewModel.ImportedDbcSignals.Add(speed);
+            viewModel.DbcSignalNameFilter = "initial";
+
+            viewModel.DbcSignalNameFilter = filter;
+
+            Assert.Equal(expectedCount, viewModel.FilteredImportedDbcSignals.Count);
+            Assert.Equal(3, viewModel.ImportedDbcSignals.Count);
+            viewModel.DbcSignalNameFilter = string.Empty;
+            Assert.Equal(new[] { rpm, temperature, speed }, viewModel.FilteredImportedDbcSignals);
+        }
+        finally
+        {
+            StopUiUpdateTimer(viewModel);
+        }
+    }
+
+    [Fact]
+    public void DbcSignalNameFilter_RemovesHiddenSelectionsButKeepsMatchingSelections()
+    {
+        MainWindowViewModel viewModel = CreateViewModel();
+        try
+        {
+            DbcCanSignalDefinition engine = new() { MessageName = "Engine", Name = "RPM" };
+            DbcCanSignalDefinition vehicle = new() { MessageName = "Vehicle", Name = "Speed" };
+            viewModel.ImportedDbcSignals.Add(engine);
+            viewModel.ImportedDbcSignals.Add(vehicle);
+            viewModel.SetSelectedImportedDbcSignals([engine, vehicle], vehicle);
+
+            viewModel.DbcSignalNameFilter = "rpm";
+
+            Assert.Equal(new[] { engine }, viewModel.FilteredImportedDbcSignals);
+            Assert.Equal(new[] { engine }, viewModel.SelectedImportedDbcSignals);
+            Assert.Null(viewModel.SelectedImportedDbcSignal);
+
+            viewModel.SelectedImportedDbcSignal = engine;
+            viewModel.DbcSignalNameFilter = "RPM";
+            Assert.Same(engine, viewModel.SelectedImportedDbcSignal);
+
+            viewModel.DbcSignalNameFilter = "missing";
+            Assert.Empty(viewModel.SelectedImportedDbcSignals);
+            Assert.Null(viewModel.SelectedImportedDbcSignal);
+        }
+        finally
+        {
+            StopUiUpdateTimer(viewModel);
+        }
+    }
+
     [Fact]
     public void UpdateLiveDataInPlace_CopiesCustomCanDataIntoLiveAndSettingsViews()
     {

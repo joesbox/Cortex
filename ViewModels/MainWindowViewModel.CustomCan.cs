@@ -102,6 +102,44 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
 
     public ObservableCollection<DbcCanSignalDefinition> ImportedDbcSignals { get; } = [];
 
+    public ObservableCollection<DbcCanSignalDefinition> FilteredImportedDbcSignals { get; } = [];
+
+    private string _dbcSignalNameFilter = string.Empty;
+    public string DbcSignalNameFilter
+    {
+        get => _dbcSignalNameFilter;
+        set
+        {
+            if (SetProperty(ref _dbcSignalNameFilter, value))
+            {
+                RefreshImportedDbcSignalsView();
+            }
+        }
+    }
+
+    private void RefreshImportedDbcSignalsView()
+    {
+        string filter = DbcSignalNameFilter.Trim();
+        List<DbcCanSignalDefinition> visibleSignals = ImportedDbcSignals
+            .Where(signal => signal.Name.Contains(filter, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        for (int i = SelectedImportedDbcSignals.Count - 1; i >= 0; i--)
+        {
+            if (!visibleSignals.Contains(SelectedImportedDbcSignals[i]))
+            {
+                SelectedImportedDbcSignals.RemoveAt(i);
+            }
+        }
+
+        if (SelectedImportedDbcSignal != null && !visibleSignals.Contains(SelectedImportedDbcSignal))
+        {
+            SelectedImportedDbcSignal = null;
+        }
+
+        SyncObservableCollection(FilteredImportedDbcSignals, visibleSignals);
+    }
+
     public ObservableCollection<CustomCanSignal> ControllerCustomCanSignals { get; } = new();
 
     /// <summary>Stored messages (CAN frames) shown in the master table; one row per enabled message slot.</summary>
@@ -1611,7 +1649,8 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             }
 
             SelectedImportedDbcSignals.Clear();
-            SelectedImportedDbcSignal = ImportedDbcSignals.FirstOrDefault();
+            RefreshImportedDbcSignalsView();
+            SelectedImportedDbcSignal = FilteredImportedDbcSignals.FirstOrDefault();
             if (SelectedImportedDbcSignal != null)
             {
                 SelectedImportedDbcSignals.Add(SelectedImportedDbcSignal);

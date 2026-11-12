@@ -52,8 +52,12 @@
 				<TabControl>
 					<TabItem Header="DBC Import">
 						<Grid Margin="0,8,0,0" RowDefinitions="Auto,*,Auto" RowSpacing="8">
-							<Button Grid.Row="0" HorizontalAlignment="Left" Padding="12,6" Content="Import DBC File" Command="{Binding ImportDbcFileCommand}" />
-							<DataGrid x:Name="ImportedDbcSignalsGrid" Grid.Row="1" AutoGenerateColumns="False" CanUserReorderColumns="False" CanUserResizeColumns="True" CanUserSortColumns="True" GridLinesVisibility="All" Focusable="False" IsReadOnly="True" SelectionMode="Extended" SelectionChanged="ImportedDbcSignalsGrid_SelectionChanged" ItemsSource="{Binding ImportedDbcSignals}" SelectedItem="{Binding SelectedImportedDbcSignal}">
+							<Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,*" ColumnSpacing="12">
+								<Button Grid.Column="0" Padding="12,6" Content="Import DBC File" Command="{Binding ImportDbcFileCommand}" />
+								<TextBlock Grid.Column="1" VerticalAlignment="Center" Text="Signal name" />
+								<TextBox x:Name="DbcSignalNameFilterBox" Grid.Column="2" Text="{Binding DbcSignalNameFilter, Mode=TwoWay}" Watermark="Filter signal names..." ToolTip.Tip="Show signals whose names contain this text (case-insensitive). Clear to show all signals." />
+							</Grid>
+							<DataGrid x:Name="ImportedDbcSignalsGrid" Grid.Row="1" AutoGenerateColumns="False" CanUserReorderColumns="False" CanUserResizeColumns="True" CanUserSortColumns="True" GridLinesVisibility="All" Focusable="False" IsReadOnly="True" SelectionMode="Extended" SelectionChanged="ImportedDbcSignalsGrid_SelectionChanged" ItemsSource="{Binding FilteredImportedDbcSignals}" SelectedItem="{Binding SelectedImportedDbcSignal}">
 								<DataGrid.Columns>
 									<DataGridTextColumn Header="Message" Binding="{Binding MessageName}" Width="Auto" MinWidth="120" />
 									<DataGridTextColumn Header="Message ID" Binding="{Binding MessageIdHex}" Width="*" />
