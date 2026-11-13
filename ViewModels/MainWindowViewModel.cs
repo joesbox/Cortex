@@ -578,6 +578,7 @@ namespace Cortex.ViewModels
         private readonly System.Timers.Timer _commsTimer = new(200); // Every 200 millis
 
         private readonly IAppCloser _appCloser;
+        private readonly ConfigurationBackupStore _configurationBackupStore;
         private bool _isDisposed;
         private bool _isSecureUnlockWorkflowActive;
         private bool _isSecureKeepaliveInProgress;
@@ -610,6 +611,8 @@ namespace Cortex.ViewModels
         public bool HasLiveChartSelection => _lastHoveredLiveChartPoints.Count > 0 || _hasLiveHoverAnchor;
 
         public bool CanSendConfig => HasPendingConfigChanges && !IsSendingConfig;
+
+        public bool CanRestoreConfigurationBackup => IsControllerUiReady && !IsSendingConfig;
 
         public string LiveChartPauseButtonText => IsLiveChartPaused ? "RESUME" : "PAUSE";
 
@@ -1144,6 +1147,7 @@ namespace Cortex.ViewModels
         private DataStructures? _controllerConfigBaseline;
         private DataStructures? _configurationBeingSaved;
         private IoFlowGraphSnapshot? _ioFlowSnapshotBeingSaved;
+        private bool _configurationBackupCreatedForSession;
         private TaskCompletionSource<bool>? _configSaveCompletionTcs;
         private DateTime _nextCellularHealthPollUtc = DateTime.MinValue;
         private DateTime _suppressCellularNeedsAttentionUntilUtc = DateTime.MinValue;
@@ -1208,6 +1212,7 @@ namespace Cortex.ViewModels
         partial void OnIsSendingConfigChanged(bool value)
         {
             OnPropertyChanged(nameof(CanSendConfig));
+            OnPropertyChanged(nameof(CanRestoreConfigurationBackup));
             OnPropertyChanged(nameof(CanTestCellularConnection));
             OnPropertyChanged(nameof(CanProvisionOpenRemote));
             OnPropertyChanged(nameof(HasControllerSaveStatus));
@@ -2607,6 +2612,7 @@ namespace Cortex.ViewModels
             _provisioningApiClient = dependencies.ProvisioningApiClient;
             _provisioningSessionStore = dependencies.ProvisioningSessionStore;
             _ioFlowGraphStore = dependencies.IoFlowGraphStore;
+            _configurationBackupStore = dependencies.ConfigurationBackupStore;
             ExitCommand = new RelayCommand(OnExit);
 
             SystemDateTime = string.Empty;
@@ -3023,7 +3029,9 @@ namespace Cortex.ViewModels
             data.CellularParamsStaticData.PropertyChanged -= SettingsModelItem_PropertyChanged;
         }
 
-        private void ReplaceSettingsData(DataStructures newData)
+        private void ReplaceSettingsData(DataStructures newData) => ReplaceSettingsDataCore(newData, importedMetadataWins: false);
+
+        private void ReplaceSettingsDataCore(DataStructures newData, bool importedMetadataWins)
         {
             List<CustomCanSignalMetadata> currentCustomCanMetadata = SettingsDataView.CustomCanSignalsMetadata?
                 .Select(metadata => metadata.Clone())
@@ -3036,7 +3044,9 @@ namespace Cortex.ViewModels
             // replacement (reconnect, discard, reload) drop entries. Current entries win on conflict.
             List<CustomCanSignalMetadata> incomingCustomCanMetadata = newData.CustomCanSignalsMetadata?.ToList() ?? [];
             newData.CustomCanSignalsMetadata ??= [];
-            ReplaceCustomCanSignalMetadata(incomingCustomCanMetadata.Concat(currentCustomCanMetadata));
+            ReplaceCustomCanSignalMetadata(importedMetadataWins
+                ? currentCustomCanMetadata.Concat(incomingCustomCanMetadata)
+                : incomingCustomCanMetadata.Concat(currentCustomCanMetadata));
 
             AttachSettingsTracking(SettingsDataView);
             RefreshIoFlowGraphFromSettings();
@@ -3126,15 +3136,7 @@ namespace Cortex.ViewModels
 
         private void RecalculatePendingConfigChanges()
         {
-            if (_controllerConfigBaseline == null)
-            {
-                HasPendingConfigChanges = false;
-                return;
-            }
-
-            string current = ConfigFileSerializer.SerializeSettings(SettingsDataView, includeCustomCanMetadata: false);
-            string baseline = ConfigFileSerializer.SerializeSettings(_controllerConfigBaseline, includeCustomCanMetadata: false);
-            HasPendingConfigChanges = !string.Equals(current, baseline, StringComparison.Ordinal) || HasPendingCustomCanChanges();
+            HasPendingConfigChanges = DoesCurrentSettingsDifferFromControllerBaseline();
         }
 
         private void SettingsDataView_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
@@ -3537,10 +3539,13 @@ namespace Cortex.ViewModels
         }
 
         private bool TryValidateMathConfiguration(out string validationError)
+            => TryValidateMathConfigurationForSettings(SettingsDataView, out validationError);
+
+        private bool TryValidateMathConfigurationForSettings(DataStructures settings, out string validationError)
         {
-            for (int channelIndex = 0; channelIndex < SettingsDataView.ChannelsStaticData.Count; channelIndex++)
+            for (int channelIndex = 0; channelIndex < settings.ChannelsStaticData.Count; channelIndex++)
             {
-                OutputChannel channel = SettingsDataView.ChannelsStaticData[channelIndex];
+                OutputChannel channel = settings.ChannelsStaticData[channelIndex];
                 if (!channel.IsMathChannel)
                 {
                     continue;
@@ -3550,7 +3555,7 @@ namespace Cortex.ViewModels
 
                 if (channel.IsMathFollower)
                 {
-                    OutputChannel? owner = SettingsDataView.ChannelsStaticData.ElementAtOrDefault(channel.MathFollowChannel);
+                    OutputChannel? owner = settings.ChannelsStaticData.ElementAtOrDefault(channel.MathFollowChannel);
                     if (channel.MathFollowChannel == channelIndex || owner == null || !owner.IsMathChannel || owner.IsMathFollower)
                     {
                         validationError = $"Channel {channelIndex + 1}: Shared logic must come from another output that has its own logic rules.";
@@ -3615,12 +3620,12 @@ namespace Cortex.ViewModels
                         }
                     }
 
-                    if (!TryValidateMathOperand(channelIndex, ruleIndex, "A", rule.OperandAType, rule.OperandAIndex, rule.OperandAConstant, activeRuleCount, out validationError))
+                    if (!TryValidateMathOperand(settings, channelIndex, ruleIndex, "A", rule.OperandAType, rule.OperandAIndex, rule.OperandAConstant, activeRuleCount, out validationError))
                     {
                         return false;
                     }
 
-                    if (!unary && !TryValidateMathOperand(channelIndex, ruleIndex, "B", rule.OperandBType, rule.OperandBIndex, rule.OperandBConstant, activeRuleCount, out validationError))
+                    if (!unary && !TryValidateMathOperand(settings, channelIndex, ruleIndex, "B", rule.OperandBType, rule.OperandBIndex, rule.OperandBConstant, activeRuleCount, out validationError))
                     {
                         return false;
                     }
@@ -3638,6 +3643,7 @@ namespace Cortex.ViewModels
         }
 
         private bool TryValidateMathOperand(
+            DataStructures settings,
             int channelIndex,
             int ruleIndex,
             string operandName,
@@ -3696,8 +3702,8 @@ namespace Cortex.ViewModels
                         validationError = $"Channel {channelIndex + 1}, rule {ruleIndex}: Operand {operandName} CAN-signal index must be 0..{Constants.MAX_CUSTOM_CAN_SIGNALS - 1}.";
                         return false;
                     }
-                    CustomCanSignal? signal = SettingsDataView.CustomCanSignalsStaticData.ElementAtOrDefault(operandIndex);
-                    if (signal?.IsEnabled != true || SettingsDataView.CustomCanMessagesStaticData
+                    CustomCanSignal? signal = settings.CustomCanSignalsStaticData.ElementAtOrDefault(operandIndex);
+                    if (signal?.IsEnabled != true || settings.CustomCanMessagesStaticData
                         .ElementAtOrDefault(signal.MessageIndex) is not { IsTx: false })
                     {
                         validationError = $"Channel {channelIndex + 1}, rule {ruleIndex}: Operand {operandName} requires an enabled decoded CAN RX signal.";
@@ -4627,7 +4633,7 @@ namespace Cortex.ViewModels
 
                 if (saved)
                 {
-                    AddLog("Configuration saved to .pdm file.");
+                    AddLog("Configuration saved to .pdm file. APN and MQTT passwords are not included.");
                 }
             }
             catch (Exception ex)
@@ -4653,22 +4659,166 @@ namespace Cortex.ViewModels
                     return;
                 }
 
-                ConfigFileSerializer.ApplySnapshot(SettingsDataView, snapshot);
-                ForceRefreshSettingsBindings();
-                _ioFlowDraftAwaitingReconciliation = null;
-                _ioFlowSnapshotMismatchWarning = string.Empty;
-
-                IoFlowGraphSnapshot? ioFlowSnapshot = snapshot.IoFlowGraph == null
-                    ? null
-                    : ConvertIoFlowConfigSnapshot(snapshot.IoFlowGraph);
-                ApplyIoFlowSnapshotFromConfig(ioFlowSnapshot);
-                PersistIoFlowGraphSnapshotLocally();
+                ApplyImportedConfiguration(snapshot);
 
                 AddLog("Configuration loaded from .pdm file. Save to controller to apply permanently.");
             }
             catch (Exception ex)
             {
                 AddLog($"Failed to open configuration file: {ex.Message}");
+            }
+        }
+
+        [RelayCommand]
+        private async Task RestoreConfigurationBackup()
+        {
+            if (!CanRestoreConfigurationBackup)
+            {
+                AddLog("Connect to the controller and wait for its configuration to load before restoring a backup.");
+                return;
+            }
+
+            IReadOnlyList<ConfigurationBackupEntry> backups = _configurationBackupStore.GetBackups();
+            if (backups.Count == 0)
+            {
+                AddLog("No configuration backups are available.");
+                return;
+            }
+
+            ConfigurationBackupEntry? selectedBackup;
+            try
+            {
+                selectedBackup = await _appCloser.ShowConfigurationBackupDialogAsync(backups);
+            }
+            catch (Exception ex)
+            {
+                AddLog("Could not open the configuration backup list.", ex.Message);
+                return;
+            }
+
+            if (selectedBackup == null)
+            {
+                return;
+            }
+
+            try
+            {
+                string content = _configurationBackupStore.ReadBackup(selectedBackup);
+                if (!ConfigFileSerializer.TryDeserialize(content, out ConfigSnapshot? snapshot, out string? error) || snapshot == null)
+                {
+                    AddLog("Configuration backup could not be restored.", error);
+                    return;
+                }
+
+                ApplyImportedConfiguration(snapshot);
+
+                AddLog($"Configuration backup from {selectedBackup.DateText} {selectedBackup.TimeText} loaded into Cortex. Save to controller to apply permanently.");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or AggregateException)
+            {
+                AddLog("Configuration backup could not be restored.", ex.Message);
+            }
+        }
+
+        private void ApplyImportedConfiguration(ConfigSnapshot snapshot)
+        {
+            DataStructures importedSettings = DeepCopyDataStructures(SettingsDataView);
+            ConfigFileSerializer.ApplySnapshot(importedSettings, snapshot);
+            if ((snapshot.CanMessages != null || snapshot.CanSignals != null) &&
+                !TryValidateCustomCanConfigurationForSettings(importedSettings, -1, new CustomCanMessage(), -1, new CustomCanSignal(), true, out string canError))
+                throw new ArgumentException(canError);
+            if ((snapshot.Channels != null || snapshot.CanMessages != null || snapshot.CanSignals != null) &&
+                !TryValidateMathConfigurationForSettings(importedSettings, out string mathError))
+                throw new ArgumentException(mathError);
+
+            IoFlowGraphSnapshot? ioFlowSnapshot = snapshot.IoFlowGraph == null
+                ? null
+                : ConvertIoFlowConfigSnapshot(snapshot.IoFlowGraph);
+            if (ioFlowSnapshot != null && (!IsIoFlowSnapshotStructurallyValid(ioFlowSnapshot) || !AreImportedGraphRulesValid(ioFlowSnapshot)))
+                throw new ArgumentException("The I/O Flow graph is invalid.");
+
+            DataStructures previousSettings = SettingsDataView;
+            IoFlowGraphViewModel previousGraph = IoFlowGraph;
+            OutputChannel? previousChannel = SelectedChannel;
+            DigitalInput? previousDigital = SelectedDigitalInput;
+            AnalogueInput? previousAnalogue = SelectedAnalogueInput;
+            IoFlowPendingDraft? previousDraft = _ioFlowDraftAwaitingReconciliation;
+            string previousWarning = _ioFlowSnapshotMismatchWarning;
+            bool previousUnsaved = _ioFlowHasUnsavedControllerChanges;
+            var importedGraph = new IoFlowGraphViewModel();
+            ConfigureIoFlowGraph(importedGraph);
+
+            _deferredIoFlowLayoutReplace = false;
+            _deferIoFlowLayoutPersistence = true;
+            try
+            {
+                IoFlowGraph = importedGraph;
+                ReplaceSettingsDataCore(importedSettings, importedMetadataWins: true);
+                ForceRefreshSettingsBindings();
+                _ioFlowDraftAwaitingReconciliation = null;
+                _ioFlowSnapshotMismatchWarning = string.Empty;
+                ApplyIoFlowSnapshotFromConfig(ioFlowSnapshot);
+                PersistIoFlowGraphSnapshotLocally();
+            }
+            catch (Exception importError)
+            {
+                try
+                {
+                    DetachSettingsTracking(SettingsDataView);
+                    SettingsDataView = previousSettings;
+                    AttachSettingsTracking(previousSettings);
+                    IoFlowGraph = previousGraph;
+                    _portService?.UpdateSettingsData(previousSettings);
+                    SelectedChannel = previousChannel;
+                    SelectedDigitalInput = previousDigital;
+                    SelectedAnalogueInput = previousAnalogue;
+                    SyncSelectedTimeZoneFromSettings();
+                    RebuildConnectorPins();
+                    _ioFlowDraftAwaitingReconciliation = previousDraft;
+                    _ioFlowSnapshotMismatchWarning = previousWarning;
+                    _ioFlowHasUnsavedControllerChanges = previousUnsaved;
+                    RecalculatePendingConfigChanges();
+                    UpdateIoFlowControllerMismatchWarning();
+                }
+                catch (Exception rollbackError)
+                {
+                    throw new AggregateException("Configuration import failed and the previous state could not be fully restored.", importError, rollbackError);
+                }
+                throw;
+            }
+            finally
+            {
+                _deferIoFlowLayoutPersistence = false;
+            }
+
+            PersistIoFlowGraphSnapshotLocally(replaceLayout: _deferredIoFlowLayoutReplace);
+        }
+
+        private void CreateControllerSessionBackup()
+        {
+            if (_configurationBackupCreatedForSession || _controllerConfigBaseline == null)
+            {
+                return;
+            }
+
+            try
+            {
+                IoFlowGraphConfigSnapshot? graphSnapshot = _ioFlowBaselineSnapshot == null
+                    ? null
+                    : CreateIoFlowConfigSnapshotForSettings(_ioFlowBaselineSnapshot, _controllerConfigBaseline);
+                string content = ConfigFileSerializer.SerializeSettings(_controllerConfigBaseline, graphSnapshot);
+                if (!_configurationBackupStore.TryCreateBackup(content, out string? error))
+                {
+                    AddLog("Could not create an automatic controller configuration backup.", error);
+                    return;
+                }
+
+                _configurationBackupCreatedForSession = true;
+                AddLog("Controller configuration backed up locally.");
+            }
+            catch (Exception ex) when (ex is System.Text.Json.JsonException or NotSupportedException or ArgumentException or InvalidOperationException)
+            {
+                AddLog("Could not create an automatic controller configuration backup.", ex.Message);
             }
         }
 
@@ -4946,6 +5096,7 @@ namespace Cortex.ViewModels
                 }
 
                 IsInitialSnapshotLoaded = true;
+                CreateControllerSessionBackup();
                 if (IsOpenRemoteSignedIn)
                 {
                     StartBackgroundTask(RefreshConnectedPdmStatusAsync(), "Connected PDM registration status refresh");
@@ -7092,6 +7243,7 @@ namespace Cortex.ViewModels
         partial void OnIsConnectedChanged(bool value)
         {
             OnPropertyChanged(nameof(IsControllerUiReady));
+            OnPropertyChanged(nameof(CanRestoreConfigurationBackup));
             OnPropertyChanged(nameof(CanResetLogs));
             OnPropertyChanged(nameof(CanAccessOperationalTabs));
             OnPropertyChanged(nameof(CanOpenFirmwareUpdateDialog));
@@ -7145,6 +7297,7 @@ namespace Cortex.ViewModels
         partial void OnCommsEstablishedChanged(bool value)
         {
             OnPropertyChanged(nameof(IsControllerUiReady));
+            OnPropertyChanged(nameof(CanRestoreConfigurationBackup));
             OnPropertyChanged(nameof(CanOpenFirmwareUpdateDialog));
             OnPropertyChanged(nameof(CanOpenLocalFirmwareUpdateDialog));
             OnPropertyChanged(nameof(CanSetControllerRtc));
@@ -7188,7 +7341,13 @@ namespace Cortex.ViewModels
         partial void OnIsInitialSnapshotLoadedChanged(bool value)
         {
             OnPropertyChanged(nameof(IsControllerUiReady));
+            OnPropertyChanged(nameof(CanRestoreConfigurationBackup));
             OnPropertyChanged(nameof(CanAccessOperationalTabs));
+
+            if (!value)
+            {
+                _configurationBackupCreatedForSession = false;
+            }
 
             if (value && IsConnected && CommsEstablished)
             {

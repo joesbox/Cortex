@@ -2,6 +2,21 @@
 
 This document contains detailed implementation, transport, and hardware-test notes that were previously in the top-level README.
 
+## Configuration backups
+
+Cortex stores an automatic `.pdm` configuration snapshot after each successful
+controller connection, retaining the ten newest snapshots in
+`%LOCALAPPDATA%\Cortex\configuration-backups`. Use **Help > Restore Configuration
+Backup** to review them in newest-first order and stage one in Cortex. Restoring
+does not write to the controller; review the staged settings and use **Save to
+controller** to apply them.
+
+New configuration exports and automatic backups omit APN and MQTT passwords.
+Importing a file without those fields preserves the current passwords, so these
+files cannot restore passwords on a different controller. Older files may still
+contain plaintext passwords: importing an explicitly provided password applies
+it, including an empty string to clear it. Treat those older files as sensitive.
+
 ## I/O configuration
 
 I/O Flow auto-arrange leaves 240 pixels of horizontal clearance between node
@@ -12,6 +27,13 @@ including TX trigger, mode and period. Loading stages them alongside the other
 settings; Save to controller writes the changed records. Older files that only
 embedded these records in the I/O Flow signature recover them from that
 signature before graph validation. Live CAN status is not restored from files.
+Imports validate the file format and supported settings before staging changes;
+an invalid file leaves the current settings unchanged. If applying an import
+fails, Cortex restores the previous settings and I/O Flow graph, including undo
+history, and does not replace the local layout. Layout persistence happens after
+a successful import; a filesystem error is logged and leaves the imported
+settings staged in memory. Runtime telemetry is not exported or restored,
+including from older files that contain live values.
 
 Local layout saves include both standalone logic-node positions and their
 controller channel/rule-slot aliases. Controller reloads reconstruct rules by
@@ -137,14 +159,24 @@ changes. CAN TX nodes use dark blue, distinct from the other I/O node colours.
 Connecting additional TX nodes adds assignments; deleting a node/wire removes
 that assignment. Frame/signal definitions remain in CAN Messages.
 
-Standalone serial reads (including firmware/version queries after connection)
-reset receive buffers, not loaded settings flags. Clearing those flags stopped
-live polling after initial hydration. Only actual controller session loss clears
-snapshot state. Standalone ACK writes, build-date queries, firmware diagnostics
-and log resets share the request gate, and queries preserve an enclosing
-session's polling suspension. Override packets use their own packet buffer.
-Parser dispatch is serialized across normal reception and log recovery.
+Standalone serial operations share a save-aware request gate, and secure
+requests preserve partial encrypted input rather than resetting it. Receive
+resets do not clear loaded settings flags; only controller session loss clears
+snapshot state. Reference-counted polling suspensions preserve enclosing and
+overlapping sessions even when they finish out of order. Override packets use
+their own packet buffer.
+Overlapping legacy log and firmware sessions do not clear each other's receive
+buffers. Secure session setup is serialized, and session reset and receive
+sequence updates share the transmit lock.
+Parser dispatch is serialized across normal reception and log recovery. Incoming
+frames and standalone ACKs are processed in wire order, including frames split
+across encrypted envelopes. The receive loop processes up to 256 queued items
+per wake, retaining incomplete frames for later input; buffered log recovery
+examines up to eight items per attempt. Remaining items are processed on later
+wakes or attempts.
 Failed connection attempts dispose the serial service and its parser task.
+Serial shutdown releases receive ownership before closing the port so a queued
+receive callback cannot deadlock the close.
 
 Background cellular health checks skip busy transports rather than queueing
 behind another request. They request status without sending cellular settings,
@@ -156,6 +188,14 @@ stall live telemetry while bytes are processed one at a time.
 Configuration saves fail after a missing acknowledgement instead of blindly
 retrying a potentially applied write; a late final ACK cannot turn that failure
 into success. Read back the controller before retrying a timed-out save.
+Standalone ACKs have no request identifier, so a sufficiently late ACK from an
+earlier request cannot always be distinguished from an ACK for a later request.
+The legacy v0.10 wire protocol is unchanged; version-frame and ACK replay tests
+cover its framing, but it has not been re-tested on v0.10 hardware.
+An incomplete public firmware-version or build-date response can be skipped
+when a following encrypted frame authenticates. Otherwise, a malformed or timed
+out partial response invalidates the secure session and asks for reconnection,
+rather than passing its bytes into the protected stream.
 
 Math status polling follows all controller math channels rather
 than the legacy editor's selected channel. A read-only COM18 test reproduced
@@ -404,6 +444,13 @@ three minutes to return its cellular/MQTT result; Cortex reports a reply timeout
 after 190 seconds. Registration attempts log the selected transport and packet
 size without logging the provisioning request or credentials.
 
+Signing out clears the local session before waiting for remote revocation.
+Cortex reports if the saved session cannot be removed or the remote session
+cannot be revoked, so a failed network request is not presented as a complete
+remote sign-out.
+Log-loading, sign-out and I/O Flow keyboard errors use plain-language messages
+in the application; technical exception details are kept in the detailed log.
+
 With compatible controller firmware, log downloads use plaintext bulk packets
 after PIN unlock. PIN authentication, parameter changes, log deletion and all
 other protected traffic remain encrypted. Older firmware keeps the encrypted
@@ -434,6 +481,13 @@ changing controller parameters or deleting logs. It requires
 the closed benchmark logs named in that test. Leave those variables unset for
 ordinary test runs. Never put a real PIN in source or test reports.
 
+The opt-in `SecurePollingAndLogAcknowledgementsRemainSynchronized` test checks
+queued list/version requests, log-open acknowledgements, chunk reads and
+resumed live polling on a PIN-enabled controller with a nonempty log. It
+requires explicit permission and `CORTEX_SECURE_LOG_POLL_TEST=YES`,
+`CORTEX_PIN_DISABLE_PORT` and `CORTEX_PIN_DISABLE_PIN`; it cancels log transfers
+but does not erase logs or change controller settings.
+
 Reset Logs uses the shared acknowledgement handler for both legacy and encrypted
 connections, preserves encrypted stream state, and resumes live polling after
 completion. Acknowledgements follow the pending request rather than the most
@@ -449,8 +503,9 @@ Settings saves wrap configuration packets in the authorized encrypted transport
 when a secure session is active. Legacy connections keep their original wire
 format. Both transports share configuration acknowledgement handling, including
 cursor advancement, bounded retries, EEPROM-save completion and static readback.
-Only standalone encrypted acknowledgement payloads advance the save sequence;
-bytes inside telemetry packets do not.
+Only authenticated acknowledgement bytes at message boundaries advance the
+secure save sequence; bytes inside telemetry packets do not. Firmware version
+and build-date responses remain public plaintext frames, validated by checksum.
 
 Live polling remains suspended until the final EEPROM-save acknowledgement,
 even after the configuration cursor finishes. The pending configuration command

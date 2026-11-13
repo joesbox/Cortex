@@ -1,4 +1,5 @@
 using CommunityToolkit.Mvvm.ComponentModel;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Text.Json.Serialization;
@@ -488,6 +489,21 @@ namespace Cortex.Models
 
     public sealed class CustomCanSignalMetadata
     {
+        public static bool HasSameIdentity(CustomCanSignalMetadata a, CustomCanSignalMetadata b)
+        {
+            static bool Matches(float x, float y) =>
+                x.Equals(y) || Math.Abs(x - y) <= 1e-5f * Math.Max(1.0f, Math.Max(Math.Abs(x), Math.Abs(y)));
+
+            if (a.MessageId.HasValue != b.MessageId.HasValue)
+                return false;
+            bool layoutMatches = a.StartBit == b.StartBit && a.BitLength == b.BitLength &&
+                a.IsMotorola == b.IsMotorola && a.IsSigned == b.IsSigned &&
+                Matches(a.Factor, b.Factor) && Matches(a.Offset, b.Offset);
+            return a.MessageId.HasValue
+                ? a.MessageId == b.MessageId && a.IsExtended == b.IsExtended && layoutMatches
+                : a.SignalIndex == b.SignalIndex && a.MessageIndex == b.MessageIndex && layoutMatches;
+        }
+
         public int SignalIndex { get; set; }
 
         public byte MessageIndex { get; set; }

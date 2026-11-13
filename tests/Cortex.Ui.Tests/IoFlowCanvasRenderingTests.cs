@@ -24,6 +24,68 @@ namespace Cortex.Ui.Tests;
 
 public sealed class IoFlowCanvasRenderingTests
 {
+    [AvaloniaFact]
+    public void ImportedGraphRebindsEditorAndCommands()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), $"cortex-import-bindings-{Guid.NewGuid():N}");
+        string path = Path.Combine(directory, "graph.json");
+        using var vm = CreateViewModel(path);
+        vm.IoFlowGraph.AddNextOutputNodeCommand.Execute(null);
+        var oldGraph = vm.IoFlowGraph;
+        var view = new IoFlowTabView { DataContext = vm };
+        var window = new Window { Width = 1600, Height = 1000, Content = view };
+        try
+        {
+            window.Show();
+            Layout(window);
+            var editor = view.FindControl<NodifyEditor>("IoFlowEditor")!;
+            var undoButton = view.FindControl<Button>("IoFlowUndoButton")!;
+            Assert.Same(oldGraph.VisibleNodes, editor.ItemsSource);
+            Assert.Same(oldGraph.UndoCommand, undoButton.Command);
+
+            oldGraph.ItemsDragStartedCommand.Execute(null);
+            oldGraph.OutputNodes[0].Location += new Vector(30, 20);
+            oldGraph.ItemsDragCompletedCommand.Execute(null);
+            Assert.True(oldGraph.CanUndo);
+            bool failureInjected = false;
+            vm.PropertyChanged += (_, args) =>
+            {
+                if (!failureInjected && args.PropertyName == nameof(MainWindowViewModel.IoFlowGraph) &&
+                    !ReferenceEquals(vm.IoFlowGraph, oldGraph))
+                    vm.IoFlowGraph.Nodes.CollectionChanged += (_, nodeArgs) =>
+                    {
+                        if (!failureInjected && nodeArgs.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Add)
+                        {
+                            failureInjected = true;
+                            throw new InvalidOperationException("Injected graph failure");
+                        }
+                    };
+            };
+            var import = typeof(MainWindowViewModel).GetMethod("ApplyImportedConfiguration", BindingFlags.NonPublic | BindingFlags.Instance)!;
+            var snapshot = new ConfigSnapshot { SystemParameters = new SystemParametersSnapshot { CANResEnabled = true } };
+            Assert.Throws<TargetInvocationException>(() => import.Invoke(vm, [snapshot]));
+            Layout(window);
+            Assert.True(failureInjected);
+            Assert.Same(oldGraph, vm.IoFlowGraph);
+            Assert.True(oldGraph.CanUndo);
+            Assert.Same(oldGraph.VisibleNodes, editor.ItemsSource);
+            Assert.Same(oldGraph.UndoCommand, undoButton.Command);
+
+            import.Invoke(vm, [snapshot]);
+            Layout(window);
+
+            Assert.NotSame(oldGraph, vm.IoFlowGraph);
+            Assert.Same(vm.IoFlowGraph.VisibleNodes, editor.ItemsSource);
+            Assert.Same(vm.IoFlowGraph.UndoCommand, undoButton.Command);
+            Assert.True(vm.SettingsDataView.SystemParamsStaticData.CANResEnabled);
+        }
+        finally
+        {
+            window.Close();
+            CleanUp(path, directory);
+        }
+    }
+
     [AvaloniaTheory]
     [InlineData(2)]
     [InlineData(3)]

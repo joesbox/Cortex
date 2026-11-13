@@ -2,6 +2,7 @@ using Cortex.Models;
 using Cortex.Services;
 using System.Reflection;
 using System.Security.Cryptography;
+using System.Text.Json;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -115,8 +116,21 @@ public class ChannelConfigHardwareTests(ITestOutputHelper output)
     {
         using var service = new SerialPortService(Required("CORTEX_CHANNEL_CONFIG_TEST_PORT"));
         Assert.True(service.Open(), service.LastError);
+        using var stop = new CancellationTokenSource();
+        Task polling = Task.Run(async () =>
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                if (!service.foundECU)
+                    service.InitComms();
+                else
+                    service.EnsureLiveRequestPolling();
+                await Task.Delay(200);
+            }
+        });
         try
         {
+            await WaitForAsync(() => service.foundECU, "controller handshake");
             var info = await service.GetSecureInfoAsync();
             Assert.NotNull(info);
             Assert.Equal(Required("CORTEX_CHANNEL_CONFIG_TEST_IDENTITY"),
@@ -125,11 +139,12 @@ public class ChannelConfigHardwareTests(ITestOutputHelper output)
             Assert.True(await service.EnsureSecureSessionAsync());
             Assert.Equal(SecureControlResult.Ok,
                 (await service.SecureUnlockAsync(Required("CORTEX_CHANNEL_CONFIG_TEST_PIN")))?.Result);
-            service.BeginLogTransferSession();
+            await WaitForAsync(() => service.HasLoadedStaticSnapshot, "initial static snapshot");
             DataStructures data = Field<DataStructures>(service, "dataStructures");
             await Snapshot(service);
             char[] original = data.ChannelsLiveData[0].Name!.ToArray();
             char[] temporary = original.SequenceEqual("TST".ToCharArray()) ? "CHK".ToCharArray() : "TST".ToCharArray();
+            output.WriteLine($"Original channel name: {new string(original)}.");
             try
             {
                 await SaveName(service, data, temporary);
@@ -139,6 +154,7 @@ public class ChannelConfigHardwareTests(ITestOutputHelper output)
             }
             finally
             {
+                await Snapshot(service);
                 await SaveName(service, data, original);
                 Assert.Equal(original, data.ChannelsLiveData[0].Name);
                 output.WriteLine("Original channel name restored, saved and confirmed by static readback.");
@@ -148,18 +164,27 @@ public class ChannelConfigHardwareTests(ITestOutputHelper output)
         }
         finally
         {
+            stop.Cancel();
+            await polling;
             service.Close();
         }
     }
 
     private static async Task SaveName(SerialPortService service, DataStructures data, char[] name)
     {
-        data.ChannelsStaticData[0].Name = name.ToArray();
-        service.UpdateSettingsData(data);
+        int expectedPackets = data.ChannelsLiveData[0].Name!.SequenceEqual(name) ? 0 : 1;
+        var settings = JsonSerializer.Deserialize<DataStructures>(JsonSerializer.Serialize(data))
+            ?? throw new InvalidOperationException("Could not copy controller settings.");
+        settings.ChannelsStaticData[0].Name = name.ToArray();
+        service.UpdateSettingsData(settings);
         var saved = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var snapshot = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         void OnSaved(object? sender, ConfigurationSaveCompletedEventArgs args) => saved.TrySetResult(args.Succeeded);
-        void OnData(DataStructures _) { if (!service.UpdateStaticData) snapshot.TrySetResult(); }
+        void OnData(DataStructures _)
+        {
+            if (saved.Task.IsCompletedSuccessfully && !service.UpdateStaticData)
+                snapshot.TrySetResult();
+        }
         service.ConfigurationSaveCompleted += OnSaved;
         service.DataUpdated += OnData;
         try
@@ -167,7 +192,7 @@ public class ChannelConfigHardwareTests(ITestOutputHelper output)
             service.StartSendConfig();
             Assert.True(await saved.Task.WaitAsync(TimeSpan.FromSeconds(15)));
             await snapshot.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            Assert.Equal(1, Field<int>(service, "_configPacketsSent"));
+            Assert.Equal(expectedPackets, Field<int>(service, "_configPacketsSent"));
         }
         finally
         {
@@ -187,6 +212,22 @@ public class ChannelConfigHardwareTests(ITestOutputHelper output)
             await completion.Task.WaitAsync(TimeSpan.FromSeconds(5));
         }
         finally { service.DataUpdated -= OnData; }
+    }
+
+    private static async Task WaitForAsync(Func<bool> condition, string stage)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        while (!condition())
+        {
+            try
+            {
+                await Task.Delay(50, timeout.Token);
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            {
+                throw new TimeoutException($"Timed out waiting for {stage}.");
+            }
+        }
     }
 
     private static T Field<T>(object instance, string name) =>

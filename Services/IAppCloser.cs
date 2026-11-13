@@ -1,5 +1,6 @@
 ﻿using Cortex.Models;
 using Cortex.ViewModels;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 
 namespace Cortex.Services
@@ -23,6 +24,8 @@ namespace Cortex.Services
         Task<LocalFirmwareUpdateSelection?> BrowseLocalFirmwareUpdateFilesAsync();
 
         Task ShowAboutAsync();
+
+        Task<ConfigurationBackupEntry?> ShowConfigurationBackupDialogAsync(IReadOnlyList<ConfigurationBackupEntry> backups);
 
         Task ShowFirmwareUpdateDialogAsync(FirmwareUpdateWindowViewModel viewModel);
 

@@ -61,6 +61,10 @@
                     <MenuItem Command="{Binding ExitCommand}" Header="Exit" />
                 </MenuItem>
                 <MenuItem Header="Help">
+                    <MenuItem
+                        Command="{Binding RestoreConfigurationBackupCommand}"
+                        Header="Restore Configuration Backup"
+                        IsEnabled="{Binding CanRestoreConfigurationBackup}" />
                     <MenuItem Command="{Binding OpenDetailedLogFolderCommand}" Header="Open Detailed Log Folder" />
                     <MenuItem Command="{Binding ShowAboutCommand}" Header="About" />
                 </MenuItem>

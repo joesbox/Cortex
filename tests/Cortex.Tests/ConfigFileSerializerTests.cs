@@ -141,6 +141,24 @@ public class ConfigFileSerializerTests
         Assert.Equal("existing-mqtt", target.CellularParamsStaticData.MQTTPassword);
     }
 
+    [Theory]
+    [InlineData("""{"CellularParameters":{}}""", "existing-apn", "existing-mqtt")]
+    [InlineData("""{"CellularParameters":{"APNPassword":null,"MQTTPassword":null}}""", "existing-apn", "existing-mqtt")]
+    [InlineData("""{"CellularParameters":{"APNPassword":"","MQTTPassword":""}}""", "", "")]
+    [InlineData("""{"CellularParameters":{"APNPassword":"legacy-apn","MQTTPassword":"legacy-mqtt"}}""", "legacy-apn", "legacy-mqtt")]
+    public void ImportPasswordsPreservesOmittedValuesAndSupportsLegacyFiles(string json, string apn, string mqtt)
+    {
+        var target = new DataStructures();
+        target.CellularParamsStaticData.APNPassword = "existing-apn";
+        target.CellularParamsStaticData.MQTTPassword = "existing-mqtt";
+
+        Assert.True(ConfigFileSerializer.TryDeserialize(json, out var snapshot, out string? error), error);
+        ConfigFileSerializer.ApplySnapshot(target, snapshot!);
+
+        Assert.Equal(apn, target.CellularParamsStaticData.APNPassword);
+        Assert.Equal(mqtt, target.CellularParamsStaticData.MQTTPassword);
+    }
+
     // ApplySnapshot — channel name
 
     [Fact]
@@ -299,8 +317,8 @@ public class ConfigFileSerializerTests
         Assert.Equal((byte)3, applied.MathRuleCount);
         Assert.Equal((byte)2, applied.MathRootRule);
         Assert.Equal((byte)OutputChannel.MathOutputModeType.PWM, applied.MathOutputMode);
-        Assert.Equal(12.5f, applied.MathCalculatedRootValue);
-        Assert.Equal((byte)1, applied.MathError);
+        Assert.Equal(0f, applied.MathCalculatedRootValue);
+        Assert.Equal((byte)0, applied.MathError);
 
         OutputChannel.MathRule appliedRule0 = applied.MathRules[0];
         Assert.Equal((byte)OutputChannel.MathOperation.ADD, appliedRule0.Operation);
@@ -313,9 +331,9 @@ public class ConfigFileSerializerTests
         Assert.Equal((byte)OutputChannel.MathOperandType.Channel, appliedRule0.OperandBType);
         Assert.Equal((byte)4, appliedRule0.OperandBIndex);
         Assert.Equal(-1.0f, appliedRule0.OperandBConstant);
-        Assert.Equal(6.75f, appliedRule0.RuntimeValue);
+        Assert.Equal(0f, appliedRule0.RuntimeValue);
         Assert.Equal((byte)0, appliedRule0.RuntimeError);
-        Assert.Equal((byte)1, appliedRule0.Evaluated);
+        Assert.Equal((byte)0, appliedRule0.Evaluated);
         Assert.Equal(Constants.NUM_MATH_RULE_SLOTS, applied.MathRules.Count);
 
         OutputChannel.MathRule appliedRule1 = applied.MathRules[1];
@@ -403,5 +421,91 @@ public class ConfigFileSerializerTests
         Assert.NotNull(snapshot);
         Assert.NotNull(snapshot!.CustomCanSignalMetadata);
         Assert.Single(snapshot.CustomCanSignalMetadata!);
+    }
+
+    [Theory]
+    [InlineData("""{"FormatVersion":2,"Channels":[]}""")]
+    [InlineData("""{"Channels":[null]}""")]
+    [InlineData("""{"Channels":[{"ChanType":99}]}""")]
+    [InlineData("""{"Channels":[{"InputControlPin":42}]}""")]
+    [InlineData("""{"Channels":[{"InputControlLabel":"Pin 42"}]}""")]
+    [InlineData("""{"Channels":[{"CurrentThresholdHigh":-1}]}""")]
+    [InlineData("""{"Channels":[{"CurrentThresholdHigh":17.1}]}""")]
+    [InlineData("""{"Channels":[{"InrushDelay":2.1}]}""")]
+    [InlineData("""{"Channels":[{"SoftStartTime":5.1}]}""")]
+    [InlineData("""{"Channels":[{"DelayedOffTime":3600001}]}""")]
+    [InlineData("""{"SystemParameters":{"SystemCurrentLimit":151}}""")]
+    [InlineData("""{"Channels":[{"OnThreshold":1e100}]}""")]
+    [InlineData("""{"Channels":[{"MathRuleCount":9}]}""")]
+    [InlineData("""{"CanMessages":[{"Index":0,"Id":801},{"Index":999,"Id":123}]}""")]
+    [InlineData("""{"CanMessages":[{"Index":0,"Dlc":9}]}""")]
+    [InlineData("""{"CanSignals":[{"Index":0,"MessageIndex":100}]}""")]
+    [InlineData("""{"CanSignals":[{"Index":0,"Flags":1,"StartBit":63,"BitLength":2}]}""")]
+    [InlineData("""{"CustomCanSignalMetadata":[{"SignalIndex":999}]}""")]
+    [InlineData("""{"IoFlowGraph":{"ControllerSettingsSignature":"[]"}}""")]
+    [InlineData("""{"IoFlowGraph":{"Nodes":null}}""")]
+    public void TryDeserialize_RejectsInvalidConfigurations(string json)
+    {
+        Assert.False(ConfigFileSerializer.TryDeserialize(json, out var snapshot, out var error));
+        Assert.Null(snapshot);
+        Assert.False(string.IsNullOrWhiteSpace(error));
+    }
+
+    [Fact]
+    public void ApplySnapshot_RejectsInvalidLaterRecordBeforeMutatingTarget()
+    {
+        var target = new DataStructures();
+        var snapshot = new ConfigSnapshot
+        {
+            CanMessages = [new() { Index = 0, Id = 801 }, new() { Index = 999, Id = 123 }]
+        };
+        Assert.Throws<ArgumentException>(() => ConfigFileSerializer.ApplySnapshot(target, snapshot));
+        Assert.Equal(0u, target.CustomCanMessagesStaticData[0].Id);
+    }
+
+    [Fact]
+    public void Import_PreservesRuntimeDataAndOmitsItFromExport()
+    {
+        var data = new DataStructures();
+        data.ChannelsStaticData[0].CurrentValue = 12;
+        data.ChannelsStaticData[0].MathRules[0].RuntimeValue = 13;
+        data.SystemParamsStaticData.VBatt = 14;
+        string before = ConfigFileSerializer.SerializeSettings(data);
+        data.ChannelsStaticData[0].CurrentValue = 30;
+        data.SystemParamsStaticData.VBatt = 31;
+        Assert.Equal(before, ConfigFileSerializer.SerializeSettings(data));
+        Assert.DoesNotContain("\"CurrentValue\"", before);
+        Assert.DoesNotContain("\"RuntimeValue\"", before);
+        Assert.DoesNotContain("\"VBatt\"", before);
+        Assert.True(ConfigFileSerializer.TryDeserialize(
+            """{"Channels":[{"CurrentValue":99,"MathRules":[{"RuntimeValue":99}]}],"SystemParameters":{"VBatt":99}}""",
+            out var snapshot, out _));
+        ConfigFileSerializer.ApplySnapshot(data, snapshot!);
+        Assert.Equal(30, data.ChannelsStaticData[0].CurrentValue);
+        Assert.Equal(13, data.ChannelsStaticData[0].MathRules[0].RuntimeValue);
+        Assert.Equal(31, data.SystemParamsStaticData.VBatt);
+    }
+
+    [Fact]
+    public void ApplySnapshot_PreservesBothThresholdsAndDeduplicatesMetadata()
+    {
+        var data = new DataStructures();
+        var snapshot = new ConfigSnapshot
+        {
+            Channels = [new() { OnThreshold = 2, OffThreshold = 4 }],
+            CustomCanSignalMetadata = [new() { SignalIndex = 0, MessageIndex = 0, BitLength = 8, Name = "RPM" }]
+        };
+        ConfigFileSerializer.ApplySnapshot(data, snapshot);
+        ConfigFileSerializer.ApplySnapshot(data, snapshot);
+        Assert.Equal(2, data.ChannelsStaticData[0].OnThreshold);
+        Assert.Equal(4, data.ChannelsStaticData[0].OffThreshold);
+        Assert.Single(data.CustomCanSignalsMetadata);
+    }
+
+    [Fact]
+    public void TryDeserialize_AcceptsControllerLimits()
+    {
+        const string json = """{"Channels":[{"CurrentThresholdHigh":17,"CurrentThresholdLow":17,"InrushDelay":2,"InrushCurrentLimit":50,"SoftStartTime":5,"SoftStopTime":5,"IntermittentOnTime":10,"IntermittentOffTime":10,"DelayedOffTime":3600000}],"SystemParameters":{"SystemCurrentLimit":150}}""";
+        Assert.True(ConfigFileSerializer.TryDeserialize(json, out _, out string? error), error);
     }
 }

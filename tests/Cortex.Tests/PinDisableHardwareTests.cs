@@ -24,6 +24,15 @@ public sealed class SecurePollingHardwareFactAttribute : FactAttribute
     }
 }
 
+public sealed class SecureLogPollingHardwareFactAttribute : FactAttribute
+{
+    public SecureLogPollingHardwareFactAttribute()
+    {
+        if (Environment.GetEnvironmentVariable("CORTEX_SECURE_LOG_POLL_TEST") != "YES")
+            Skip = "Requires explicit permission to read and cancel a controller log.";
+    }
+}
+
 public sealed class PinDisableHardwareTests(ITestOutputHelper output)
 {
     [SecurePollingHardwareFact]
@@ -39,8 +48,7 @@ public sealed class PinDisableHardwareTests(ITestOutputHelper output)
 
         string port = Environment.GetEnvironmentVariable("CORTEX_PIN_DISABLE_PORT")
             ?? throw new InvalidOperationException("CORTEX_PIN_DISABLE_PORT is required.");
-        string pin = Environment.GetEnvironmentVariable("CORTEX_PIN_DISABLE_PIN")
-            ?? throw new InvalidOperationException("CORTEX_PIN_DISABLE_PIN is required.");
+        string? pin = Environment.GetEnvironmentVariable("CORTEX_PIN_DISABLE_PIN");
         using var service = new SerialPortService(port);
         Assert.True(service.Open(), service.LastError);
         using var stop = new CancellationTokenSource();
@@ -63,10 +71,14 @@ public sealed class PinDisableHardwareTests(ITestOutputHelper output)
             await WaitUntilAsync(() => established, "controller handshake");
             Progress("Handshake complete.");
             SecureInfoResponse info = Assert.IsType<SecureInfoResponse>(await service.GetSecureInfoAsync());
-            Assert.True(info.PinEnabled, "PIN lock must be enabled for this test.");
             Assert.True(await service.EnsureSecureSessionAsync(), service.LastSecureSessionError);
-            Assert.True((await service.SecureUnlockAsync(pin))?.IsAuthorized);
-            Progress("Secure session unlocked.");
+            if (info.PinEnabled)
+            {
+                Assert.False(string.IsNullOrEmpty(pin), "CORTEX_PIN_DISABLE_PIN is required when PIN lock is enabled.");
+                Assert.True((await service.SecureUnlockAsync(pin))?.IsAuthorized);
+            }
+            Assert.True(service.IsSecureSessionAuthorized);
+            Progress("Secure session authorized.");
             service.SetIoFlowStatusPollingEnabled(true);
             service.SetCustomCanStatusPollingEnabled(true);
             service.RequestStaticSnapshot();
@@ -74,6 +86,7 @@ public sealed class PinDisableHardwareTests(ITestOutputHelper output)
             Progress("Static snapshot loaded; requesting firmware version.");
             string? firmware = await service.RequestFirmwareVersionAsync();
             Progress($"Firmware version received: {firmware != null}");
+            Assert.NotNull(firmware);
             for (int attempt = 1; attempt <= 12; attempt++)
             {
                 await Task.Delay(5000);
@@ -104,6 +117,77 @@ public sealed class PinDisableHardwareTests(ITestOutputHelper output)
             stop.Cancel();
             await polling;
             Progress("Polling stopped.");
+        }
+    }
+
+    [SecureLogPollingHardwareFact]
+    public async Task SecurePollingAndLogAcknowledgementsRemainSynchronized()
+    {
+        string port = Environment.GetEnvironmentVariable("CORTEX_PIN_DISABLE_PORT")
+            ?? throw new InvalidOperationException("CORTEX_PIN_DISABLE_PORT is required.");
+        string pin = Environment.GetEnvironmentVariable("CORTEX_PIN_DISABLE_PIN")
+            ?? throw new InvalidOperationException("CORTEX_PIN_DISABLE_PIN is required.");
+        using var service = new SerialPortService(port);
+        Assert.True(service.Open(), service.LastError);
+        using var stop = new CancellationTokenSource();
+        bool established = false;
+        int updates = 0;
+        service.DataUpdated += _ => Interlocked.Increment(ref updates);
+        Task polling = Task.Run(async () =>
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                if (!established)
+                    established = service.InitComms();
+                else
+                    service.EnsureLiveRequestPolling();
+                await Task.Delay(200);
+            }
+        });
+
+        try
+        {
+            await WaitUntilAsync(() => established, "controller handshake");
+            SecureInfoResponse info = Assert.IsType<SecureInfoResponse>(await service.GetSecureInfoAsync());
+            Assert.True(info.PinEnabled, "PIN lock must be enabled for this test.");
+            Assert.True(await service.EnsureSecureSessionAsync(), service.LastSecureSessionError);
+            Assert.True((await service.SecureUnlockAsync(pin))?.IsAuthorized);
+            service.RequestStaticSnapshot();
+            await WaitUntilAsync(() => service.HasLoadedStaticSnapshot, "static snapshot");
+
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                Task<IReadOnlyList<ControllerLogFileInfo>> listTask = service.RequestLogFileListAsync();
+                Task<string?> versionTask = service.RequestFirmwareVersionAsync();
+                IReadOnlyList<ControllerLogFileInfo> files = await listTask;
+                Assert.NotNull(await versionTask);
+                int index = files.ToList().FindIndex(file => file.FileSizeBytes > 0);
+                Assert.True(index >= 0 && index <= byte.MaxValue, "A nonempty controller log is required.");
+
+                await service.BeginLogTransferSessionAsync();
+                try
+                {
+                    Assert.True(await service.OpenLogTransferAsync((byte)index), "Log open was not acknowledged.");
+                    LogChunkResponse chunk = Assert.IsType<LogChunkResponse>(await service.RequestLogChunkAsync());
+                    Assert.NotEmpty(chunk.Text);
+                }
+                finally
+                {
+                    service.CancelLogTransfer();
+                    service.EndLogTransferSession();
+                }
+
+                int updatesAfterTransfer = Volatile.Read(ref updates);
+                await WaitUntilAsync(() => Volatile.Read(ref updates) > updatesAfterTransfer, "live data after log transfer");
+                Assert.True(service.IsSecureSessionAuthorized);
+                Assert.True((await service.GetSecureStatusAsync())?.IsAuthorized);
+                output.WriteLine($"Cycle {attempt + 1}: concurrent list/version requests, log-open ACK, chunk and live polling passed.");
+            }
+        }
+        finally
+        {
+            stop.Cancel();
+            await polling;
         }
     }
 

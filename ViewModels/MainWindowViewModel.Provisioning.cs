@@ -182,14 +182,29 @@ namespace Cortex.ViewModels
         [RelayCommand]
         private async Task SignOutOpenRemote()
         {
-            await _provisioningApiClient.SignOutAsync();
-            _provisioningSessionStore.Clear();
+            Task revocation = _provisioningApiClient.SignOutAsync();
+            bool sessionCleared = _provisioningSessionStore.Clear();
             IsOpenRemoteSignedIn = false;
             OpenRemoteSignedInAs = string.Empty;
             OpenRemotePasswordInput = string.Empty;
             IsConnectedPdmRegistered = false;
             ConnectedPdmStatusMessage = "Sign in to see this PDM's telemetry service status.";
-            OpenRemoteProvisioningStatusMessage = "Signed out of the telemetry service.";
+            OpenRemoteProvisioningStatusMessage = sessionCleared
+                ? "Signed out on this computer. Ending the telemetry service session..."
+                : "Signed out on this computer, but the saved sign-in couldn't be removed. Cortex may sign you in again next time.";
+            try
+            {
+                await revocation;
+                if (sessionCleared)
+                    OpenRemoteProvisioningStatusMessage = "Signed out of the telemetry service.";
+            }
+            catch (Exception ex)
+            {
+                OpenRemoteProvisioningStatusMessage = sessionCleared
+                    ? "Signed out on this computer, but the telemetry service couldn't end the session. It may still be active on the service."
+                    : "Signed out on this computer, but the saved sign-in couldn't be removed and the service session may still be active. Cortex may sign you in again next time.";
+                AddLog("Couldn't end the telemetry service session. It may still be active on the service.", exception: ex);
+            }
         }
 
         [RelayCommand]

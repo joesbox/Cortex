@@ -449,31 +449,51 @@ namespace Cortex.ViewModels
                 return;
             }
 
-            string cacheKey = BuildLogCacheKey(SelectedLogFile);
-            if (_downloadedLogCache.TryGetValue(cacheKey, out string? cachedContent))
+            LogFile selectedFile = SelectedLogFile;
+            string cacheKey = BuildLogCacheKey(selectedFile);
+            string loadFailureMessage = "Couldn't open the selected log. Please try again.";
+            try
             {
-                EnsureValidLogContent(cachedContent);
-                ParseLogContent(cachedContent);
-                ApplyLogFilters();
-                SelectedLogFile.IsDownloaded = true;
-                LogStatusMessage = $"Loaded cached {SelectedLogFile.FileName}.";
-                LogDownloadProgress = 100;
-                IsLogProgressIndeterminate = false;
-                OnPropertyChanged(nameof(CanDownloadSelectedLog));
-                return;
-            }
+                if (_downloadedLogCache.TryGetValue(cacheKey, out string? cachedContent))
+                {
+                    loadFailureMessage = "Couldn't open the cached log. Please try again.";
+                    EnsureValidLogContent(cachedContent);
+                    ParseLogContent(cachedContent);
+                    ApplyLogFilters();
+                    selectedFile.IsDownloaded = true;
+                    LogStatusMessage = $"Loaded cached {selectedFile.FileName}.";
+                    LogDownloadProgress = 100;
+                    IsLogProgressIndeterminate = false;
+                    OnPropertyChanged(nameof(CanDownloadSelectedLog));
+                    return;
+                }
 
-            if (SelectedLogFile.IsControllerFile && TryGetStoredControllerLogCopy(SelectedLogFile, out string? storedLogPath))
+                if (selectedFile.IsControllerFile)
+                {
+                    loadFailureMessage = "Couldn't open the saved log. The file may be invalid or unavailable.";
+                    if (TryGetStoredControllerLogCopy(selectedFile, out string? storedLogPath))
+                    {
+                        string storedContent = await File.ReadAllTextAsync(storedLogPath!, CancellationToken.None);
+                        if (!ReferenceEquals(SelectedLogFile, selectedFile)) return;
+                        EnsureValidLogContent(storedContent);
+                        _downloadedLogCache[cacheKey] = storedContent;
+                        ParseLogContent(storedContent);
+                        ApplyLogFilters();
+                        selectedFile.IsDownloaded = true;
+                        LogStatusMessage = $"Loaded saved copy of {selectedFile.FileName}.";
+                        LogDownloadProgress = 100;
+                        IsLogProgressIndeterminate = false;
+                        OnPropertyChanged(nameof(CanDownloadSelectedLog));
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex)
             {
-                string storedContent = await File.ReadAllTextAsync(storedLogPath!, CancellationToken.None);
-                EnsureValidLogContent(storedContent);
-                _downloadedLogCache[cacheKey] = storedContent;
-                ParseLogContent(storedContent);
-                ApplyLogFilters();
-                SelectedLogFile.IsDownloaded = true;
-                LogStatusMessage = $"Loaded saved copy of {SelectedLogFile.FileName}.";
-                LogDownloadProgress = 100;
-                IsLogProgressIndeterminate = false;
+                _downloadedLogCache.Remove(cacheKey);
+                selectedFile.IsDownloaded = false;
+                if (!ReferenceEquals(SelectedLogFile, selectedFile)) return;
+                ReportLogDownloadFailure(loadFailureMessage, ex);
                 OnPropertyChanged(nameof(CanDownloadSelectedLog));
                 return;
             }
@@ -563,14 +583,9 @@ namespace Cortex.ViewModels
             }
             catch (Exception ex)
             {
-                _parsedLogRows.Clear();
-                LogSeriesCollection = new ObservableCollection<ISeries>();
-                LogStatusMessage = "Failed to download selected log file.";
-                AddLog($"Log download failed: {ex.Message}");
-                LogDownloadProgress = 0;
+                ReportLogDownloadFailure("Couldn't load the selected log. Check the connection or file and try again.", ex);
                 _portService?.CancelLogTransfer();
                 _portService?.EndLogTransferSession();
-                IsLogProgressIndeterminate = false;
             }
             finally
             {
@@ -584,6 +599,15 @@ namespace Cortex.ViewModels
                 _pauseLiveUiUpdates = false;
                 OnPropertyChanged(nameof(CanDownloadSelectedLog));
             }
+        }
+
+        private void ReportLogDownloadFailure(string message, Exception ex)
+        {
+            ResetParsedLogContent();
+            LogStatusMessage = message;
+            AddLog(message, exception: ex);
+            LogDownloadProgress = 0;
+            IsLogProgressIndeterminate = false;
         }
 
         private async Task HandleSelectedLogFileChangedAsync(LogFile? selectedFile)
@@ -613,30 +637,44 @@ namespace Cortex.ViewModels
                     return;
                 }
 
-                EnsureValidLogContent(cachedContent);
-                ParseLogContent(cachedContent);
-                ApplyLogFilters();
-                selectedFile.IsDownloaded = true;
-                LogStatusMessage = $"Loaded {selectedFile.FileName}.";
+                try
+                {
+                    EnsureValidLogContent(cachedContent);
+                    ParseLogContent(cachedContent);
+                    ApplyLogFilters();
+                    selectedFile.IsDownloaded = true;
+                    LogStatusMessage = $"Loaded {selectedFile.FileName}.";
+                }
+                catch (Exception ex)
+                {
+                    _downloadedLogCache.Remove(cacheKey);
+                    selectedFile.IsDownloaded = false;
+                    ReportLogDownloadFailure("Couldn't open the cached log. Please try again.", ex);
+                    OnPropertyChanged(nameof(CanDownloadSelectedLog));
+                }
                 return;
             }
 
-            if (selectedFile.IsControllerFile && TryGetStoredControllerLogCopy(selectedFile, out string? storedLogPath))
+            if (selectedFile.IsControllerFile)
             {
                 try
                 {
-                    string content = await File.ReadAllTextAsync(storedLogPath!);
-                    if (!IsSelectedLogLoadCurrent(selectedFile, loadVersion))
+                    if (TryGetStoredControllerLogCopy(selectedFile, out string? storedLogPath))
                     {
+                        string content = await File.ReadAllTextAsync(storedLogPath!);
+                        if (!IsSelectedLogLoadCurrent(selectedFile, loadVersion))
+                        {
+                            return;
+                        }
+
+                        EnsureValidLogContent(content);
+                        _downloadedLogCache[cacheKey] = content;
+                        selectedFile.IsDownloaded = true;
+                        ParseLogContent(content);
+                        ApplyLogFilters();
+                        LogStatusMessage = $"Loaded {selectedFile.FileName}.";
                         return;
                     }
-
-                    EnsureValidLogContent(content);
-                    _downloadedLogCache[cacheKey] = content;
-                    selectedFile.IsDownloaded = true;
-                    ParseLogContent(content);
-                    ApplyLogFilters();
-                    LogStatusMessage = $"Loaded {selectedFile.FileName}.";
                 }
                 catch (Exception ex)
                 {
@@ -645,12 +683,11 @@ namespace Cortex.ViewModels
                         return;
                     }
 
-                    ResetParsedLogContent();
-                    LogStatusMessage = "Failed to load saved log copy.";
-                    AddLog($"Saved log load failed: {ex.Message}");
+                    selectedFile.IsDownloaded = false;
+                    ReportLogDownloadFailure("Couldn't open the saved log. The file may be invalid or unavailable.", ex);
+                    OnPropertyChanged(nameof(CanDownloadSelectedLog));
+                    return;
                 }
-
-                return;
             }
 
             if (!selectedFile.IsControllerFile && File.Exists(selectedFile.FullPath))
@@ -678,8 +715,8 @@ namespace Cortex.ViewModels
                     }
 
                     ResetParsedLogContent();
-                    LogStatusMessage = ex.Message;
-                    AddLog($"Local log validation failed: {ex.Message}");
+                    LogStatusMessage = "Couldn't open the selected log. The file is not a valid PDM log.";
+                    AddLog(LogStatusMessage, exception: ex);
                 }
                 catch (Exception ex)
                 {
@@ -689,8 +726,8 @@ namespace Cortex.ViewModels
                     }
 
                     ResetParsedLogContent();
-                    LogStatusMessage = "Failed to load selected local log file.";
-                    AddLog($"Local log load failed: {ex.Message}");
+                    LogStatusMessage = "Couldn't open the selected log. The file may be invalid or unavailable.";
+                    AddLog(LogStatusMessage, exception: ex);
                 }
 
                 return;

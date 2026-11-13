@@ -63,6 +63,336 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
     }
 
     [Fact]
+    public async Task InvalidConfigFileLeavesSettingsAndGraphUnchanged()
+    {
+        var originalSettings = _viewModel.SettingsDataView;
+        uint originalId = originalSettings.CustomCanMessagesStaticData[0].Id;
+        var originalGraph = _viewModel.IoFlowGraph.CreateSnapshot();
+        var closer = (TestAppCloser)GetField("_appCloser").GetValue(_viewModel)!;
+        closer.ConfigContent = """{"CanMessages":[{"Index":0,"Id":801},{"Index":999,"Id":123}]}""";
+
+        await _viewModel.OpenConfigFileCommand.ExecuteAsync(null);
+
+        Assert.Same(originalSettings, _viewModel.SettingsDataView);
+        Assert.Equal(originalId, originalSettings.CustomCanMessagesStaticData[0].Id);
+        Assert.Equal(JsonSerializer.Serialize(originalGraph), JsonSerializer.Serialize(_viewModel.IoFlowGraph.CreateSnapshot()));
+    }
+
+    [Theory]
+    [InlineData(true, false, false)]
+    [InlineData(true, false, true)]
+    [InlineData(false, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, true)]
+    [InlineData(false, true, true)]
+    public async Task InvalidCachedOrStoredLogReportsFailureWithoutEscaping(bool cached, bool locked, bool viaSelection)
+    {
+        string fileName = $"cortex-test-{Guid.NewGuid():N}.csv";
+        string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Synapse PDM Logs", fileName);
+        var file = new LogFile { FileName = fileName, IsControllerFile = true, IsDownloaded = true };
+        GetField("selectedLogFile").SetValue(_viewModel, file);
+        FileStream? fileLock = null;
+        try
+        {
+            if (cached)
+            {
+                var cache = (Dictionary<string, string>)GetField("_downloadedLogCache").GetValue(_viewModel)!;
+                string key = (string)typeof(MainWindowViewModel).GetMethod("BuildLogCacheKey", BindingFlags.NonPublic | BindingFlags.Static)!
+                    .Invoke(null, [file])!;
+                cache[key] = "invalid log";
+            }
+            else
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                await File.WriteAllTextAsync(path, "invalid log");
+                if (locked) fileLock = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+            }
+
+            if (viaSelection)
+                await (Task)typeof(MainWindowViewModel).GetMethod("HandleSelectedLogFileChangedAsync", BindingFlags.NonPublic | BindingFlags.Instance)!
+                    .Invoke(_viewModel, [file])!;
+            else
+                await _viewModel.DownloadSelectedLogFileCommand.ExecuteAsync(null);
+
+            Assert.Equal(cached ? "Couldn't open the cached log. Please try again."
+                : "Couldn't open the saved log. The file may be invalid or unavailable.", _viewModel.LogStatusMessage);
+            Assert.False(file.IsDownloaded);
+            Assert.False(_viewModel.IsLogBusy);
+            Assert.Equal(0, _viewModel.LogDownloadProgress);
+        }
+        finally
+        {
+            fileLock?.Dispose();
+            if (!cached) File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task InvalidLocalLogSelectionShowsFriendlyError()
+    {
+        Directory.CreateDirectory(_directory);
+        string path = Path.Combine(_directory, "invalid.csv");
+        await File.WriteAllTextAsync(path, "invalid log");
+        var file = new LogFile { FileName = "invalid.csv", FullPath = path };
+        GetField("selectedLogFile").SetValue(_viewModel, file);
+
+        await (Task)typeof(MainWindowViewModel).GetMethod("HandleSelectedLogFileChangedAsync", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .Invoke(_viewModel, [file])!;
+
+        Assert.Equal("Couldn't open the selected log. The file is not a valid PDM log.", _viewModel.LogStatusMessage);
+    }
+
+    [Fact]
+    public async Task InvalidGraphDoesNotApplyOtherwiseValidSettings()
+    {
+        var originalSettings = _viewModel.SettingsDataView;
+        uint originalId = originalSettings.CustomCanMessagesStaticData[0].Id;
+        var closer = (TestAppCloser)GetField("_appCloser").GetValue(_viewModel)!;
+        closer.ConfigContent = """{"CanMessages":[{"Index":0,"Id":801}],"IoFlowGraph":{"Nodes":[{"Kind":"Invalid","Id":1}]}}""";
+
+        await _viewModel.OpenConfigFileCommand.ExecuteAsync(null);
+
+        Assert.Same(originalSettings, _viewModel.SettingsDataView);
+        Assert.Equal(originalId, originalSettings.CustomCanMessagesStaticData[0].Id);
+    }
+
+    [Theory]
+    [InlineData("""{"CanSignals":[{"Index":0,"MessageIndex":0,"StartBit":63,"BitLength":2,"Flags":1,"Factor":1}]}""")]
+    [InlineData("""{"CanMessages":[{"Index":0,"Id":151,"Dlc":1,"Flags":5,"TxTrigger":255}],"CanSignals":[{"Index":0,"MessageIndex":0,"StartBit":8,"BitLength":1,"Flags":1,"Factor":1}]}""")]
+    [InlineData("""{"Channels":[{"ChanType":7,"MathRuleCount":1,"MathRootRule":0,"MathRules":[{"OperandAType":1,"OperandAIndex":14}]}]}""")]
+    [InlineData("""{"Channels":[{"ChanType":7,"MathRuleCount":1,"MathRootRule":0,"MathRules":[{"OperandAType":4,"OperandAIndex":0}]}]}""")]
+    [InlineData("""{"IoFlowGraph":{"Nodes":[{"Kind":"Logic","Id":1}],"StandaloneLogicRules":[{"LogicNodeId":1,"OperandAType":4,"OperandAIndex":1}]}}""")]
+    public async Task InvalidCrossReferencesLeaveSettingsAndGraphUnchanged(string json)
+    {
+        var originalSettings = _viewModel.SettingsDataView;
+        string settingsBefore = ConfigFileSerializer.SerializeSettings(_viewModel.SettingsDataView);
+        string graphBefore = JsonSerializer.Serialize(_viewModel.IoFlowGraph.CreateSnapshot());
+        ((TestAppCloser)GetField("_appCloser").GetValue(_viewModel)!).ConfigContent = json;
+
+        await _viewModel.OpenConfigFileCommand.ExecuteAsync(null);
+
+        Assert.Same(originalSettings, _viewModel.SettingsDataView);
+        Assert.Equal(settingsBefore, ConfigFileSerializer.SerializeSettings(_viewModel.SettingsDataView));
+        Assert.Equal(graphBefore, JsonSerializer.Serialize(_viewModel.IoFlowGraph.CreateSnapshot()));
+    }
+
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(2, 7)]
+    public async Task ValidCanSignalAtDlcBoundaryIsImported(int flags, int startBit)
+    {
+        var closer = (TestAppCloser)GetField("_appCloser").GetValue(_viewModel)!;
+        closer.ConfigContent = $$"""{"CanMessages":[{"Index":0,"Id":151,"Dlc":1,"Flags":5,"TxTrigger":255}],"CanSignals":[{"Index":0,"MessageIndex":0,"StartBit":{{startBit}},"BitLength":8,"Flags":{{flags | 1}},"Factor":1}]}""";
+
+        await _viewModel.OpenConfigFileCommand.ExecuteAsync(null);
+
+        Assert.Equal(1, _viewModel.SettingsDataView.CustomCanMessagesStaticData[0].Dlc);
+        Assert.Equal(startBit, _viewModel.SettingsDataView.CustomCanSignalsStaticData[0].StartBit);
+        Assert.True(_viewModel.SettingsDataView.CustomCanSignalsStaticData[0].IsEnabled);
+    }
+
+    [Fact]
+    public async Task PartialMessageImportChecksExistingSignalAgainstNewDlc()
+    {
+        var signal = _viewModel.SettingsDataView.CustomCanSignalsStaticData[0];
+        signal.MessageIndex = 0;
+        signal.StartBit = 8;
+        signal.BitLength = 1;
+        signal.Factor = 1;
+        signal.IsEnabled = true;
+        string settingsBefore = ConfigFileSerializer.SerializeSettings(_viewModel.SettingsDataView);
+        ((TestAppCloser)GetField("_appCloser").GetValue(_viewModel)!).ConfigContent =
+            """{"CanMessages":[{"Index":0,"Id":151,"Dlc":1,"Flags":5,"TxTrigger":255}]}""";
+
+        await _viewModel.OpenConfigFileCommand.ExecuteAsync(null);
+
+        Assert.Equal(settingsBefore, ConfigFileSerializer.SerializeSettings(_viewModel.SettingsDataView));
+    }
+
+    [Fact]
+    public async Task GraphApplicationFailureRestoresSettingsAndGraph()
+    {
+        var originalPosition = _viewModel.IoFlowGraph.Nodes[0].Location;
+        _viewModel.IoFlowGraph.ItemsDragStartedCommand.Execute(null);
+        MoveAllNodes();
+        Assert.True(_viewModel.IoFlowGraph.CanUndo);
+        string settingsBefore = ConfigFileSerializer.SerializeSettings(_viewModel.SettingsDataView);
+        string graphBefore = JsonSerializer.Serialize(_viewModel.IoFlowGraph.CreateSnapshot());
+        string layoutPath = Path.Combine(_directory, "ioflow-graph.json");
+        File.AppendAllText(layoutPath, Environment.NewLine);
+        string layoutBefore = File.ReadAllText(layoutPath);
+        var originalGraph = _viewModel.IoFlowGraph;
+        bool failureInjected = false;
+        _viewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(MainWindowViewModel.IoFlowGraph) &&
+                !ReferenceEquals(_viewModel.IoFlowGraph, originalGraph))
+            {
+                _viewModel.IoFlowGraph.Nodes.CollectionChanged += (_, nodeArgs) =>
+                {
+                    if (!failureInjected && nodeArgs.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Add)
+                    {
+                        failureInjected = true;
+                        throw new InvalidOperationException("Injected graph application failure");
+                    }
+                };
+            }
+        };
+        ((TestAppCloser)GetField("_appCloser").GetValue(_viewModel)!).ConfigContent =
+            """{"SystemParameters":{"CANResEnabled":true}}""";
+
+        await _viewModel.OpenConfigFileCommand.ExecuteAsync(null);
+
+        Assert.True(failureInjected);
+        Assert.Equal(settingsBefore, ConfigFileSerializer.SerializeSettings(_viewModel.SettingsDataView));
+        Assert.Equal(graphBefore, JsonSerializer.Serialize(_viewModel.IoFlowGraph.CreateSnapshot()));
+        Assert.Same(originalGraph, _viewModel.IoFlowGraph);
+        Assert.True(_viewModel.IoFlowGraph.CanUndo);
+        Assert.Equal(layoutBefore, File.ReadAllText(layoutPath));
+        await _viewModel.IoFlowGraph.UndoCommand.ExecuteAsync(null);
+        Assert.Equal(originalPosition, _viewModel.IoFlowGraph.Nodes[0].Location);
+    }
+
+    [Fact]
+    public async Task SettingsReplacementFailureRestoresSettingsAndGraph()
+    {
+        string settingsBefore = ConfigFileSerializer.SerializeSettings(_viewModel.SettingsDataView);
+        string graphBefore = JsonSerializer.Serialize(_viewModel.IoFlowGraph.CreateSnapshot());
+        var originalSettings = _viewModel.SettingsDataView;
+        bool failureInjected = false;
+        _viewModel.PropertyChanged += (_, args) =>
+        {
+            if (!failureInjected && args.PropertyName == nameof(MainWindowViewModel.SettingsDataView) &&
+                !ReferenceEquals(_viewModel.SettingsDataView, originalSettings))
+            {
+                failureInjected = true;
+                throw new InvalidOperationException("Injected settings replacement failure");
+            }
+        };
+        ((TestAppCloser)GetField("_appCloser").GetValue(_viewModel)!).ConfigContent =
+            """{"SystemParameters":{"CANResEnabled":true}}""";
+
+        await _viewModel.OpenConfigFileCommand.ExecuteAsync(null);
+
+        Assert.True(failureInjected);
+        Assert.Equal(settingsBefore, ConfigFileSerializer.SerializeSettings(_viewModel.SettingsDataView));
+        Assert.Equal(graphBefore, JsonSerializer.Serialize(_viewModel.IoFlowGraph.CreateSnapshot()));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(255)]
+    public async Task GroupNumberRetainsFirmwareByteRange(byte group)
+    {
+        _viewModel.SettingsDataView.ChannelsStaticData[0].GroupNumber = 42;
+        ((TestAppCloser)GetField("_appCloser").GetValue(_viewModel)!).ConfigContent =
+            $$"""{"Channels":[{"GroupNumber":{{group}}}]}""";
+
+        await _viewModel.OpenConfigFileCommand.ExecuteAsync(null);
+
+        Assert.Equal(group, _viewModel.SettingsDataView.ChannelsStaticData[0].GroupNumber);
+    }
+
+    [Fact]
+    public async Task PartialImportPreservesUnspecifiedThresholdsAndRuntimeValues()
+    {
+        var channel = _viewModel.SettingsDataView.ChannelsStaticData[0];
+        channel.SetImportedThresholds(2, 4);
+        channel.CurrentValue = 15;
+        ((TestAppCloser)GetField("_appCloser").GetValue(_viewModel)!).ConfigContent =
+            """{"SystemParameters":{"CANResEnabled":true}}""";
+
+        await _viewModel.OpenConfigFileCommand.ExecuteAsync(null);
+
+        channel = _viewModel.SettingsDataView.ChannelsStaticData[0];
+        Assert.Equal(2, channel.OnThreshold);
+        Assert.Equal(4, channel.OffThreshold);
+        Assert.Equal(15, channel.CurrentValue);
+        Assert.True(_viewModel.SettingsDataView.SystemParamsStaticData.CANResEnabled);
+    }
+
+    [Theory]
+    [InlineData(false, null, "", "new-password")]
+    [InlineData(true, null, "", "new-password")]
+    [InlineData(false, "old-password", "old-password", "")]
+    [InlineData(true, "old-password", "old-password", "")]
+    public void PasswordOnlyChangesRemainPendingAfterRecalculation(bool mqtt, string? baselinePassword, string initialPassword, string editedPassword)
+    {
+        var baseline = ((DataStructures)GetField("_controllerConfigBaseline").GetValue(_viewModel)!).CellularParamsStaticData;
+        var current = _viewModel.SettingsDataView.CellularParamsStaticData;
+        if (mqtt)
+        {
+            baseline.MQTTPassword = baselinePassword;
+            current.MQTTPassword = initialPassword;
+        }
+        else
+        {
+            baseline.APNPassword = baselinePassword;
+            current.APNPassword = initialPassword;
+        }
+
+        var recalculate = typeof(MainWindowViewModel).GetMethod("RecalculatePendingConfigChanges", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        recalculate.Invoke(_viewModel, null);
+        Assert.False(_viewModel.CanSendConfig);
+        if (mqtt) current.MQTTPassword = editedPassword;
+        else current.APNPassword = editedPassword;
+        recalculate.Invoke(_viewModel, null);
+        Assert.True(_viewModel.CanSendConfig);
+        if (mqtt) current.MQTTPassword = baselinePassword;
+        else current.APNPassword = baselinePassword;
+        recalculate.Invoke(_viewModel, null);
+        Assert.False(_viewModel.CanSendConfig);
+    }
+
+    [Fact]
+    public async Task LegacyPasswordOnlyImportRemainsPending()
+    {
+        ((TestAppCloser)GetField("_appCloser").GetValue(_viewModel)!).ConfigContent =
+            """{"CellularParameters":{"APNPassword":"legacy-apn","MQTTPassword":"legacy-mqtt"}}""";
+
+        await _viewModel.OpenConfigFileCommand.ExecuteAsync(null);
+
+        Assert.Equal("legacy-apn", _viewModel.SettingsDataView.CellularParamsStaticData.APNPassword);
+        Assert.Equal("legacy-mqtt", _viewModel.SettingsDataView.CellularParamsStaticData.MQTTPassword);
+        Assert.True(_viewModel.CanSendConfig);
+    }
+
+    [Fact]
+    public async Task ConfigFileExportOmitsPasswordsFromSettingsAndGraph()
+    {
+        _viewModel.SettingsDataView.CellularParamsStaticData.APNPassword = "export-apn-secret";
+        _viewModel.SettingsDataView.CellularParamsStaticData.MQTTPassword = "export-mqtt-secret";
+        var closer = (TestAppCloser)GetField("_appCloser").GetValue(_viewModel)!;
+
+        await _viewModel.SaveConfigFileCommand.ExecuteAsync(null);
+
+        Assert.NotNull(closer.SavedConfigContent);
+        Assert.DoesNotContain("export-apn-secret", closer.SavedConfigContent);
+        Assert.DoesNotContain("export-mqtt-secret", closer.SavedConfigContent);
+        Assert.DoesNotContain("APNPassword", closer.SavedConfigContent);
+        Assert.DoesNotContain("MQTTPassword", closer.SavedConfigContent);
+        Assert.Contains("IoFlowGraph", closer.SavedConfigContent);
+    }
+
+    [Fact]
+    public async Task LegacyFullSettingsSignatureIgnoresLiveValues()
+    {
+        var flow = (IoFlowGraphConfigSnapshot)typeof(MainWindowViewModel)
+            .GetMethod("CreateIoFlowConfigSnapshot", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .Invoke(_viewModel, null)!;
+        var legacy = System.Text.Json.Nodes.JsonNode.Parse(ConfigFileSerializer.SerializeSettings(_viewModel.SettingsDataView))!.AsObject();
+        legacy["Channels"]![0]!["CurrentValue"] = 42;
+        legacy["SystemParameters"]!["VBatt"] = 14;
+        flow.ControllerSettingsSignature = legacy.ToJsonString();
+        string content = ConfigFileSerializer.SerializeSettings(_viewModel.SettingsDataView, flow);
+        ((TestAppCloser)GetField("_appCloser").GetValue(_viewModel)!).ConfigContent = content;
+
+        await _viewModel.OpenConfigFileCommand.ExecuteAsync(null);
+
+        Assert.DoesNotContain("does not match", _viewModel.IoFlowControllerMismatchWarning);
+    }
+
+    [Fact]
     public void FailedConnectionDisposesServiceBeforeDroppingIt()
     {
         SerialPortService? attemptedService = null;
@@ -1084,13 +1414,18 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
     private sealed class TestAppCloser : IAppCloser
     {
         public string? ConfigContent { get; set; }
+        public string? SavedConfigContent { get; private set; }
         public bool ConfirmationResult { get; set; } = true;
         public int ConfirmationCount { get; private set; }
         public void CloseApp() { }
         public Task<string?> OpenPdmFileContentAsync() => Task.FromResult(ConfigContent);
         public Task<string?> BrowseLocalLogFilePathAsync(string initialDirectory) => Task.FromResult<string?>(null);
         public Task<string?> BrowseDbcFilePathAsync() => Task.FromResult<string?>(null);
-        public Task<bool> SavePdmFileContentAsync(string content) => Task.FromResult(true);
+        public Task<bool> SavePdmFileContentAsync(string content)
+        {
+            SavedConfigContent = content;
+            return Task.FromResult(true);
+        }
         public Task<bool> ConfirmAsync(string title, string message, string confirmButtonText = "CONFIRM", string cancelButtonText = "CANCEL")
         {
             ConfirmationCount++;
@@ -1099,6 +1434,7 @@ public sealed class MainWindowViewModelIoFlowRevertTests : IDisposable
         public Task OpenUrlAsync(string url) => Task.CompletedTask;
         public Task<LocalFirmwareUpdateSelection?> BrowseLocalFirmwareUpdateFilesAsync() => Task.FromResult<LocalFirmwareUpdateSelection?>(null);
         public Task ShowAboutAsync() => Task.CompletedTask;
+        public Task<ConfigurationBackupEntry?> ShowConfigurationBackupDialogAsync(IReadOnlyList<ConfigurationBackupEntry> backups) => Task.FromResult<ConfigurationBackupEntry?>(null);
         public Task ShowFirmwareUpdateDialogAsync(FirmwareUpdateWindowViewModel viewModel) => Task.CompletedTask;
         public Task<PinSetupDialogResult?> ShowPinSetupWizardAsync(bool isPinAlreadyEnabled) => Task.FromResult<PinSetupDialogResult?>(null);
         public Task<bool> ShowRecoveryCodeAsync(string recoveryCode) => Task.FromResult(true);

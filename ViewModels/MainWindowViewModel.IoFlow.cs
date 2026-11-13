@@ -1,3 +1,4 @@
+using Cortex.Models;
 using Cortex.Services;
 using Cortex.ViewModels.IoFlow;
 using System;
@@ -11,10 +12,17 @@ public partial class MainWindowViewModel
     private readonly IoFlowGraphStore _ioFlowGraphStore;
     private IoFlowGraphSnapshot? _ioFlowBaselineSnapshot;
     private bool _isApplyingIoFlowSnapshot;
+    private bool _deferIoFlowLayoutPersistence;
+    private bool _deferredIoFlowLayoutReplace;
     private bool _ioFlowHasUnsavedControllerChanges;
     private string _ioFlowSnapshotMismatchWarning = string.Empty;
     private string _ioFlowControllerMismatchWarning = string.Empty;
-    public IoFlowGraphViewModel IoFlowGraph { get; } = new();
+    private IoFlowGraphViewModel _ioFlowGraph = new();
+    public IoFlowGraphViewModel IoFlowGraph
+    {
+        get => _ioFlowGraph;
+        private set => SetProperty(ref _ioFlowGraph, value);
+    }
 
     public string IoFlowControllerMismatchWarning
     {
@@ -32,16 +40,21 @@ public partial class MainWindowViewModel
 
     private void InitializeIoFlowGraph()
     {
-        IoFlowGraph.GraphChangedAction = OnIoFlowGraphChanged;
-        IoFlowGraph.ConfirmAction = (title, message, confirmText, cancelText) => _appCloser.ConfirmAsync(title, message, confirmText, cancelText);
-        IoFlowGraph.SetCustomCanTxStateAction = SetCustomCanMessageTxStateAsync;
-        IoFlowGraph.SetCustomCanTxModeAction = SetCustomCanMessageTxMode;
+        ConfigureIoFlowGraph(IoFlowGraph);
         IoFlowGraph.Build(SettingsDataView, LiveDataView);
         _ioFlowHasUnsavedControllerChanges = false;
         _ioFlowSnapshotMismatchWarning = string.Empty;
         LoadIoFlowGraphSnapshotIfAvailable();
         EnsureIoFlowGraphPopulatedFromSettings();
         UpdateIoFlowControllerMismatchWarning();
+    }
+
+    private void ConfigureIoFlowGraph(IoFlowGraphViewModel graph)
+    {
+        graph.GraphChangedAction = OnIoFlowGraphChanged;
+        graph.ConfirmAction = (title, message, confirmText, cancelText) => _appCloser.ConfirmAsync(title, message, confirmText, cancelText);
+        graph.SetCustomCanTxStateAction = SetCustomCanMessageTxStateAsync;
+        graph.SetCustomCanTxModeAction = SetCustomCanMessageTxMode;
     }
 
     private void RefreshIoFlowGraphFromSettings()
@@ -156,6 +169,11 @@ public partial class MainWindowViewModel
     {
         if (_isApplyingIoFlowSnapshot || _suppressDirtyTracking)
             return;
+        if (_deferIoFlowLayoutPersistence)
+        {
+            _deferredIoFlowLayoutReplace |= replaceLayout;
+            return;
+        }
         // Until settings arrive, the graph lacks configured inputs and rule nodes.
         _ioFlowGraphStore.Save(IoFlowGraph.CreateLayoutSnapshot(),
             preserveUnmatchedNodePositions: !replaceLayout
@@ -192,7 +210,12 @@ public partial class MainWindowViewModel
 
         string current = ConfigFileSerializer.SerializeSettings(SettingsDataView, includeCustomCanMetadata: false);
         string baseline = ConfigFileSerializer.SerializeSettings(_controllerConfigBaseline, includeCustomCanMetadata: false);
-        return !string.Equals(current, baseline, StringComparison.Ordinal) || HasPendingCustomCanChanges();
+        CellularParameters currentCellular = SettingsDataView.CellularParamsStaticData;
+        CellularParameters baselineCellular = _controllerConfigBaseline.CellularParamsStaticData;
+        return !string.Equals(current, baseline, StringComparison.Ordinal)
+            || !string.Equals(currentCellular.APNPassword ?? string.Empty, baselineCellular.APNPassword ?? string.Empty, StringComparison.Ordinal)
+            || !string.Equals(currentCellular.MQTTPassword ?? string.Empty, baselineCellular.MQTTPassword ?? string.Empty, StringComparison.Ordinal)
+            || HasPendingCustomCanChanges();
     }
 
     private void UpdateIoFlowControllerMismatchWarning()
@@ -314,6 +337,53 @@ public partial class MainWindowViewModel
         return snapshot.Nodes.Any(node => string.Equals(node.Kind, "Output", StringComparison.Ordinal));
     }
 
+    private static bool AreImportedGraphRulesValid(IoFlowGraphSnapshot snapshot)
+    {
+        var logicIds = snapshot.Nodes.Where(node => node.Kind == "Logic").Select(node => node.Id).ToHashSet();
+        var rules = new Dictionary<int, IoFlowStandaloneLogicRuleSnapshot>();
+        bool ValidOperand(byte type, byte index) => (OutputChannel.MathOperandType)type switch
+        {
+            OutputChannel.MathOperandType.Constant => true,
+            OutputChannel.MathOperandType.Channel => index < Constants.NUM_OUTPUT_CHANNELS,
+            OutputChannel.MathOperandType.AnalogueInput => index < Constants.NUM_ANALOGUE_INPUTS,
+            OutputChannel.MathOperandType.DigitalInput => index < Constants.NUM_DIGITAL_INPUTS,
+            OutputChannel.MathOperandType.SystemValue => Enum.IsDefined((OutputChannel.MathSystemValue)index),
+            OutputChannel.MathOperandType.CanSignal => index < Constants.MAX_CUSTOM_CAN_SIGNALS,
+            OutputChannel.MathOperandType.Rule => logicIds.Contains(index),
+            _ => false,
+        };
+
+        foreach (var rule in snapshot.StandaloneLogicRules)
+        {
+            bool unary = rule.Operation is (byte)OutputChannel.MathOperation.NOT or (byte)OutputChannel.MathOperation.ABS or (byte)OutputChannel.MathOperation.TOGGLE;
+            if (!rules.TryAdd(rule.LogicNodeId, rule) || !logicIds.Contains(rule.LogicNodeId) ||
+                rule.Operation > (byte)OutputChannel.MathOperation.TOGGLE || rule.HysteresisEnabled > 1 ||
+                (rule.HysteresisEnabled != 0 && (rule.Operation < (byte)OutputChannel.MathOperation.GREATER_THAN ||
+                    rule.Operation > (byte)OutputChannel.MathOperation.LESS_EQUAL)) ||
+                !float.IsFinite(rule.OnThreshold) || !float.IsFinite(rule.OffThreshold) ||
+                !float.IsFinite(rule.OperandAConstant) || !float.IsFinite(rule.OperandBConstant) ||
+                !ValidOperand(rule.OperandAType, rule.OperandAIndex) ||
+                (!unary && !ValidOperand(rule.OperandBType, rule.OperandBIndex)))
+                return false;
+        }
+
+        var visiting = new HashSet<int>();
+        var visited = new HashSet<int>();
+        bool HasCycle(int id)
+        {
+            if (visited.Contains(id) || !rules.TryGetValue(id, out var rule)) return false;
+            if (!visiting.Add(id)) return true;
+            bool unary = rule.Operation is (byte)OutputChannel.MathOperation.NOT or (byte)OutputChannel.MathOperation.ABS or (byte)OutputChannel.MathOperation.TOGGLE;
+            if ((rule.OperandAType == (byte)OutputChannel.MathOperandType.Rule && HasCycle(rule.OperandAIndex)) ||
+                (!unary && rule.OperandBType == (byte)OutputChannel.MathOperandType.Rule && HasCycle(rule.OperandBIndex)))
+                return true;
+            visiting.Remove(id);
+            visited.Add(id);
+            return false;
+        }
+        return rules.Keys.All(id => !HasCycle(id));
+    }
+
     private void EnsureIoFlowGraphPopulatedFromSettings()
     {
         if (IoFlowGraph.OutputNodes.Count > 0)
@@ -364,7 +434,8 @@ public partial class MainWindowViewModel
             bool signatureMatches = !string.IsNullOrWhiteSpace(snapshot.ControllerSettingsSignature)
                 && (string.Equals(snapshot.ControllerSettingsSignature, controllerSignature, StringComparison.Ordinal)
                     || string.Equals(snapshot.ControllerSettingsSignature,
-                        ConfigFileSerializer.SerializeSettings(SettingsDataView), StringComparison.Ordinal));
+                        ConfigFileSerializer.SerializeSettings(SettingsDataView), StringComparison.Ordinal)
+                    || IsLegacyIoFlowSignatureMatch(snapshot.ControllerSettingsSignature, controllerSignature));
 
             if (!signatureMatches)
             {
@@ -401,6 +472,19 @@ public partial class MainWindowViewModel
         return true;
     }
 
+    private bool IsLegacyIoFlowSignatureMatch(string signature, string controllerSignature)
+    {
+        if (!ConfigFileSerializer.TryDeserialize(signature, out var legacy, out _) || legacy == null ||
+            legacy.Channels?.Count != SettingsDataView.ChannelsStaticData.Count ||
+            legacy.DigitalInputs?.Count != SettingsDataView.DigitalInputsStaticData.Count ||
+            legacy.AnalogueInputs?.Count != SettingsDataView.AnalogueInputsStaticData.Count ||
+            legacy.SystemParameters == null)
+            return false;
+        DataStructures settings = DeepCopyDataStructures(SettingsDataView);
+        ConfigFileSerializer.ApplySnapshot(settings, legacy);
+        return string.Equals(CreateIoFlowDraftSignature(settings), controllerSignature, StringComparison.Ordinal);
+    }
+
     private void ApplyIoFlowSnapshotFromConfig(IoFlowGraphSnapshot? snapshot)
     {
         if (snapshot == null)
@@ -420,8 +504,12 @@ public partial class MainWindowViewModel
 
     private IoFlowGraphConfigSnapshot CreateIoFlowConfigSnapshot()
     {
-        IoFlowGraphSnapshot snapshot = IoFlowGraph.CreateSnapshot();
-        snapshot.ControllerSettingsSignature = CreateIoFlowControllerSignature();
+        return CreateIoFlowConfigSnapshotForSettings(IoFlowGraph.CreateSnapshot(), SettingsDataView);
+    }
+
+    private IoFlowGraphConfigSnapshot CreateIoFlowConfigSnapshotForSettings(IoFlowGraphSnapshot snapshot, DataStructures settings)
+    {
+        snapshot.ControllerSettingsSignature = CreateIoFlowDraftSignature(settings);
 
         return new IoFlowGraphConfigSnapshot
         {

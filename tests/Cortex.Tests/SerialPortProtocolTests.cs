@@ -114,6 +114,39 @@ public class SerialPortProtocolTests
         }
     }
 
+    [Fact]
+    public async Task ReceiveCallbackDoesNotWaitForReceiveLockDuringShutdown()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        object receiveLock = GetField<object>(service, "_serialReceiveLock");
+        var acquired = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        Task holder = Task.Factory.StartNew(() =>
+        {
+            lock (receiveLock)
+            {
+                acquired.SetResult(true);
+                release.Wait();
+            }
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        try
+        {
+            await acquired.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            SetField(service, "_isShuttingDown", true);
+            Task callback = Task.Factory.StartNew(() =>
+                InvokeInstanceMethod(service, "OnDataReceived", null!, null!),
+                CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            await callback.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            release.Set();
+            await holder.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+    }
+
     private static Task<byte[]?> StartSecureFrameRead(
         ConcurrentQueue<byte> input, int timeoutMs, bool allowEnvelope, byte operation)
     {
@@ -526,11 +559,15 @@ public class SerialPortProtocolTests
             plaintext, GetProperty<byte[]>(session, "DeviceToClientKey"), GetProperty<byte[]>(session, "SessionId"), 4u,
         })!;
         List<byte> incoming = GetField<List<byte>>(service, "_secureIncomingBuffer");
+        List<byte> decoded = GetField<List<byte>>(service, "receivedDataBuffer");
+        byte[] partialDecodedFrame = [Constants.SERIAL_HEADER1, Constants.SERIAL_HEADER2, (byte)'z'];
+        decoded.AddRange(partialDecodedFrame);
         incoming.AddRange(frame[..10]);
 
         InvokeInstanceMethod(service, "ResetStandaloneReceiveState", true);
         InvokeInstanceMethod(service, "ResetStandaloneReceiveState", false);
         Assert.Equal(frame[..10], incoming.ToArray());
+        Assert.Equal(partialDecodedFrame, decoded);
         incoming.AddRange(frame[10..]);
         object[] args = { Array.Empty<byte>() };
         Assert.True((bool)typeof(SerialPortService)
@@ -599,6 +636,218 @@ public class SerialPortProtocolTests
         Assert.Equal(0u, GetProperty<uint>(session, "RxSequence"));
     }
 
+    [Fact]
+    public async Task SecureSessionAcceptsFragmentedPublicFrameContainingAckBytes()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        object session = GetField<object>(service, "_secureSession");
+        SetProperty(session, "IsSessionOpen", true);
+        SetProperty(session, "IsAuthorized", true);
+        var completion = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        SetField(service, "_buildDateTcs", completion);
+        byte[] frame = BuildGenericFrame((byte)Constants.COMMAND_ID_BUILD_DATE, (byte)'c', (byte)'f', (byte)'!');
+        List<byte> incoming = GetField<List<byte>>(service, "_secureIncomingBuffer");
+        incoming.AddRange(frame[..4]);
+        object[] args = { Array.Empty<byte>() };
+        MethodInfo read = typeof(SerialPortService).GetMethod("TryReadNextSecureIncomingPayload",
+            BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+        Assert.False((bool)read.Invoke(service, args)!);
+        incoming.AddRange(frame[4..]);
+        Assert.True((bool)read.Invoke(service, args)!);
+        Assert.Equal(frame, (byte[])args[0]);
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessSecureIncomingPayload", (byte[])args[0])!);
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+        Assert.Equal("cf!", await completion.Task);
+        Assert.Equal(0u, GetProperty<uint>(session, "RxSequence"));
+    }
+
+    [Fact]
+    public void IncompletePublicResponseRecoversFollowingAuthenticatedEnvelope()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        object session = GetField<object>(service, "_secureSession");
+        SetProperty(session, "IsSessionOpen", true);
+        SetProperty(session, "IsAuthorized", true);
+        SetField(service, "_firmwareVersionTcs", new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously));
+        byte[] payload = [Constants.SERIAL_HEADER1, Constants.SERIAL_HEADER2, (byte)'x'];
+        MethodInfo encrypt = typeof(SerialPortService).GetMethod("EncryptSecureEnvelope", BindingFlags.NonPublic | BindingFlags.Static)!;
+        byte[] envelope = (byte[])encrypt.Invoke(null, [payload, GetProperty<byte[]>(session, "DeviceToClientKey"),
+            GetProperty<byte[]>(session, "SessionId"), 0u])!;
+        List<byte> incoming = GetField<List<byte>>(service, "_secureIncomingBuffer");
+        incoming.AddRange([Constants.SERIAL_HEADER1, Constants.SERIAL_HEADER2, (byte)Constants.COMMAND_ID_FW_VER, (byte)'v']);
+        incoming.AddRange(envelope[..10]);
+        MethodInfo read = typeof(SerialPortService).GetMethod("TryReadNextSecureIncomingPayload", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        object[] args = [Array.Empty<byte>()];
+
+        Assert.False((bool)read.Invoke(service, args)!);
+        incoming.AddRange(envelope[10..]);
+        Assert.True((bool)read.Invoke(service, args)!);
+        Assert.Empty((byte[])args[0]);
+        Assert.True((bool)read.Invoke(service, args)!);
+        Assert.Equal(payload, (byte[])args[0]);
+        Assert.Equal(1u, GetProperty<uint>(session, "RxSequence"));
+        Assert.Empty(incoming);
+    }
+
+    [Fact]
+    public void IncompletePublicResponsePreservesLargeFragmentedSecureEnvelope()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        object session = GetField<object>(service, "_secureSession");
+        SetProperty(session, "IsSessionOpen", true);
+        SetField(service, "_firmwareVersionTcs", new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously));
+        byte[] payload = Enumerable.Repeat((byte)42, 1500).ToArray();
+        MethodInfo encrypt = typeof(SerialPortService).GetMethod("EncryptSecureEnvelope", BindingFlags.NonPublic | BindingFlags.Static)!;
+        byte[] envelope = (byte[])encrypt.Invoke(null, [payload, GetProperty<byte[]>(session, "DeviceToClientKey"),
+            GetProperty<byte[]>(session, "SessionId"), 0u])!;
+        List<byte> incoming = GetField<List<byte>>(service, "_secureIncomingBuffer");
+        incoming.AddRange([Constants.SERIAL_HEADER1, Constants.SERIAL_HEADER2, (byte)Constants.COMMAND_ID_FW_VER]);
+        incoming.AddRange(envelope[..1050]);
+        MethodInfo read = typeof(SerialPortService).GetMethod("TryReadNextSecureIncomingPayload", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        object[] args = [Array.Empty<byte>()];
+
+        Assert.False((bool)read.Invoke(service, args)!);
+        Assert.True(service.IsSecureSessionOpen);
+        incoming.AddRange(envelope[1050..]);
+        Assert.True((bool)read.Invoke(service, args)!);
+        Assert.True((bool)read.Invoke(service, args)!);
+        Assert.Equal(payload, (byte[])args[0]);
+        Assert.Equal(1u, GetProperty<uint>(session, "RxSequence"));
+    }
+
+    [Fact]
+    public void ForgedEnvelopeDoesNotDiscardIncompletePublicResponse()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        object session = GetField<object>(service, "_secureSession");
+        SetProperty(session, "IsSessionOpen", true);
+        SetField(service, "_firmwareVersionTcs", new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously));
+        MethodInfo encrypt = typeof(SerialPortService).GetMethod("EncryptSecureEnvelope", BindingFlags.NonPublic | BindingFlags.Static)!;
+        byte[] envelope = (byte[])encrypt.Invoke(null, [new byte[] { 1 }, Enumerable.Repeat((byte)1, 32).ToArray(),
+            GetProperty<byte[]>(session, "SessionId"), 0u])!;
+        List<byte> incoming = GetField<List<byte>>(service, "_secureIncomingBuffer");
+        incoming.AddRange([Constants.SERIAL_HEADER1, Constants.SERIAL_HEADER2, (byte)Constants.COMMAND_ID_FW_VER]);
+        incoming.AddRange(envelope);
+        byte[] original = incoming.ToArray();
+        object[] args = [Array.Empty<byte>()];
+
+        Assert.False((bool)typeof(SerialPortService).GetMethod("TryReadNextSecureIncomingPayload",
+            BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(service, args)!);
+        Assert.Equal(original, incoming);
+        Assert.True(service.IsSecureSessionOpen);
+    }
+
+    [Fact]
+    public void TimedOutPartialPublicResponseInvalidatesSession()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        object session = GetField<object>(service, "_secureSession");
+        SetProperty(session, "IsSessionOpen", true);
+        SetProperty(session, "IsAuthorized", true);
+        service.foundECU = true;
+        List<byte> incoming = GetField<List<byte>>(service, "_secureIncomingBuffer");
+        incoming.AddRange([Constants.SERIAL_HEADER1, Constants.SERIAL_HEADER2, (byte)Constants.COMMAND_ID_FW_VER]);
+
+        InvokeInstanceMethod(service, "AbandonIncompletePublicResponse", Constants.COMMAND_ID_FW_VER);
+
+        Assert.Empty(incoming);
+        Assert.False(service.IsSecureSessionOpen);
+        Assert.False(service.foundECU);
+        Assert.True(service.UpdateStaticData);
+    }
+
+    [Fact]
+    public void PublicResponseTimeoutDoesNotDiscardPartialSecureEnvelope()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        object session = GetField<object>(service, "_secureSession");
+        SetProperty(session, "IsSessionOpen", true);
+        byte[] partial = [(byte)Constants.SECURE_ENVELOPE_FRAME_PREFIX, 10, 0];
+        List<byte> incoming = GetField<List<byte>>(service, "_secureIncomingBuffer");
+        incoming.AddRange(partial);
+
+        InvokeInstanceMethod(service, "AbandonIncompletePublicResponse", Constants.COMMAND_ID_FW_VER);
+
+        Assert.Equal(partial, incoming);
+        Assert.True(service.IsSecureSessionOpen);
+    }
+
+    [Fact]
+    public void OversizedInvalidPublicResponseInvalidatesSessionInsteadOfEnteringFrameParser()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        object session = GetField<object>(service, "_secureSession");
+        SetProperty(session, "IsSessionOpen", true);
+        SetField(service, "_firmwareVersionTcs", new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously));
+        List<byte> incoming = GetField<List<byte>>(service, "_secureIncomingBuffer");
+        incoming.AddRange([Constants.SERIAL_HEADER1, Constants.SERIAL_HEADER2, (byte)Constants.COMMAND_ID_FW_VER]);
+        incoming.AddRange(Enumerable.Repeat((byte)'a', 1022));
+        object[] args = [Array.Empty<byte>()];
+
+        Assert.True((bool)typeof(SerialPortService).GetMethod("TryReadNextSecureIncomingPayload",
+            BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(service, args)!);
+        Assert.Empty((byte[])args[0]);
+        Assert.Empty(incoming);
+        Assert.Empty(GetField<List<byte>>(service, "receivedDataBuffer"));
+        Assert.False(service.IsSecureSessionOpen);
+    }
+
+    [Fact]
+    public async Task SecureSessionSetupWaitsForEarlierSetup()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        SemaphoreSlim gate = GetField<SemaphoreSlim>(service, "_secureSessionSetupLock");
+        await gate.WaitAsync();
+        try
+        {
+            Task<bool> setup = service.EnsureSecureSessionAsync();
+            Assert.False(setup.IsCompleted);
+            gate.Release();
+            Assert.False(await setup.WaitAsync(TimeSpan.FromSeconds(2)));
+            return;
+        }
+        finally
+        {
+            if (gate.CurrentCount == 0)
+                gate.Release();
+        }
+    }
+
+    [Fact]
+    public void SecurePublicFrameCannotBypassPendingProtectedAcknowledgement()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        object session = GetField<object>(service, "_secureSession");
+        SetProperty(session, "IsSessionOpen", true);
+        SetProperty(session, "IsAuthorized", true);
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        SetField(service, "_standaloneCommandAckTcs", completion);
+        SetField(service, "_standaloneCommandAckId", Constants.COMMAND_ID_LOG_RESET);
+        SetField(service, "_buildDateTcs", new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously));
+        List<byte> incoming = GetField<List<byte>>(service, "_secureIncomingBuffer");
+        incoming.AddRange(BuildGenericFrame((byte)Constants.COMMAND_ID_BUILD_DATE, (byte)'c', (byte)'f'));
+        MethodInfo read = typeof(SerialPortService).GetMethod("TryReadNextSecureIncomingPayload",
+            BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+        while (incoming.Count > 0)
+        {
+            object[] args = { Array.Empty<byte>() };
+            Assert.True((bool)read.Invoke(service, args)!);
+            Assert.Empty((byte[])args[0]);
+        }
+        Assert.False(completion.Task.IsCompleted);
+    }
+
     private static void SetProperty(object instance, string name, object value)
         => instance.GetType().GetProperty(name)!.SetValue(instance, value);
 
@@ -627,10 +876,10 @@ public class SerialPortProtocolTests
     {
         using var service = new SerialPortService("COM1");
         SetField(service, "_configurationSaveActive", true);
-        SetField(service, "_configurationPreviousPollingSuspended", previouslySuspended);
+        SetField(service, "_suspendLiveRequestPolling", previouslySuspended);
+        SetField(service, "_configurationPollingSuspension", InvokeInstanceMethod(service, "SuspendLivePolling")!);
         SetField(service, "_configurationCommandSentTick", Environment.TickCount64);
         SetField(service, "_pendingConfigurationCommand", Constants.COMMAND_ID_SAVECHANGES);
-        SetField(service, "_suspendLiveRequestPolling", true);
         SetField(service, "lastCommandSent", Constants.COMMAND_ID_REQUEST);
         bool? result = null;
         service.ConfigurationSaveCompleted += (_, args) => result = args.Succeeded;
@@ -649,9 +898,9 @@ public class SerialPortProtocolTests
     {
         using var service = new SerialPortService("COM1");
         SetField(service, "_configurationSaveActive", true);
-        SetField(service, "_configurationPreviousPollingSuspended", previouslySuspended);
+        SetField(service, "_suspendLiveRequestPolling", previouslySuspended);
+        SetField(service, "_configurationPollingSuspension", InvokeInstanceMethod(service, "SuspendLivePolling")!);
         SetField(service, "_configurationCommandSentTick", Environment.TickCount64 - 10001);
-        SetField(service, "_suspendLiveRequestPolling", true);
         SetField(service, "sendingConfig", true);
         bool? result = null;
         service.ConfigurationSaveCompleted += (_, args) => result = args.Succeeded;
@@ -672,7 +921,7 @@ public class SerialPortProtocolTests
         SetField(service, "_configurationCommandSentTick", Environment.TickCount64 - 10001);
         SetField(service, "_pendingConfigurationCommand", Constants.COMMAND_ID_SAVECHANGES);
         SetField(service, "lastCommandSent", Constants.COMMAND_ID_SAVECHANGES);
-        SetField(service, "_suspendLiveRequestPolling", true);
+        SetField(service, "_configurationPollingSuspension", InvokeInstanceMethod(service, "SuspendLivePolling")!);
         SetField(service, "sendingConfig", true);
         SetField(service, "saveToEEPROM", true);
         var completions = new List<bool>();
@@ -691,6 +940,30 @@ public class SerialPortProtocolTests
         Assert.False(GetField<bool>(service, "saveToEEPROM"));
         Assert.False(GetField<bool>(service, "_suspendLiveRequestPolling"));
         Assert.Equal('\0', GetField<char>(service, "_pendingConfigurationCommand"));
+    }
+
+    [Fact]
+    public void ParseLoopProcessesBufferedSaveAckBeforeCheckingTimeout()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        SetField(service, "_configurationSaveActive", true);
+        SetField(service, "_configurationPollingSuspension", InvokeInstanceMethod(service, "SuspendLivePolling")!);
+        SetField(service, "_configurationCommandSentTick", Environment.TickCount64 - 10001);
+        SetField(service, "_pendingConfigurationCommand", Constants.COMMAND_ID_SAVECHANGES);
+        InvokeInstanceMethod(service, "AppendIncomingBytes", new byte[] { (byte)Constants.COMMAND_ID_CONFIM });
+        bool? result = null;
+        service.ConfigurationSaveCompleted += (_, args) =>
+        {
+            result = args.Succeeded;
+            cancellation.Cancel();
+        };
+        GetField<AutoResetEvent>(service, "_parseSignal").Set();
+
+        InvokeInstanceMethod(service, "RunParseLoop", cancellation.Token);
+
+        Assert.True(result);
     }
 
     [Fact]
@@ -811,6 +1084,7 @@ public class SerialPortProtocolTests
     [InlineData(Constants.COMMAND_ID_CHECKSUM_FAIL, Constants.COMMAND_ID_LOG_RESET, false)]
     [InlineData(Constants.COMMAND_ID_CONFIM, Constants.COMMAND_ID_REQUEST, true)]
     [InlineData(Constants.COMMAND_ID_CHECKSUM_FAIL, Constants.COMMAND_ID_REQUEST, false)]
+    [InlineData(Constants.COMMAND_ID_CONFIM, Constants.COMMAND_ID_FW_VER, true)]
     public async Task LogReset_SharedAckHandler_UsesPendingRequestDespiteLivePolling(char response, char lastCommand, bool expected)
     {
         using var service = new SerialPortService("COM1");
@@ -823,6 +1097,239 @@ public class SerialPortProtocolTests
         Assert.False(completion.Task.IsCompleted);
         Assert.True((bool)InvokeInstanceMethod(service, "TryHandleStandaloneAckByte", (byte)response)!);
         Assert.Equal(expected, await completion.Task);
+    }
+
+    [Fact]
+    public async Task StandaloneAckWaitsForRequestOwnershipBeforeCompleting()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        SetField(service, "_standaloneCommandAckTcs", completion);
+        SetField(service, "_standaloneCommandAckId", Constants.COMMAND_ID_LOG_RESET);
+        SetField(service, "lastCommandSent", Constants.COMMAND_ID_LOG_RESET);
+        object ackLock = GetField<object>(service, "_standaloneAckLock");
+        var acquired = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        Task holder = Task.Factory.StartNew(() =>
+        {
+            lock (ackLock)
+            {
+                acquired.SetResult(true);
+                release.Wait();
+                SetField(service, "_standaloneCommandAckTcs", null!);
+                SetField(service, "_standaloneCommandAckId", '\0');
+            }
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        try
+        {
+            await acquired.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Task<bool> response = Task.Factory.StartNew(() =>
+            {
+                entered.SetResult(true);
+                return (bool)InvokeInstanceMethod(service, "TryHandleStandaloneAckByte",
+                    (byte)Constants.COMMAND_ID_CONFIM)!;
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await Task.Delay(100);
+            Assert.False(response.IsCompleted);
+            release.Set();
+            Assert.False(await response.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.False(completion.Task.IsCompleted);
+        }
+        finally
+        {
+            release.Set();
+            await holder.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+    }
+
+    [Theory]
+    [InlineData(Constants.COMMAND_ID_CONFIM)]
+    [InlineData(Constants.COMMAND_ID_CHECKSUM_FAIL)]
+    public async Task SecureLogOpen_IgnoresAckBytesInsideFramedPayload(char response)
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        SetField(service, "_logOpenTcs", completion);
+        SetField(service, "lastCommandSent", Constants.COMMAND_ID_LOG_OPEN);
+        byte[] frame = BuildGenericFrame((byte)'x', (byte)response);
+
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessSecureIncomingPayload", frame)!);
+        Assert.False(completion.Task.IsCompleted);
+        Assert.Equal(frame, GetField<List<byte>>(service, "receivedDataBuffer"));
+
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessSecureIncomingPayload", new byte[] { (byte)response })!);
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+        Assert.False(completion.Task.IsCompleted);
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+        Assert.Equal(response == Constants.COMMAND_ID_CONFIM, await completion.Task);
+        Assert.Empty(GetField<List<byte>>(service, "receivedDataBuffer"));
+    }
+
+    [Fact]
+    public void SecureLogChunk_IgnoresFailureByteInsideFramedPayload()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        var completion = new TaskCompletionSource<LogChunkResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+        SetField(service, "_logChunkTcs", completion);
+        SetField(service, "lastCommandSent", Constants.COMMAND_ID_LOG_CHUNK);
+        byte[] frame = BuildGenericFrame((byte)'x', (byte)Constants.COMMAND_ID_CHECKSUM_FAIL);
+
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessSecureIncomingPayload", frame)!);
+        Assert.False(completion.Task.IsCompleted);
+        Assert.Equal(frame, GetField<List<byte>>(service, "receivedDataBuffer"));
+
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessSecureIncomingPayload",
+            new byte[] { (byte)Constants.COMMAND_ID_CHECKSUM_FAIL })!);
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+        Assert.False(completion.Task.IsCompleted);
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+        Assert.True(completion.Task.IsCanceled);
+        Assert.Empty(GetField<List<byte>>(service, "receivedDataBuffer"));
+    }
+
+    [Fact]
+    public async Task SecureStandaloneAck_DoesNotRemoveMatchingByteFromBufferedFrame()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        SetField(service, "_standaloneCommandAckTcs", completion);
+        SetField(service, "_standaloneCommandAckId", Constants.COMMAND_ID_LOG_RESET);
+        SetField(service, "lastCommandSent", Constants.COMMAND_ID_LOG_RESET);
+        byte[] frame = BuildGenericFrame((byte)'z', (byte)Constants.COMMAND_ID_CONFIM);
+        GetField<List<byte>>(service, "receivedDataBuffer").AddRange(frame);
+
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessSecureIncomingPayload",
+            new byte[] { (byte)Constants.COMMAND_ID_CONFIM })!);
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+        Assert.False(completion.Task.IsCompleted);
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+        Assert.True(await completion.Task);
+        Assert.Equal(frame, GetField<byte[]>(service, "dataBytes").Take(frame.Length).ToArray());
+    }
+
+    [Theory]
+    [InlineData(Constants.COMMAND_ID_CONFIM)]
+    [InlineData(Constants.COMMAND_ID_CHECKSUM_FAIL)]
+    public async Task IncomingFramesAndStandaloneResponsesAreProcessedInWireOrder(char response)
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        SetField(service, "_standaloneCommandAckTcs", completion);
+        SetField(service, "_standaloneCommandAckId", Constants.COMMAND_ID_LOG_RESET);
+        SetField(service, "lastCommandSent", Constants.COMMAND_ID_LOG_RESET);
+        byte[] frame = BuildGenericFrame((byte)'z', (byte)response, 42);
+
+        foreach (byte value in frame)
+        {
+            InvokeInstanceMethod(service, "AppendIncomingBytes", new byte[] { value });
+            if (value == (byte)response)
+            {
+                Assert.False((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+                Assert.False(completion.Task.IsCompleted);
+            }
+        }
+        InvokeInstanceMethod(service, "AppendIncomingBytes", new byte[] { (byte)response });
+
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+        Assert.False(completion.Task.IsCompleted);
+        Assert.Equal(frame, GetField<byte[]>(service, "dataBytes").Take(frame.Length).ToArray());
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+        Assert.Equal(response == Constants.COMMAND_ID_CONFIM, await completion.Task);
+        Assert.Empty(GetField<List<byte>>(service, "receivedDataBuffer"));
+    }
+
+    [Theory]
+    [InlineData((byte)'c', true)]
+    [InlineData((byte)'f', false)]
+    public async Task V010PlaintextVersionFrameAndStandaloneAckReplay(byte ack, bool expected)
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        var version = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var response = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        SetField(service, "_firmwareVersionTcs", version);
+        SetField(service, "_standaloneCommandAckTcs", response);
+        SetField(service, "_standaloneCommandAckId", Constants.COMMAND_ID_LOG_RESET);
+        byte[] frame = [0x84, 0x19, 0x76, 0x76, 0x30, 0x2e, 0x31, 0x30, 0x24, 0x20, 0x8c, 0x02, 0x00, 0x00];
+        InvokeInstanceMethod(service, "AppendIncomingBytes", frame[..4]);
+        Assert.False((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+        InvokeInstanceMethod(service, "AppendIncomingBytes", frame[4..].Concat(new[] { ack }).ToArray());
+
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+        Assert.Equal("v0.10", await version.Task);
+        Assert.False(response.Task.IsCompleted);
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+        Assert.Equal(expected, await response.Task);
+    }
+
+    [Fact]
+    public async Task SecureSingleByteFragmentIsNotAnAcknowledgement()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        SetField(service, "_standaloneCommandAckTcs", completion);
+        SetField(service, "_standaloneCommandAckId", Constants.COMMAND_ID_LOG_RESET);
+        SetField(service, "lastCommandSent", Constants.COMMAND_ID_LOG_RESET);
+        byte[] frame = BuildGenericFrame((byte)'z', (byte)Constants.COMMAND_ID_CONFIM, 42);
+
+        InvokeInstanceMethod(service, "ProcessSecureIncomingPayload", frame[..3]);
+        InvokeInstanceMethod(service, "ProcessSecureIncomingPayload", frame[3..4]);
+        Assert.False(completion.Task.IsCompleted);
+        Assert.False((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+        Assert.False(completion.Task.IsCompleted);
+        InvokeInstanceMethod(service, "ProcessSecureIncomingPayload", frame[4..]);
+        InvokeInstanceMethod(service, "ProcessSecureIncomingPayload",
+            new byte[] { (byte)Constants.COMMAND_ID_CONFIM });
+
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+        Assert.Equal(frame, GetField<byte[]>(service, "dataBytes").Take(frame.Length).ToArray());
+        Assert.False(completion.Task.IsCompleted);
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+        Assert.True(await completion.Task);
+    }
+
+    [Fact]
+    public async Task AcknowledgementBeforeFrameDoesNotDiscardFollowingFrame()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        SetField(service, "_standaloneCommandAckTcs", completion);
+        SetField(service, "_standaloneCommandAckId", Constants.COMMAND_ID_LOG_RESET);
+        byte[] frame = BuildGenericFrame((byte)'z', (byte)Constants.COMMAND_ID_CHECKSUM_FAIL);
+        InvokeInstanceMethod(service, "AppendIncomingBytes", new byte[] { (byte)Constants.COMMAND_ID_CONFIM }.Concat(frame).ToArray());
+
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+        Assert.True(await completion.Task);
+        Assert.Equal(frame, GetField<List<byte>>(service, "receivedDataBuffer"));
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+        Assert.Equal(frame, GetField<byte[]>(service, "dataBytes").Take(frame.Length).ToArray());
+    }
+
+    [Fact]
+    public void ConfigurationSaveAcknowledgementPreservesFollowingFrame()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        SetField(service, "_configurationSaveActive", true);
+        SetField(service, "_configurationPollingSuspension", InvokeInstanceMethod(service, "SuspendLivePolling")!);
+        SetField(service, "_pendingConfigurationCommand", Constants.COMMAND_ID_SAVECHANGES);
+        byte[] frame = BuildGenericFrame((byte)'z', (byte)Constants.COMMAND_ID_CONFIM);
+        InvokeInstanceMethod(service, "AppendIncomingBytes", new byte[] { (byte)Constants.COMMAND_ID_CONFIM }.Concat(frame).ToArray());
+
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
+        Assert.False(GetField<bool>(service, "_configurationSaveActive"));
+        Assert.Equal(frame, GetField<List<byte>>(service, "receivedDataBuffer"));
+        Assert.True((bool)InvokeInstanceMethod(service, "ProcessNextIncomingItem")!);
     }
 
     [Fact]
@@ -858,6 +1365,53 @@ public class SerialPortProtocolTests
 
         Assert.Null(await completion.Task);
         Assert.False(service.IsSecureSessionOpen);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SecureSessionResetAndReceiveWaitForTransmitOwnership(bool reset)
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        object session = GetField<object>(service, "_secureSession");
+        SetProperty(session, "IsSessionOpen", true);
+        object sendLock = GetField<object>(service, "_configurationSaveLock");
+        var acquired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        Task holder = Task.Factory.StartNew(() =>
+        {
+            lock (sendLock)
+            {
+                acquired.SetResult();
+                release.Wait();
+            }
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        try
+        {
+            await acquired.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Task operation = Task.Factory.StartNew(() =>
+            {
+                started.SetResult();
+                if (reset)
+                    InvokeInstanceMethod(service, "ResetSecureSession");
+                else
+                    typeof(SerialPortService).GetMethod("TryReadNextSecureIncomingPayload", BindingFlags.NonPublic | BindingFlags.Instance)!
+                        .Invoke(service, [Array.Empty<byte>()]);
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await Task.Delay(100);
+            Assert.False(operation.IsCompleted);
+            release.Set();
+            await operation.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            release.Set();
+            await holder.WaitAsync(TimeSpan.FromSeconds(2));
+        }
     }
 
     private static byte[] BuildManagementPayload(SecureControlOperation operation)
@@ -1118,6 +1672,110 @@ public class SerialPortProtocolTests
     }
 
     [Fact]
+    public void ParseLoopDrainsQueuedFramesInOneWakeAndRetainsIncompleteTail()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        byte[] first = BuildDigitalInputStatusFrame(1);
+        byte[] corrupt = BuildGenericFrame((byte)'x', 1, 2);
+        corrupt[^1]++;
+        byte[] second = BuildDigitalInputStatusFrame(0);
+        byte[] partial = BuildDigitalInputStatusFrame(1)[..7];
+        SetReceivedDataBuffer(service, [.. first, .. corrupt, .. second, .. partial]);
+        var observed = new List<bool?>();
+        service.DataUpdated += data =>
+        {
+            observed.Add(data.DigitalInputsLiveData[0].LiveElectricalState);
+            cancellation.Cancel();
+        };
+        GetField<AutoResetEvent>(service, "_parseSignal").Set();
+
+        InvokeInstanceMethod(service, "RunParseLoop", cancellation.Token);
+
+        Assert.Equal(new bool?[] { true, false }, observed);
+        Assert.Equal(partial, GetField<List<byte>>(service, "receivedDataBuffer"));
+    }
+
+    [Fact]
+    public void ParseLoopLimitsEachWakeTo256Packets()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        byte[] frame = BuildGenericFrame((byte)'x');
+        SetReceivedDataBuffer(service, Enumerable.Range(0, 257).SelectMany(_ => frame).ToArray());
+        int processed = 0;
+        service.DataUpdated += _ =>
+        {
+            processed++;
+            cancellation.Cancel();
+        };
+        GetField<AutoResetEvent>(service, "_parseSignal").Set();
+
+        InvokeInstanceMethod(service, "RunParseLoop", cancellation.Token);
+
+        Assert.Equal(256, processed);
+        Assert.Equal(frame, GetField<List<byte>>(service, "receivedDataBuffer"));
+
+        using var nextWake = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        service.DataUpdated += _ => nextWake.Cancel();
+        InvokeInstanceMethod(service, "RunParseLoop", nextWake.Token);
+
+        Assert.Equal(257, processed);
+        Assert.Empty(GetField<List<byte>>(service, "receivedDataBuffer"));
+    }
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(7, true)]
+    [InlineData(8, false)]
+    public void BufferedLogRecoveryDrainsFramesUpToItsLimit(int precedingFrames, bool recoveredFirstAttempt)
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        byte[] other = BuildGenericFrame((byte)'x');
+        byte[] chunk = BuildGenericFrame((byte)Constants.COMMAND_ID_LOG_CHUNK, 25, 0, 3, 0, (byte)'a', (byte)'b', (byte)'c');
+        SetReceivedDataBuffer(service, [.. Enumerable.Range(0, precedingFrames).SelectMany(_ => other), .. chunk]);
+        MethodInfo recover = typeof(SerialPortService).GetMethod("TryRecoverBufferedLogChunk", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        object?[] args = [null, null];
+
+        Assert.Equal(recoveredFirstAttempt, (bool)recover.Invoke(service, args)!);
+        if (!recoveredFirstAttempt)
+        {
+            Assert.Equal(chunk, GetField<List<byte>>(service, "receivedDataBuffer"));
+            Assert.True((bool)recover.Invoke(service, args)!);
+        }
+
+        var result = Assert.IsType<LogChunkResponse>(args[0]);
+        Assert.Equal((byte)25, result.Progress);
+        Assert.False(result.Done);
+        Assert.Equal("abc", result.Text);
+        Assert.Empty(GetField<List<byte>>(service, "receivedDataBuffer"));
+    }
+
+    [Fact]
+    public void LogChunkRecoveryReturnsCompletedWaiterBeforeLaterQueuedChunk()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        var waiter = new TaskCompletionSource<LogChunkResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+        SetField(service, "_logChunkTcs", waiter);
+        var first = new LogChunkResponse { Text = "first" };
+        var second = new LogChunkResponse { Text = "second" };
+        InvokeInstanceMethod(service, "PublishOrQueueLogChunk", first);
+        InvokeInstanceMethod(service, "PublishOrQueueLogChunk", second);
+        MethodInfo recover = typeof(SerialPortService).GetMethod("TryRecoverBufferedLogChunk", BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+        object?[] args = [null, waiter];
+        Assert.True((bool)recover.Invoke(service, args)!);
+        Assert.Same(first, args[0]);
+        args = [null, null];
+        Assert.True((bool)recover.Invoke(service, args)!);
+        Assert.Same(second, args[0]);
+    }
+
+    [Fact]
     public void LostControllerDetectionUsesLastResponseRatherThanLastRequest()
     {
         MethodInfo method = typeof(SerialPortService).GetMethod("HasLostLiveResponse", BindingFlags.NonPublic | BindingFlags.Static)
@@ -1203,6 +1861,127 @@ public class SerialPortProtocolTests
     }
 
     [Fact]
+    public async Task StandalonePollingScopePreservesFollowingBufferedFrame()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        byte[] frame = BuildGenericFrame((byte)'z', (byte)Constants.COMMAND_ID_CONFIM);
+        Func<Task<bool>> operation = () =>
+        {
+            InvokeInstanceMethod(service, "AppendIncomingBytes", frame);
+            return Task.FromResult(true);
+        };
+
+        var task = (Task<bool>)InvokeInstanceMethod(service, "WithLiveRequestPollingSuspendedAsync", operation)!;
+        Assert.True(await task);
+        Assert.Equal(frame, GetField<List<byte>>(service, "receivedDataBuffer"));
+    }
+
+    [Fact]
+    public void SecureLogAndFirmwareSessionsKeepPartialIncomingData()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        object session = GetField<object>(service, "_secureSession");
+        SetProperty(session, "IsSessionOpen", true);
+        byte[] partialFrame = [Constants.SERIAL_HEADER1, Constants.SERIAL_HEADER2, (byte)'z'];
+        byte[] partialEnvelope = [(byte)Constants.SECURE_ENVELOPE_FRAME_PREFIX, 10, 0];
+        GetField<List<byte>>(service, "receivedDataBuffer").AddRange(partialFrame);
+        GetField<List<byte>>(service, "_secureIncomingBuffer").AddRange(partialEnvelope);
+
+        service.BeginFirmwareUpdateSession();
+        service.BeginLogTransferSession();
+        service.EndFirmwareUpdateSession();
+        service.EndLogTransferSession();
+
+        Assert.Equal(partialFrame, GetField<List<byte>>(service, "receivedDataBuffer"));
+        Assert.Equal(partialEnvelope, GetField<List<byte>>(service, "_secureIncomingBuffer"));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void OverlappingLegacySessionsDoNotClearEachOthersBufferedData(bool firmwareFirst)
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        if (firmwareFirst)
+            service.BeginFirmwareUpdateSession();
+        else
+            service.BeginLogTransferSession();
+
+        byte[] partial = [Constants.SERIAL_HEADER1, Constants.SERIAL_HEADER2, (byte)'x'];
+        List<byte> buffer = GetField<List<byte>>(service, "receivedDataBuffer");
+        buffer.AddRange(partial);
+        if (firmwareFirst)
+            service.BeginLogTransferSession();
+        else
+            service.BeginFirmwareUpdateSession();
+        Assert.Equal(partial, buffer);
+
+        if (firmwareFirst)
+            service.EndFirmwareUpdateSession();
+        else
+            service.EndLogTransferSession();
+        Assert.Equal(partial, buffer);
+
+        if (firmwareFirst)
+            service.EndLogTransferSession();
+        else
+            service.EndFirmwareUpdateSession();
+        Assert.Empty(buffer);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OverlappingPollingSuspensionsRestoreOnlyAfterLastOwnerEnds(bool initiallySuspended)
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        SetField(service, "_suspendLiveRequestPolling", initiallySuspended);
+        var first = (IDisposable)InvokeInstanceMethod(service, "SuspendLivePolling")!;
+        var second = (IDisposable)InvokeInstanceMethod(service, "SuspendLivePolling")!;
+
+        first.Dispose();
+        first.Dispose();
+        Assert.True(GetField<bool>(service, "_suspendLiveRequestPolling"));
+        second.Dispose();
+        Assert.Equal(initiallySuspended, GetField<bool>(service, "_suspendLiveRequestPolling"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void FirmwareAndLogSessionsCanEndInEitherOrder(bool endFirmwareFirst)
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        service.BeginFirmwareUpdateSession();
+        service.BeginLogTransferSession();
+
+        if (endFirmwareFirst)
+        {
+            service.EndFirmwareUpdateSession();
+        }
+        else
+        {
+            service.EndLogTransferSession();
+        }
+        Assert.True(GetField<bool>(service, "_suspendLiveRequestPolling"));
+
+        if (endFirmwareFirst)
+        {
+            service.EndLogTransferSession();
+        }
+        else
+        {
+            service.EndFirmwareUpdateSession();
+        }
+        Assert.False(GetField<bool>(service, "_suspendLiveRequestPolling"));
+    }
+
+    [Fact]
     public async Task StandaloneRequestsCannotStealConfigurationAcknowledgements()
     {
         using var service = new SerialPortService("COM1");
@@ -1221,6 +2000,7 @@ public class SerialPortProtocolTests
     }
 
     [Theory]
+    [InlineData("version")]
     [InlineData("build")]
     [InlineData("diagnostic")]
     [InlineData("reset")]
@@ -1228,6 +2008,10 @@ public class SerialPortProtocolTests
     [InlineData("firmware-session")]
     [InlineData("log-session")]
     [InlineData("config-save")]
+    [InlineData("custom-can")]
+    [InlineData("log-open")]
+    [InlineData("log-list")]
+    [InlineData("log-chunk")]
     public async Task StandaloneEntryPointsWaitForActiveRequest(string operation)
     {
         using var service = new SerialPortService("COM1");
@@ -1239,6 +2023,7 @@ public class SerialPortProtocolTests
         {
             task = operation switch
             {
+                "version" => service.RequestFirmwareVersionAsync(),
                 "build" => service.RequestBuildDateAsync(),
                 "diagnostic" => service.RequestFirmwareDiagnosticAsync(),
                 "reset" => service.ResetLogStorageAsync(),
@@ -1246,6 +2031,10 @@ public class SerialPortProtocolTests
                     Constants.COMMAND_ID_NEWCONFIG, (Action)(() => { }), 100, true, 0)!,
                 "firmware-session" => service.BeginFirmwareUpdateSessionAsync(),
                 "log-session" => service.BeginLogTransferSessionAsync(),
+                "custom-can" => service.RequestCustomCanSnapshotAsync(),
+                "log-open" => service.OpenLogTransferAsync(0),
+                "log-list" => service.RequestLogFileListAsync(),
+                "log-chunk" => service.RequestLogChunkAsync(),
                 _ => service.StartSendConfigAsync(),
             };
             Assert.False(task.IsCompleted);
@@ -1265,6 +2054,39 @@ public class SerialPortProtocolTests
             await task.WaitAsync(TimeSpan.FromSeconds(5));
         }
         Assert.Equal(1, gate.CurrentCount);
+    }
+
+    [Fact]
+    public async Task FirmwareVersionRequestRejectsActiveConfigurationSave()
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        SetField(service, "_configurationSaveActive", true);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.RequestFirmwareVersionAsync());
+        Assert.Equal(1, GetField<SemaphoreSlim>(service, "_standaloneRequestLock").CurrentCount);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void FirmwareSessionRestoresPreviousPollingState(bool previouslySuspended, bool expectControllerRestart)
+    {
+        using var service = new SerialPortService("COM1");
+        StopParseLoop(service);
+        SetField(service, "_suspendLiveRequestPolling", previouslySuspended);
+
+        service.BeginFirmwareUpdateSession();
+        Assert.True(GetField<bool>(service, "_suspendLiveRequestPolling"));
+        Assert.Throws<InvalidOperationException>(() => service.BeginFirmwareUpdateSession());
+        service.EndFirmwareUpdateSession(expectControllerRestart);
+        Assert.Equal(previouslySuspended, GetField<bool>(service, "_suspendLiveRequestPolling"));
+
+        SetField(service, "_suspendLiveRequestPolling", !previouslySuspended);
+        service.EndFirmwareUpdateSession();
+        Assert.Equal(!previouslySuspended, GetField<bool>(service, "_suspendLiveRequestPolling"));
     }
 
     [Fact]

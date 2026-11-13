@@ -134,15 +134,15 @@ public class SerialPortService : IDisposable
     private List<byte> receivedDataBuffer;
     private bool foundTrailer1;
     private UInt32 pdmCheckSum;
-    private char lastCommandSent;
-    private bool sendingConfig;
+    private volatile char lastCommandSent;
+    private volatile bool sendingConfig;
     private bool saveToEEPROM;
     private readonly object _configurationSaveLock = new();
-    private bool _configurationSaveActive;
-    private bool _configurationPreviousPollingSuspended;
+    private volatile bool _configurationSaveActive;
+    private IDisposable? _configurationPollingSuspension;
     private char _pendingConfigurationCommand;
     private long _configurationCommandSentTick;
-    public bool foundECU;
+    public volatile bool foundECU;
     private int totalBytesSent;
     private int checkSumSend;
 
@@ -169,16 +169,17 @@ public class SerialPortService : IDisposable
     private int digitalIndex;
     private int mathRuleIndex;
 
-    private TaskCompletionSource<IReadOnlyList<ControllerLogFileInfo>>? _logFileListTcs;
-    private TaskCompletionSource<bool>? _logOpenTcs;
-    private TaskCompletionSource<LogChunkResponse>? _logChunkTcs;
-    private TaskCompletionSource<string>? _firmwareVersionTcs;
-    private TaskCompletionSource<string>? _buildDateTcs;
-    private TaskCompletionSource<string>? _firmwareDiagnosticTcs;
-    private TaskCompletionSource<string>? _cellularTestTcs;
-    private TaskCompletionSource<string>? _openRemoteProvisioningTcs;
-    private TaskCompletionSource<bool>? _customCanSnapshotTcs;
-    private TaskCompletionSource<bool>? _standaloneCommandAckTcs;
+    private volatile TaskCompletionSource<IReadOnlyList<ControllerLogFileInfo>>? _logFileListTcs;
+    private volatile TaskCompletionSource<bool>? _logOpenTcs;
+    private volatile TaskCompletionSource<LogChunkResponse>? _logChunkTcs;
+    private volatile TaskCompletionSource<string>? _firmwareVersionTcs;
+    private volatile TaskCompletionSource<string>? _buildDateTcs;
+    private volatile TaskCompletionSource<string>? _firmwareDiagnosticTcs;
+    private volatile TaskCompletionSource<string>? _cellularTestTcs;
+    private volatile TaskCompletionSource<string>? _openRemoteProvisioningTcs;
+    private volatile TaskCompletionSource<bool>? _customCanSnapshotTcs;
+    private readonly object _standaloneAckLock = new();
+    private volatile TaskCompletionSource<bool>? _standaloneCommandAckTcs;
     private char _standaloneCommandAckId;
     private readonly Queue<LogChunkResponse> _pendingLogChunks = new Queue<LogChunkResponse>();
     private readonly object _logChunkLock = new object();
@@ -187,8 +188,16 @@ public class SerialPortService : IDisposable
     private readonly object _parseLock = new();
     private readonly List<byte> _secureIncomingBuffer = new List<byte>();
     private readonly object _serialReceiveLock = new();
+    private readonly object _pollingSuspensionLock = new();
+    private int _pollingSuspensionCount;
+    private bool _pollingInitiallySuspended;
     private volatile bool _suspendLiveRequestPolling;
     private volatile bool _logTransferSessionActive;
+    private readonly object _logSessionLock = new();
+    private IDisposable? _logSessionPollingSuspension;
+    private IDisposable? _logStreamPollingSuspension;
+    private bool _firmwareUpdateSessionActive;
+    private IDisposable? _firmwarePollingSuspension;
     private long _lastLiveRequestSentTick;
     // Live requests awaiting a response. Chaining only at zero stops non-live frames from
     // adding extra requests that would build a growing backlog of stale live frames.
@@ -223,6 +232,8 @@ public class SerialPortService : IDisposable
     private bool _ioFlowStatusPollingEnabled;
     private ControllerProtocolCapabilities _controllerCapabilities = ControllerProtocolCapabilities.V09;
     private readonly SecureSessionState _secureSession = new SecureSessionState();
+    private long _secureSessionGeneration;
+    private readonly SemaphoreSlim _secureSessionSetupLock = new(1, 1);
     private readonly Dictionary<string, string> _pinnedDeviceKeys = new(StringComparer.OrdinalIgnoreCase);
     private readonly string _secureDeviceIdentityPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -548,20 +559,45 @@ public class SerialPortService : IDisposable
 
     private void ResetSecureSession()
     {
-        _secureSession.ResetSession();
-        lock (_secureManagementResponseLock)
+        lock (_configurationSaveLock)
         {
-            _secureManagementResponseTcs?.TrySetResult(null);
-            _secureManagementResponseTcs = null;
+            _secureSessionGeneration++;
+            _secureSession.ResetSession();
+            lock (_secureManagementResponseLock)
+            {
+                _secureManagementResponseTcs?.TrySetResult(null);
+                _secureManagementResponseTcs = null;
+            }
+        }
+    }
+
+    private bool TryDecryptCurrentSecureEnvelope(byte[] frame, out byte[] plaintext)
+    {
+        lock (_configurationSaveLock)
+        {
+            if (!_secureSession.IsSessionOpen ||
+                !TryDecryptSecureEnvelope(frame, _secureSession.DeviceToClientKey, _secureSession.SessionId,
+                    _secureSession.RxSequence, out plaintext))
+            {
+                plaintext = Array.Empty<byte>();
+                ResetSecureSession();
+                return false;
+            }
+
+            _secureSession.RxSequence++;
+            return true;
         }
     }
 
     private void ResetSecureSessionAfterDeviceReset()
     {
-        ResetSecureSession();
-        lock (_bufferLock)
+        lock (_configurationSaveLock)
         {
-            _secureIncomingBuffer.Clear();
+            ResetSecureSession();
+            lock (_bufferLock)
+            {
+                _secureIncomingBuffer.Clear();
+            }
         }
     }
 
@@ -1143,19 +1179,11 @@ public class SerialPortService : IDisposable
         await _standaloneRequestLock.WaitAsync().ConfigureAwait(false);
         try
         {
-            bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
-            _suspendLiveRequestPolling = true;
+            using IDisposable pollingSuspension = SuspendLivePolling();
 
             if (encryptedRequest && _secureSession.IsSessionOpen && _dataReceivedSubscribed && !_bulkLogTransferActive)
             {
-                try
-                {
-                    return await ExecuteStreamedSecureManagementRequestAsync(operation, payload, timeoutMs).ConfigureAwait(false);
-                }
-                finally
-                {
-                    _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
-                }
+                return await ExecuteStreamedSecureManagementRequestAsync(operation, payload, timeoutMs).ConfigureAwait(false);
             }
 
             lock (_serialReceiveLock)
@@ -1213,13 +1241,11 @@ public class SerialPortService : IDisposable
 
                 if (frame.Length > 0 && frame[0] == (byte)Constants.SECURE_ENVELOPE_FRAME_PREFIX)
                 {
-                    if (!TryDecryptSecureEnvelope(frame, _secureSession.DeviceToClientKey, _secureSession.SessionId, _secureSession.RxSequence, out byte[] plaintext))
+                    if (!TryDecryptCurrentSecureEnvelope(frame, out byte[] plaintext))
                     {
-                        ResetSecureSession();
                         return null;
                     }
 
-                    _secureSession.RxSequence++;
                     return plaintext;
                 }
 
@@ -1235,7 +1261,6 @@ public class SerialPortService : IDisposable
                         _parseSignal.Set();
                     }
                 }
-                _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
             }
         }
         finally
@@ -1288,12 +1313,30 @@ public class SerialPortService : IDisposable
 
     public async Task<bool> EnsureSecureSessionAsync(int timeoutMs = 2500)
     {
+        await _secureSessionSetupLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            return await EnsureSecureSessionCoreAsync(timeoutMs).ConfigureAwait(false);
+        }
+        finally
+        {
+            _secureSessionSetupLock.Release();
+        }
+    }
+
+    private async Task<bool> EnsureSecureSessionCoreAsync(int timeoutMs)
+    {
         LastSecureSessionError = null;
 
-        if (_secureSession.IsSessionOpen)
+        long sessionGeneration;
+        lock (_configurationSaveLock)
         {
-            ClearPendingIdentityMismatch();
-            return true;
+            if (_secureSession.IsSessionOpen)
+            {
+                ClearPendingIdentityMismatch();
+                return true;
+            }
+            sessionGeneration = _secureSessionGeneration;
         }
 
         SecureInfoResponse? info = await GetSecureInfoAsync(timeoutMs);
@@ -1371,14 +1414,21 @@ public class SerialPortService : IDisposable
             }
 
             DeriveSecureSessionKeys(sharedSecret, sessionId, clientPublicKey, devicePublicKey, out byte[] clientToDeviceKey, out byte[] deviceToClientKey);
-            _secureSession.SessionId = sessionId;
-            _secureSession.DevicePublicKey = devicePublicKey;
-            _secureSession.ClientToDeviceKey = clientToDeviceKey;
-            _secureSession.DeviceToClientKey = deviceToClientKey;
-            _secureSession.TxSequence = 0;
-            _secureSession.RxSequence = 0;
-            _secureSession.IsSessionOpen = true;
-            _secureSession.IsAuthorized = !_secureSession.PinEnabled;
+            lock (_configurationSaveLock)
+            {
+                if (sessionGeneration != _secureSessionGeneration || !_serialPort.IsOpen)
+                {
+                    return FailSecureSession("Controller connection changed during secure session setup.");
+                }
+                _secureSession.SessionId = sessionId;
+                _secureSession.DevicePublicKey = devicePublicKey;
+                _secureSession.ClientToDeviceKey = clientToDeviceKey;
+                _secureSession.DeviceToClientKey = deviceToClientKey;
+                _secureSession.TxSequence = 0;
+                _secureSession.RxSequence = 0;
+                _secureSession.IsSessionOpen = true;
+                _secureSession.IsAuthorized = !_secureSession.PinEnabled;
+            }
             _lastSecureStatusRequestTick = 0;
             _lastSecureStatusResponseTick = Environment.TickCount64;
             return true;
@@ -1717,13 +1767,18 @@ public class SerialPortService : IDisposable
             try
             {
                 DrainPendingSerialInput();
-                CheckConfigurationSaveTimeout();
+                bool hitDrainLimit = true;
                 for (int i = 0; i < 256; i++)
                 {
-                    if (!processData())
+                    if (!ProcessNextIncomingItem())
                     {
+                        hitDrainLimit = false;
                         break;
                     }
+                }
+                if (!hitDrainLimit)
+                {
+                    CheckConfigurationSaveTimeout();
                 }
             }
             catch (Exception ex)
@@ -1824,6 +1879,39 @@ public class SerialPortService : IDisposable
         return false;
     }
 
+    private IDisposable SuspendLivePolling()
+    {
+        lock (_pollingSuspensionLock)
+        {
+            if (_pollingSuspensionCount++ == 0)
+            {
+                _pollingInitiallySuspended = _suspendLiveRequestPolling;
+            }
+            _suspendLiveRequestPolling = true;
+        }
+        return new PollingSuspension(this);
+    }
+
+    private void ReleaseLivePolling()
+    {
+        lock (_pollingSuspensionLock)
+        {
+            if (--_pollingSuspensionCount == 0)
+            {
+                _suspendLiveRequestPolling = _pollingInitiallySuspended;
+            }
+        }
+    }
+
+    private sealed class PollingSuspension : IDisposable
+    {
+        private SerialPortService? _owner;
+
+        public PollingSuspension(SerialPortService owner) => _owner = owner;
+
+        public void Dispose() => Interlocked.Exchange(ref _owner, null)?.ReleaseLivePolling();
+    }
+
     private static bool ExpectsFramedResponse(char commandId)
     {
         return commandId == Constants.COMMAND_ID_REQUEST ||
@@ -1858,6 +1946,27 @@ public class SerialPortService : IDisposable
         }
     }
 
+    private void AppendIncomingByte(byte value)
+    {
+        lock (_bufferLock)
+        {
+            receivedDataBuffer.Add(value);
+            TrackFramedResponseByte(value);
+        }
+    }
+
+    private void AppendIncomingBytes(byte[] bytes)
+    {
+        lock (_bufferLock)
+        {
+            foreach (byte value in bytes)
+            {
+                receivedDataBuffer.Add(value);
+                TrackFramedResponseByte(value);
+            }
+        }
+    }
+
     private void ResetLogReceiveState(bool discardSerialInput)
     {
         // Standalone reads also use this reset; loaded snapshots belong to the controller session.
@@ -1887,10 +1996,10 @@ public class SerialPortService : IDisposable
         {
             receivedDataBuffer.Clear();
             _secureIncomingBuffer.Clear();
+            foundTrailer1 = false;
+            _packetReady = false;
         }
 
-        foundTrailer1 = false;
-        _packetReady = false;
         lastCommandSent = '\0';
         _lastLiveRequestSentTick = 0;
         Volatile.Write(ref _liveRequestsInFlight, 0);
@@ -2020,10 +2129,15 @@ public class SerialPortService : IDisposable
         }
     }
 
-    private bool TryDequeuePendingLogChunk(out LogChunkResponse chunk)
+    private bool TryDequeuePendingLogChunk(out LogChunkResponse chunk, TaskCompletionSource<LogChunkResponse>? waiter = null)
     {
         lock (_logChunkLock)
         {
+            if (waiter?.Task.IsCompletedSuccessfully == true)
+            {
+                chunk = waiter.Task.Result;
+                return true;
+            }
             if (_pendingLogChunks.Count > 0)
             {
                 chunk = _pendingLogChunks.Dequeue();
@@ -2037,29 +2151,18 @@ public class SerialPortService : IDisposable
 
     private void PublishOrQueueLogChunk(LogChunkResponse chunk)
     {
-        TaskCompletionSource<LogChunkResponse>? pendingTcs;
         lock (_logChunkLock)
         {
-            pendingTcs = _logChunkTcs;
-            if (pendingTcs == null)
-            {
-                _pendingLogChunks.Enqueue(chunk);
-                return;
-            }
-        }
-
-        if (!pendingTcs.TrySetResult(chunk))
-        {
-            lock (_logChunkLock)
+            if (_logChunkTcs == null || !_logChunkTcs.TrySetResult(chunk))
             {
                 _pendingLogChunks.Enqueue(chunk);
             }
         }
     }
 
-    private bool TryRecoverBufferedLogChunk(out LogChunkResponse chunk)
+    private bool TryRecoverBufferedLogChunk(out LogChunkResponse chunk, TaskCompletionSource<LogChunkResponse>? waiter = null)
     {
-        if (TryDequeuePendingLogChunk(out chunk))
+        if (TryDequeuePendingLogChunk(out chunk, waiter))
         {
             return true;
         }
@@ -2080,12 +2183,12 @@ public class SerialPortService : IDisposable
         {
             for (int i = 0; i < 8; i++)
             {
-                if (!processData())
+                if (!ProcessNextIncomingItem())
                 {
                     break;
                 }
 
-                if (TryDequeuePendingLogChunk(out chunk))
+                if (TryDequeuePendingLogChunk(out chunk, waiter))
                 {
                     return true;
                 }
@@ -2095,7 +2198,7 @@ public class SerialPortService : IDisposable
         {
         }
 
-        return TryDequeuePendingLogChunk(out chunk);
+        return TryDequeuePendingLogChunk(out chunk, waiter);
     }
 
     private async Task<LogChunkResponse?> AwaitLogChunkAsync(TaskCompletionSource<LogChunkResponse> tcs, int timeoutMs, string operationName)
@@ -2108,7 +2211,7 @@ public class SerialPortService : IDisposable
                 return await tcs.Task;
             }
 
-            if (TryRecoverBufferedLogChunk(out var recoveredChunk))
+            if (TryRecoverBufferedLogChunk(out var recoveredChunk, tcs))
             {
                 LogProtocolDebug($"{operationName} recovered queued chunk after timeout");
                 return recoveredChunk;
@@ -2128,7 +2231,7 @@ public class SerialPortService : IDisposable
 
                 for (int graceAttempt = 0; graceAttempt < 4; graceAttempt++)
                 {
-                    if (TryRecoverBufferedLogChunk(out recoveredChunk))
+                    if (TryRecoverBufferedLogChunk(out recoveredChunk, tcs))
                     {
                         LogProtocolDebug($"{operationName} recovered during grace attempt={graceAttempt + 1}");
                         return recoveredChunk;
@@ -2218,66 +2321,69 @@ public class SerialPortService : IDisposable
 
     public void BeginLogTransferSession()
     {
-        if (_logTransferSessionActive)
+        lock (_logSessionLock)
         {
-            return;
-        }
-
-        bool preserveSecureSession = _secureSession.IsSessionOpen;
-        if (!preserveSecureSession)
-        {
-            ResetLogReceiveState(discardSerialInput: true);
-        }
-        else
-        {
-            lock (_bufferLock)
+            if (_logTransferSessionActive)
             {
-                receivedDataBuffer.Clear();
+                return;
             }
 
-            foundTrailer1 = false;
-            _packetReady = false;
-        }
+            IDisposable pollingSuspension = SuspendLivePolling();
+            try
+            {
+                bool preserveSecureSession = _secureSession.IsSessionOpen;
+                if (!preserveSecureSession && !_firmwareUpdateSessionActive)
+                {
+                    ResetLogReceiveState(discardSerialInput: true);
+                }
 
-        _logTransferSessionActive = true;
-        _suspendLiveRequestPolling = true;
-        _txLogChunkCounter = 0;
-        _lastChunkProgressLogged = -1;
-        LogProtocolDebug("LOG session begin");
+                _logSessionPollingSuspension = pollingSuspension;
+                _logTransferSessionActive = true;
+                _txLogChunkCounter = 0;
+                _lastChunkProgressLogged = -1;
+                LogProtocolDebug("LOG session begin");
+            }
+            catch
+            {
+                pollingSuspension.Dispose();
+                throw;
+            }
+        }
     }
 
     public void EndLogTransferSession()
     {
-        if (!_logTransferSessionActive)
+        lock (_logSessionLock)
         {
-            return;
-        }
-
-        bool preserveSecureSession = _secureSession.IsSessionOpen;
-
-        _logTransferSessionActive = false;
-        _suspendLiveRequestPolling = false;
-        if (!preserveSecureSession)
-        {
-            ResetLogReceiveState(discardSerialInput: false);
-        }
-        else
-        {
-            lock (_bufferLock)
+            if (!_logTransferSessionActive)
             {
-                receivedDataBuffer.Clear();
+                return;
             }
 
-            foundTrailer1 = false;
-            _packetReady = false;
-        }
+            bool preserveSecureSession = _secureSession.IsSessionOpen;
 
-        if (_serialPort.IsOpen && !sendingConfig)
-        {
-            SendCommand(Constants.COMMAND_ID_REQUEST);
-        }
+            _logTransferSessionActive = false;
+            try
+            {
+                if (!preserveSecureSession && !_firmwareUpdateSessionActive)
+                {
+                    ResetLogReceiveState(discardSerialInput: false);
+                }
+            }
+            finally
+            {
+                _logStreamPollingSuspension?.Dispose();
+                _logStreamPollingSuspension = null;
+                _logSessionPollingSuspension?.Dispose();
+                _logSessionPollingSuspension = null;
+            }
+            if (!_suspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
+            {
+                SendCommand(Constants.COMMAND_ID_REQUEST);
+            }
 
-        LogProtocolDebug("LOG session end");
+            LogProtocolDebug("LOG session end");
+        }
     }
 
     public SerialPortService(string portName, int baudRate = 921600)
@@ -3403,12 +3509,17 @@ public class SerialPortService : IDisposable
 
     private bool ProcessDataCore()
     {
-        bool retVal = false;
         if (!TryDequeueNextFramedPacket())
         {
             return false;
         }
 
+        return ProcessDequeuedFrame();
+    }
+
+    private bool ProcessDequeuedFrame()
+    {
+        bool retVal = false;
         if (dataLength < 8)
         {
             return false;
@@ -5149,10 +5260,6 @@ public class SerialPortService : IDisposable
 
             _saveRetryCount = 0;
             CompleteConfigurationSave();
-            lock (_bufferLock)
-            {
-                receivedDataBuffer.Clear();
-            }
             RequestStaticSnapshot();
             _configSendStopwatch.Stop();
             LoggingService.AddLog("PDM settings saved.");
@@ -5214,7 +5321,8 @@ public class SerialPortService : IDisposable
         if (!_configurationSaveActive) return;
         _configurationSaveActive = false;
         _pendingConfigurationCommand = '\0';
-        _suspendLiveRequestPolling = _configurationPreviousPollingSuspended;
+        _configurationPollingSuspension?.Dispose();
+        _configurationPollingSuspension = null;
     }
 
     private void CheckConfigurationSaveTimeout()
@@ -5230,71 +5338,138 @@ public class SerialPortService : IDisposable
         }
     }
 
-    private bool IsStandaloneAckExpectedForLastCommand()
-    {
-        return lastCommandSent == Constants.COMMAND_ID_BEGIN ||
-               lastCommandSent == Constants.COMMAND_ID_NEWCONFIG ||
-               lastCommandSent == Constants.COMMAND_ID_SKIP ||
-               lastCommandSent == Constants.COMMAND_ID_SAVECHANGES ||
-               lastCommandSent == Constants.COMMAND_ID_SET_RTC ||
-               lastCommandSent == Constants.COMMAND_ID_FACTORY_RESET ||
-               lastCommandSent == Constants.COMMAND_ID_LOG_OPEN ||
-               lastCommandSent == Constants.COMMAND_ID_LOG_RESET ||
-               lastCommandSent == Constants.COMMAND_ID_LOG_CANCEL ||
-               lastCommandSent == Constants.COMMAND_ID_FW_UPLOAD_BEGIN ||
-               lastCommandSent == Constants.COMMAND_ID_FW_UPLOAD_CHUNK ||
-               lastCommandSent == Constants.COMMAND_ID_FW_UPLOAD_END ||
-               lastCommandSent == Constants.COMMAND_ID_FW_UPLOAD_CANCEL ||
-               lastCommandSent == Constants.COMMAND_ID_FW_INSTALL;
-    }
-
     private bool TryHandleStandaloneAckByte(byte readByte)
     {
-        if (_standaloneCommandAckTcs == null || sendingConfig || _standaloneCommandAckId == '\0')
+        lock (_standaloneAckLock)
         {
-            return false;
-        }
-
-        if (readByte != Constants.COMMAND_ID_CONFIM && readByte != Constants.COMMAND_ID_CHECKSUM_FAIL)
-        {
-            return false;
-        }
-
-        // Guard against stale/foreign ACK bytes being misattributed to the current
-        // standalone command, while still tolerating live-poll commands that can
-        // overwrite lastCommandSent during an active standalone request.
-        bool lastCommandIsLivePoll = lastCommandSent == Constants.COMMAND_ID_REQUEST ||
-                                     lastCommandSent == Constants.COMMAND_ID_DIGITAL_INPUT_STATUS ||
-                                     lastCommandSent == Constants.COMMAND_ID_MATH_STATUS ||
-                                     lastCommandSent == Constants.COMMAND_ID_CUSTOM_CAN_STATUS;
-        bool allowLivePollAckOverride = _standaloneCommandAckId == Constants.COMMAND_ID_LOG_RESET ||
-                                        _standaloneCommandAckId == Constants.COMMAND_ID_LOG_OPEN ||
-                                        _standaloneCommandAckId == Constants.COMMAND_ID_LOG_CANCEL;
-        if (lastCommandSent != _standaloneCommandAckId &&
-            !(allowLivePollAckOverride && lastCommandIsLivePoll))
-        {
-            return false;
-        }
-
-        _standaloneCommandAckTcs.TrySetResult(readByte == Constants.COMMAND_ID_CONFIM);
-
-        lock (_bufferLock)
-        {
-            if (receivedDataBuffer.Count > 0 && receivedDataBuffer[^1] == readByte)
+            if (_standaloneCommandAckTcs == null || sendingConfig || _standaloneCommandAckId == '\0')
             {
-                receivedDataBuffer.RemoveAt(receivedDataBuffer.Count - 1);
+                return false;
+            }
+
+            if (readByte != Constants.COMMAND_ID_CONFIM && readByte != Constants.COMMAND_ID_CHECKSUM_FAIL)
+            {
+                return false;
+            }
+
+            _standaloneCommandAckTcs.TrySetResult(readByte == Constants.COMMAND_ID_CONFIM);
+            return true;
+        }
+    }
+
+    private bool ProcessNextIncomingItem()
+    {
+        lock (_parseLock)
+        {
+            byte value = 0;
+            bool framePending;
+            lock (_bufferLock)
+            {
+                if (receivedDataBuffer.Count == 0)
+                {
+                    return false;
+                }
+
+                framePending = receivedDataBuffer[0] == Constants.SERIAL_HEADER1;
+                if (framePending)
+                {
+                    if (!TryDequeueNextFramedPacket())
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    value = receivedDataBuffer[0];
+                    receivedDataBuffer.RemoveAt(0);
+                }
+            }
+
+            if (framePending)
+            {
+                return ProcessDequeuedFrame();
+            }
+            if (value == Constants.COMMAND_ID_CONFIM || value == Constants.COMMAND_ID_CHECKSUM_FAIL)
+            {
+                HandleStandaloneResponse(value);
+            }
+            return true;
+        }
+    }
+
+    private void HandleStandaloneResponse(byte response)
+    {
+        if (TryHandleStandaloneAckByte(response) || HandleConfigurationAcknowledgement(response))
+        {
+            return;
+        }
+
+        TaskCompletionSource<bool>? logOpenTcs = _logOpenTcs;
+        if (logOpenTcs != null)
+        {
+            logOpenTcs.TrySetResult(response == Constants.COMMAND_ID_CONFIM);
+            return;
+        }
+        if (response == Constants.COMMAND_ID_CHECKSUM_FAIL)
+        {
+            lock (_logChunkLock)
+            {
+                if (_logChunkTcs != null)
+                {
+                    _logChunkTcs.TrySetCanceled();
+                    return;
+                }
             }
         }
 
-        return true;
+        switch (lastCommandSent)
+        {
+            case Constants.COMMAND_ID_BEGIN when response == Constants.COMMAND_ID_CONFIM && !sendingConfig:
+                foundECU = true;
+                break;
+            case Constants.COMMAND_ID_REQUEST when response == Constants.COMMAND_ID_CONFIM:
+                if (_awaitingPostLogRefreshStatusFrame && !sendingConfig &&
+                    !_suspendLiveRequestPolling && _postLogRefreshRequestRetryCount < 3)
+                {
+                    _postLogRefreshRequestRetryCount++;
+                    SendCommand(Constants.COMMAND_ID_REQUEST);
+                }
+                break;
+        }
     }
 
     private bool UseSecureStreamingTransport()
         => _secureSession.IsSessionOpen;
 
+    private bool ProcessSecureIncomingPayload(byte[] payload)
+    {
+        if (payload.Length == 0 || TryCompleteSecureManagementResponse(payload))
+        {
+            return false;
+        }
+
+        AppendIncomingBytes(payload);
+        return true;
+    }
+
     private bool TryReadNextSecureIncomingPayload(out byte[] payload)
     {
+        lock (_configurationSaveLock)
+        {
+            bool result = TryReadNextSecureIncomingPayloadCore(out payload, out bool invalidPublicResponse);
+            if (invalidPublicResponse)
+            {
+                MarkControllerSessionLost(requestStaticSnapshot: true);
+                LoggingService.AddLog("The controller returned an invalid response. Reconnect and try again.");
+            }
+            return result;
+        }
+    }
+
+    private bool TryReadNextSecureIncomingPayloadCore(out byte[] payload, out bool invalidPublicResponse)
+    {
         payload = Array.Empty<byte>();
+        invalidPublicResponse = false;
         byte[]? secureFrame = null;
 
         lock (_bufferLock)
@@ -5307,6 +5482,94 @@ public class SerialPortService : IDisposable
             if (_secureIncomingBuffer[0] != (byte)Constants.SECURE_ENVELOPE_FRAME_PREFIX)
             {
                 byte incomingByte = _secureIncomingBuffer[0];
+                if (_secureSession.IsSessionOpen && incomingByte == Constants.SERIAL_HEADER1 &&
+                    !_configurationSaveActive && _standaloneCommandAckTcs == null &&
+                    (_firmwareVersionTcs != null || _buildDateTcs != null))
+                {
+                    if (_secureIncomingBuffer.Count < 3)
+                    {
+                        return false;
+                    }
+
+                    byte command = _secureIncomingBuffer[2];
+                    bool expectedPublicFrame = _secureIncomingBuffer[1] == Constants.SERIAL_HEADER2 &&
+                        ((command == Constants.COMMAND_ID_FW_VER && _firmwareVersionTcs != null) ||
+                         (command == Constants.COMMAND_ID_BUILD_DATE && _buildDateTcs != null));
+                    if (expectedPublicFrame)
+                    {
+                        for (int trailer = 3; trailer <= _secureIncomingBuffer.Count - 6; trailer++)
+                        {
+                            if (_secureIncomingBuffer[trailer] != Constants.SERIAL_TRAILER1 ||
+                                _secureIncomingBuffer[trailer + 1] != Constants.SERIAL_TRAILER2)
+                            {
+                                continue;
+                            }
+
+                            uint checksum = 0;
+                            for (int i = 0; i < trailer + 2; i++)
+                            {
+                                checksum += _secureIncomingBuffer[i];
+                            }
+                            int checksumIndex = trailer + 2;
+                            uint receivedChecksum = (uint)(_secureIncomingBuffer[checksumIndex] |
+                                (_secureIncomingBuffer[checksumIndex + 1] << 8) |
+                                (_secureIncomingBuffer[checksumIndex + 2] << 16) |
+                                (_secureIncomingBuffer[checksumIndex + 3] << 24));
+                            if (checksum == receivedChecksum)
+                            {
+                                int frameLength = trailer + 6;
+                                payload = _secureIncomingBuffer.GetRange(0, frameLength).ToArray();
+                                _secureIncomingBuffer.RemoveRange(0, frameLength);
+                                return true;
+                            }
+                        }
+
+                        bool partialEnvelope = false;
+                        for (int start = 3; start <= _secureIncomingBuffer.Count - Constants.SECURE_ENVELOPE_HEADER_LENGTH; start++)
+                        {
+                            if (_secureIncomingBuffer[start] != (byte)Constants.SECURE_ENVELOPE_FRAME_PREFIX)
+                            {
+                                continue;
+                            }
+
+                            int length = _secureIncomingBuffer[start + 1] | (_secureIncomingBuffer[start + 2] << 8);
+                            uint sequence = (uint)(_secureIncomingBuffer[start + 3] |
+                                (_secureIncomingBuffer[start + 4] << 8) |
+                                (_secureIncomingBuffer[start + 5] << 16) |
+                                (_secureIncomingBuffer[start + 6] << 24));
+                            if (length == 0 || length > Constants.SECURE_ENVELOPE_MAX_PLAINTEXT_BYTES ||
+                                sequence != _secureSession.RxSequence)
+                            {
+                                continue;
+                            }
+
+                            int frameLength = Constants.SECURE_ENVELOPE_HEADER_LENGTH + length + Constants.SECURE_TAG_LENGTH;
+                            if (_secureIncomingBuffer.Count - start < frameLength)
+                            {
+                                partialEnvelope = true;
+                                continue;
+                            }
+
+                            byte[] candidate = _secureIncomingBuffer.GetRange(start, frameLength).ToArray();
+                            if (TryDecryptSecureEnvelope(candidate, _secureSession.DeviceToClientKey,
+                                _secureSession.SessionId, _secureSession.RxSequence, out _))
+                            {
+                                LogProtocolDebug("SEC RX discarded incomplete public response before authenticated frame");
+                                _secureIncomingBuffer.RemoveRange(0, start);
+                                return true;
+                            }
+                        }
+
+                        if (_secureIncomingBuffer.Count <= 1024 || partialEnvelope)
+                        {
+                            return false;
+                        }
+                        _secureIncomingBuffer.Clear();
+                        invalidPublicResponse = true;
+                        return true;
+                    }
+                }
+
                 bool plaintextConfigurationAck =
                     incomingByte == Constants.COMMAND_ID_CONFIM ||
                     incomingByte == Constants.COMMAND_ID_CHECKSUM_FAIL;
@@ -5350,21 +5613,23 @@ public class SerialPortService : IDisposable
             return false;
         }
 
-        if (!TryDecryptSecureEnvelope(secureFrame, _secureSession.DeviceToClientKey, _secureSession.SessionId, _secureSession.RxSequence, out payload))
+        if (!TryDecryptCurrentSecureEnvelope(secureFrame, out payload))
         {
-            LogProtocolDebug($"SEC RX decrypt-fail seq={_secureSession.RxSequence} frameLen={secureFrame.Length} sessionOpen={_secureSession.IsSessionOpen}");
-            ResetSecureSession();
-            payload = Array.Empty<byte>();
+            LogProtocolDebug($"SEC RX decrypt-fail frameLen={secureFrame.Length}");
             return true;
         }
 
-        LogProtocolDebug($"SEC RX decrypt-ok seq={_secureSession.RxSequence} payloadLen={payload.Length}");
-        _secureSession.RxSequence++;
+        LogProtocolDebug($"SEC RX decrypt-ok seq={_secureSession.RxSequence - 1} payloadLen={payload.Length}");
         return true;
     }
 
     private void OnDataReceived(object sender, SerialDataReceivedEventArgs e)
     {
+        if (_isDisposed || _isShuttingDown || _suspendDataReceivedReads)
+        {
+            return;
+        }
+
         try
         {
             lock (_serialReceiveLock)
@@ -5477,70 +5742,7 @@ public class SerialPortService : IDisposable
 
                         while (TryReadNextSecureIncomingPayload(out byte[] payload))
                         {
-                            if (payload.Length == 0)
-                            {
-                                continue;
-                            }
-
-                            if (TryCompleteSecureManagementResponse(payload))
-                            {
-                                continue;
-                            }
-
-                            if (payload.Length == 1 && HandleConfigurationAcknowledgement(payload[0]))
-                            {
-                                continue;
-                            }
-
-                            for (int i = 0; i < payload.Length; i++)
-                            {
-                                byte decryptedByte = payload[i];
-                                lock (_bufferLock)
-                                {
-                                    receivedDataBuffer.Add(decryptedByte);
-
-                                    // In secure streaming mode, framed telemetry/status packets may
-                                    // arrive interleaved with other secure control traffic. Detect
-                                    // framed packet boundaries regardless of lastCommandSent.
-                                    TrackFramedResponseByte(decryptedByte);
-                                    if (_packetReady)
-                                    {
-                                        sawFramedPacketBoundary = true;
-                                    }
-                                }
-
-                                if (payload.Length == 1 && TryHandleStandaloneAckByte(decryptedByte))
-                                {
-                                    continue;
-                                }
-
-                                // In secure streaming mode, standalone command responses can be
-                                // delivered inside an encrypted payload. Handle LOG_OPEN ACK/NAK
-                                // here because the raw-byte standalone response path is skipped.
-                                if (lastCommandSent == Constants.COMMAND_ID_LOG_OPEN)
-                                {
-                                    if (decryptedByte == Constants.COMMAND_ID_CONFIM)
-                                    {
-                                        _logOpenTcs?.TrySetResult(true);
-                                        continue;
-                                    }
-
-                                    if (decryptedByte == Constants.COMMAND_ID_CHECKSUM_FAIL)
-                                    {
-                                        _logOpenTcs?.TrySetResult(false);
-                                        continue;
-                                    }
-                                }
-
-                                if (lastCommandSent == Constants.COMMAND_ID_LOG_CHUNK)
-                                {
-                                    if (decryptedByte == Constants.COMMAND_ID_CHECKSUM_FAIL)
-                                    {
-                                        _logChunkTcs?.TrySetCanceled();
-                                        continue;
-                                    }
-                                }
-                            }
+                            sawFramedPacketBoundary |= ProcessSecureIncomingPayload(payload);
                         }
 
                         continue;
@@ -5548,155 +5750,8 @@ public class SerialPortService : IDisposable
 
                     byte readByte = (byte)_serialPort.ReadByte();
                     processedBytes++;
-                    lock (_bufferLock)
-                    {
-                        receivedDataBuffer.Add(readByte);
-
-                        if (ExpectsFramedResponse(lastCommandSent))
-                        {
-                            TrackFramedResponseByte(readByte);
-                            if (_packetReady)
-                            {
-                                sawFramedPacketBoundary = true;
-                            }
-                        }
-                    }
-
-                    if (TryHandleStandaloneAckByte(readByte))
-                    {
-                        continue;
-                    }
-
-                    bool expectsStandaloneAck = IsStandaloneAckExpectedForLastCommand();
-                    bool standaloneCommandResponse = expectsStandaloneAck && (_serialPort.BytesToRead == 0);
-
-                    if (lastCommandSent == Constants.COMMAND_ID_LOG_CHUNK &&
-                        readByte == Constants.COMMAND_ID_CHECKSUM_FAIL &&
-                        _serialPort.BytesToRead == 0)
-                    {
-                        bool singleByteChunkFail = false;
-                        lock (_bufferLock)
-                        {
-                            if (receivedDataBuffer.Count == 1 && receivedDataBuffer[0] == Constants.COMMAND_ID_CHECKSUM_FAIL)
-                            {
-                                receivedDataBuffer.Clear();
-                                singleByteChunkFail = true;
-                            }
-                        }
-
-                        if (singleByteChunkFail)
-                        {
-                            _logChunkTcs?.TrySetCanceled();
-                            LogProtocolDebug("RX LOG_CHUNK standalone CHECKSUM_FAIL byte");
-                            continue;
-                        }
-                    }
-
-                    if (lastCommandSent == Constants.COMMAND_ID_LOG_STREAM &&
-                        readByte == Constants.COMMAND_ID_CHECKSUM_FAIL &&
-                        _serialPort.BytesToRead == 0)
-                    {
-                        bool singleByteStreamFail = false;
-                        lock (_bufferLock)
-                        {
-                            if (receivedDataBuffer.Count == 1 && receivedDataBuffer[0] == Constants.COMMAND_ID_CHECKSUM_FAIL)
-                            {
-                                receivedDataBuffer.Clear();
-                                singleByteStreamFail = true;
-                            }
-                        }
-
-                        if (singleByteStreamFail)
-                        {
-                            _logChunkTcs?.TrySetCanceled();
-                            continue;
-                        }
-                    }
-
-                    if (standaloneCommandResponse && HandleConfigurationAcknowledgement(readByte))
-                    {
-                        continue;
-                    }
-
-                    if (readByte == Constants.COMMAND_ID_CONFIM && (lastCommandSent == Constants.COMMAND_ID_REQUEST || standaloneCommandResponse))
-                    {
-                        switch (lastCommandSent)
-                        {
-                            case Constants.COMMAND_ID_BEGIN:
-                                if (!sendingConfig)
-                                {
-                                    foundECU = true;
-                                    lock (_bufferLock)
-                                    {
-                                        receivedDataBuffer.Clear();
-                                    }
-                                }
-                                break;
-
-                            case Constants.COMMAND_ID_REQUEST:
-                                // After LOG_LIST, some firmware states may ACK REQUEST before
-                                // framed status traffic resumes. Retry a couple of times only in
-                                // that narrow recovery window.
-                                if (_awaitingPostLogRefreshStatusFrame &&
-                                    !sendingConfig &&
-                                    !_suspendLiveRequestPolling &&
-                                    _postLogRefreshRequestRetryCount < 3)
-                                {
-                                    _postLogRefreshRequestRetryCount++;
-                                    SendCommand(Constants.COMMAND_ID_REQUEST);
-                                }
-                                break;
-
-                            case Constants.COMMAND_ID_LOG_OPEN:
-                                _logOpenTcs?.TrySetResult(true);
-                                LogProtocolDebug("RX LOG_OPEN ACK");
-                                break;
-
-                            case Constants.COMMAND_ID_LOG_CANCEL:
-                                break;
-
-                            case Constants.COMMAND_ID_SET_RTC:
-                            case Constants.COMMAND_ID_FACTORY_RESET:
-                            case Constants.COMMAND_ID_FW_UPLOAD_BEGIN:
-                            case Constants.COMMAND_ID_FW_UPLOAD_CHUNK:
-                            case Constants.COMMAND_ID_FW_UPLOAD_END:
-                            case Constants.COMMAND_ID_FW_UPLOAD_CANCEL:
-                            case Constants.COMMAND_ID_FW_INSTALL:
-                                if (_standaloneCommandAckId == lastCommandSent)
-                                {
-                                    _standaloneCommandAckTcs?.TrySetResult(true);
-                                }
-                                break;
-                        }
-                    }
-                    else if (readByte == Constants.COMMAND_ID_CHECKSUM_FAIL && standaloneCommandResponse)
-                    {
-                        switch (lastCommandSent)
-                        {
-                            case Constants.COMMAND_ID_LOG_OPEN:
-                                _logOpenTcs?.TrySetResult(false);
-                                LogProtocolDebug("RX LOG_OPEN CHECKSUM_FAIL");
-                                break;
-
-                            case Constants.COMMAND_ID_LOG_CHUNK:
-                                _logChunkTcs?.TrySetCanceled();
-                                LogProtocolDebug("RX LOG_CHUNK CHECKSUM_FAIL");
-                                break;
-
-                            case Constants.COMMAND_ID_SET_RTC:
-                            case Constants.COMMAND_ID_FACTORY_RESET:
-                            case Constants.COMMAND_ID_FW_UPLOAD_BEGIN:
-                            case Constants.COMMAND_ID_FW_UPLOAD_CHUNK:
-                            case Constants.COMMAND_ID_FW_UPLOAD_END:
-                            case Constants.COMMAND_ID_FW_UPLOAD_CANCEL:
-                            case Constants.COMMAND_ID_FW_INSTALL:
-                                if (_standaloneCommandAckId == lastCommandSent)
-                                {
-                                    _standaloneCommandAckTcs?.TrySetResult(false);
-                                }
-                                break;
-                        }
-                    }
+                    AppendIncomingByte(readByte);
+                    sawFramedPacketBoundary = true;
                 }
             }
             catch (Exception)
@@ -5716,21 +5771,32 @@ public class SerialPortService : IDisposable
         lock (_serialReceiveLock)
         {
             bool retVal = foundECU;
-            if (_serialPort.IsOpen && !foundECU && !_suspendDataReceivedReads && !_isShuttingDown && !_isDisposed)
+            lock (_configurationSaveLock)
             {
-                try
+                lock (_pollingSuspensionLock)
                 {
-                    ResetLogReceiveState(discardSerialInput: true);
-                    SendCommand(Constants.COMMAND_ID_BEGIN);
-
-                    if (_serialPort.BytesToRead > 0)
+                    if (_serialPort.IsOpen && !foundECU && !_suspendDataReceivedReads &&
+                        !_isShuttingDown && !_isDisposed && !_configurationSaveActive &&
+                        !_suspendLiveRequestPolling)
                     {
-                        Debug.WriteLine("Data in buffer");
+                        try
+                        {
+                            if (!_secureSession.IsSessionOpen)
+                            {
+                                ResetLogReceiveState(discardSerialInput: true);
+                            }
+                            SendCommandCore(Constants.COMMAND_ID_BEGIN);
+
+                            if (_serialPort.BytesToRead > 0)
+                            {
+                                Debug.WriteLine("Data in buffer");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.WriteLine($"Error sending request: {ex.Message}");
+                        }
                     }
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"Error sending request: {ex.Message}");
                 }
             }
             return retVal;
@@ -5785,10 +5851,14 @@ public class SerialPortService : IDisposable
                 {
                     MarkControllerSessionLost(requestStaticSnapshot: true);
                     ResetLogReceiveState(discardSerialInput: true);
-                    _serialPort.Close();
                 }
 
                 UnsubscribeDataReceived_NoLock();
+            }
+
+            if (_serialPort.IsOpen)
+            {
+                _serialPort.Close();
             }
         }
     }
@@ -5822,7 +5892,6 @@ public class SerialPortService : IDisposable
                     if (_serialPort.IsOpen)
                     {
                         ResetLogReceiveState(discardSerialInput: true);
-                        _serialPort.Close();
                     }
                 }
                 catch
@@ -5836,6 +5905,17 @@ public class SerialPortService : IDisposable
                 catch
                 {
                 }
+            }
+
+            try
+            {
+                if (_serialPort.IsOpen)
+                {
+                    _serialPort.Close();
+                }
+            }
+            catch
+            {
             }
         }
 
@@ -5875,12 +5955,28 @@ public class SerialPortService : IDisposable
     {
         await RunStandaloneRequestAsync(() =>
         {
-            StartSendConfig();
+            StartSendConfigUnderGate();
             return Task.FromResult(true);
         });
     }
 
     public void StartSendConfig()
+    {
+        if (!_standaloneRequestLock.Wait(0))
+        {
+            throw new InvalidOperationException("Wait for the current controller request to finish before saving settings.");
+        }
+        try
+        {
+            StartSendConfigUnderGate();
+        }
+        finally
+        {
+            _standaloneRequestLock.Release();
+        }
+    }
+
+    private void StartSendConfigUnderGate()
     {
         lock (_configurationSaveLock)
         {
@@ -5890,8 +5986,7 @@ public class SerialPortService : IDisposable
                 throw new IOException("The controller serial connection is closed.");
             if (_secureSession.PinEnabled && !_secureSession.IsAuthorized)
                 throw new InvalidOperationException("Unlock the controller before saving settings.");
-            _configurationPreviousPollingSuspended = _suspendLiveRequestPolling;
-            _suspendLiveRequestPolling = true;
+            _configurationPollingSuspension = SuspendLivePolling();
             _configurationSaveActive = true;
             _configurationCommandSentTick = Environment.TickCount64;
             try
@@ -5964,10 +6059,31 @@ public class SerialPortService : IDisposable
 
     private void SendCommand(char commandId)
     {
+        SendCommandWithPollingGuard(commandId, commandId == Constants.COMMAND_ID_REQUEST);
+    }
+
+    private void SendPollCommand(char commandId)
+    {
+        SendCommandWithPollingGuard(commandId, true);
+    }
+
+    private void SendCommandWithPollingGuard(char commandId, bool isPolling)
+    {
         lock (_configurationSaveLock)
         {
             if (_configurationSaveActive && commandId != Constants.COMMAND_ID_SAVECHANGES)
                 return;
+            if (isPolling)
+            {
+                lock (_pollingSuspensionLock)
+                {
+                    if (!_suspendLiveRequestPolling)
+                    {
+                        SendCommandCore(commandId);
+                    }
+                }
+                return;
+            }
             if (_configurationSaveActive)
             {
                 _pendingConfigurationCommand = commandId;
@@ -5997,7 +6113,6 @@ public class SerialPortService : IDisposable
             uint sequenceBefore = _secureSession.TxSequence;
             byte[] data = BuildCommandFrame([(byte)commandId]);
 
-            _serialPort.Write(data, 0, data.Length);
             lastCommandSent = commandId;
             if (commandId == Constants.COMMAND_ID_BEGIN)
             {
@@ -6023,6 +6138,18 @@ public class SerialPortService : IDisposable
             if (commandId == Constants.COMMAND_ID_CUSTOM_CAN_STATUS)
             {
                 _lastCustomCanStatusRequestSentTick = Environment.TickCount64;
+            }
+            try
+            {
+                _serialPort.Write(data, 0, data.Length);
+            }
+            catch
+            {
+                if (commandId == Constants.COMMAND_ID_REQUEST)
+                {
+                    CompleteLiveRequest();
+                }
+                throw;
             }
         }
     }
@@ -6071,7 +6198,7 @@ public class SerialPortService : IDisposable
         {
             if ((now - _lastHandshakeAttemptTick) >= handshakeRetryMs)
             {
-                SendCommand(Constants.COMMAND_ID_BEGIN);
+                SendPollCommand(Constants.COMMAND_ID_BEGIN);
             }
 
             return;
@@ -6089,7 +6216,7 @@ public class SerialPortService : IDisposable
 
                 if (_lastMathStatusRequestSentTick == 0 || now - _lastMathStatusRequestSentTick >= StaticSnapshotRetryIntervalMs)
                 {
-                    SendCommand(Constants.COMMAND_ID_MATH_STATUS);
+                    SendPollCommand(Constants.COMMAND_ID_MATH_STATUS);
                 }
 
                 return;
@@ -6104,7 +6231,7 @@ public class SerialPortService : IDisposable
 
             if (_lastStaticRequestSentTick == 0 || (now - _lastStaticRequestSentTick) >= staticRetryIntervalMs)
             {
-                SendCommand(Constants.COMMAND_ID_REQUEST_STATIC);
+                SendPollCommand(Constants.COMMAND_ID_REQUEST_STATIC);
             }
 
             return;
@@ -6122,7 +6249,7 @@ public class SerialPortService : IDisposable
         {
             LoggingService.AddLog("Controller comms lost. Reconnecting...");
             MarkControllerSessionLost(requestStaticSnapshot: true);
-            SendCommand(Constants.COMMAND_ID_BEGIN);
+            SendPollCommand(Constants.COMMAND_ID_BEGIN);
             return;
         }
 
@@ -6142,7 +6269,7 @@ public class SerialPortService : IDisposable
             if (_lastDigitalInputStatusRequestSentTick == 0 ||
                 (now - _lastDigitalInputStatusRequestSentTick) >= digitalStatusPollIntervalMs)
             {
-                SendCommand(Constants.COMMAND_ID_DIGITAL_INPUT_STATUS);
+                SendPollCommand(Constants.COMMAND_ID_DIGITAL_INPUT_STATUS);
             }
         }
 
@@ -6156,12 +6283,12 @@ public class SerialPortService : IDisposable
     {
         if (ShouldRequestMathStatus(now, idleThresholdMs))
         {
-            SendCommand(Constants.COMMAND_ID_MATH_STATUS);
+            SendPollCommand(Constants.COMMAND_ID_MATH_STATUS);
         }
 
         if (ShouldRequestCustomCanStatus(now, idleThresholdMs))
         {
-            SendCommand(Constants.COMMAND_ID_CUSTOM_CAN_STATUS);
+            SendPollCommand(Constants.COMMAND_ID_CUSTOM_CAN_STATUS);
         }
     }
 
@@ -6225,13 +6352,17 @@ public class SerialPortService : IDisposable
 
     public async Task<bool> RequestCustomCanSnapshotAsync(int timeoutMs = 2500, int attempts = 2)
     {
+        return await RunStandaloneRequestAsync(() => RequestCustomCanSnapshotCoreAsync(timeoutMs, attempts));
+    }
+
+    private async Task<bool> RequestCustomCanSnapshotCoreAsync(int timeoutMs, int attempts)
+    {
         if (!_serialPort.IsOpen || sendingConfig)
         {
             return false;
         }
 
-        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
-        _suspendLiveRequestPolling = true;
+        using IDisposable pollingSuspension = SuspendLivePolling();
         try
         {
             for (int attempt = 0; attempt < Math.Max(1, attempts); attempt++)
@@ -6268,8 +6399,8 @@ public class SerialPortService : IDisposable
         }
         finally
         {
-            _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
-            if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
+            pollingSuspension.Dispose();
+            if (!_suspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
             {
                 EnsureLiveRequestPolling();
             }
@@ -6294,17 +6425,15 @@ public class SerialPortService : IDisposable
         _ioFlowStatusPollingEnabled = enabled;
     }
 
-    public bool BeginCustomCanConfigSession()
+    public IDisposable BeginCustomCanConfigSession()
     {
-        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
-        _suspendLiveRequestPolling = true;
-        return previousSuspendLiveRequestPolling;
+        return SuspendLivePolling();
     }
 
-    public void EndCustomCanConfigSession(bool previousSuspendLiveRequestPolling)
+    public void EndCustomCanConfigSession(IDisposable pollingSuspension)
     {
-        _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
-        if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
+        pollingSuspension.Dispose();
+        if (!_suspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
         {
             EnsureLiveRequestPolling();
         }
@@ -6369,8 +6498,8 @@ public class SerialPortService : IDisposable
             }
 
             byte[] data = BuildCommandFrame(commandPayload);
-            _serialPort.Write(data, 0, data.Length);
             lastCommandSent = commandId;
+            _serialPort.Write(data, 0, data.Length);
         }
     }
 
@@ -6622,9 +6751,15 @@ public class SerialPortService : IDisposable
 
     private async Task<T> RunStandaloneRequestAsync<T>(Func<Task<T>> operation)
     {
-        await _standaloneRequestLock.WaitAsync();
+        return await RunStandaloneRequestCancellableAsync(operation, CancellationToken.None);
+    }
+
+    private async Task<T> RunStandaloneRequestCancellableAsync<T>(Func<Task<T>> operation, CancellationToken cancellationToken)
+    {
+        await _standaloneRequestLock.WaitAsync(cancellationToken);
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             lock (_configurationSaveLock)
             {
                 if (_configurationSaveActive)
@@ -6649,7 +6784,10 @@ public class SerialPortService : IDisposable
 
         return await WithLiveRequestPollingSuspendedAsync(async () =>
         {
-            ResetLogReceiveState(discardSerialInput: discardBeforeSend);
+            if (!_secureSession.IsSessionOpen)
+            {
+                ResetLogReceiveState(discardSerialInput: discardBeforeSend);
+            }
 
             if (preCommandDelayMs > 0)
             {
@@ -6661,18 +6799,23 @@ public class SerialPortService : IDisposable
                 return false;
             }
 
-            if (discardBeforeSend)
+            if (discardBeforeSend && !_secureSession.IsSessionOpen)
             {
                 ResetLogReceiveState(discardSerialInput: true);
             }
 
             var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _standaloneCommandAckTcs = tcs;
-            _standaloneCommandAckId = commandId;
-
             try
             {
-                sendAction();
+                lock (_parseLock)
+                {
+                    lock (_standaloneAckLock)
+                    {
+                        _standaloneCommandAckId = commandId;
+                        _standaloneCommandAckTcs = tcs;
+                    }
+                    sendAction();
+                }
 
                 Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
                 if (completedTask != tcs.Task)
@@ -6685,10 +6828,13 @@ public class SerialPortService : IDisposable
             }
             finally
             {
-                if (_standaloneCommandAckTcs == tcs)
+                lock (_standaloneAckLock)
                 {
-                    _standaloneCommandAckTcs = null;
-                    _standaloneCommandAckId = '\0';
+                    if (_standaloneCommandAckTcs == tcs)
+                    {
+                        _standaloneCommandAckTcs = null;
+                        _standaloneCommandAckId = '\0';
+                    }
                 }
             }
         });
@@ -6696,17 +6842,15 @@ public class SerialPortService : IDisposable
 
     private async Task<bool> WithLiveRequestPollingSuspendedAsync(Func<Task<bool>> operation)
     {
-        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
-        _suspendLiveRequestPolling = true;
+        using IDisposable pollingSuspension = SuspendLivePolling();
         try
         {
             return await operation();
         }
         finally
         {
-            ResetLogReceiveState(discardSerialInput: false);
-            _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
-            if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
+            pollingSuspension.Dispose();
+            if (!_suspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
             {
                 EnsureLiveRequestPolling();
             }
@@ -6724,86 +6868,151 @@ public class SerialPortService : IDisposable
 
     public void BeginFirmwareUpdateSession()
     {
-        ResetLogReceiveState(discardSerialInput: true);
-        _suspendLiveRequestPolling = true;
+        lock (_logSessionLock)
+        {
+            if (_firmwareUpdateSessionActive)
+            {
+                throw new InvalidOperationException("A firmware update session is already in progress.");
+            }
+
+            IDisposable pollingSuspension = SuspendLivePolling();
+            try
+            {
+                if (!_secureSession.IsSessionOpen && !_logTransferSessionActive)
+                {
+                    ResetLogReceiveState(discardSerialInput: true);
+                }
+                _firmwarePollingSuspension = pollingSuspension;
+                _firmwareUpdateSessionActive = true;
+            }
+            catch
+            {
+                pollingSuspension.Dispose();
+                throw;
+            }
+        }
     }
 
     public void EndFirmwareUpdateSession(bool expectControllerRestart = false)
     {
-        ResetLogReceiveState(discardSerialInput: false);
-        _suspendLiveRequestPolling = false;
-
-        if (!_serialPort.IsOpen || sendingConfig)
+        lock (_logSessionLock)
         {
-            return;
-        }
+            if (!_firmwareUpdateSessionActive)
+            {
+                return;
+            }
 
-        if (expectControllerRestart)
-        {
-            LoggingService.AddLog("Controller restarting after firmware update...");
-            MarkControllerSessionLost(requestStaticSnapshot: true);
-            return;
-        }
+            try
+            {
+                if (expectControllerRestart || (!_secureSession.IsSessionOpen && !_logTransferSessionActive))
+                {
+                    ResetLogReceiveState(discardSerialInput: false);
+                }
+            }
+            finally
+            {
+                _firmwareUpdateSessionActive = false;
+                _firmwarePollingSuspension?.Dispose();
+                _firmwarePollingSuspension = null;
+            }
 
-        if (_serialPort.IsOpen && !sendingConfig)
-        {
-            SendCommand(Constants.COMMAND_ID_REQUEST);
+            if (!_serialPort.IsOpen || sendingConfig)
+            {
+                return;
+            }
+
+            if (expectControllerRestart)
+            {
+                LoggingService.AddLog("Controller restarting after firmware update...");
+                MarkControllerSessionLost(requestStaticSnapshot: true);
+                return;
+            }
+
+            if (!_suspendLiveRequestPolling)
+            {
+                SendCommand(Constants.COMMAND_ID_REQUEST);
+            }
         }
     }
 
     public async Task<string?> RequestFirmwareVersionAsync(int timeoutMs = 3000)
+    {
+        return await RunStandaloneRequestAsync(() => RequestFirmwareVersionCoreAsync(timeoutMs));
+    }
+
+    private void AbandonIncompletePublicResponse(char command)
+    {
+        bool incomplete;
+        lock (_configurationSaveLock)
+        {
+            lock (_bufferLock)
+            {
+                incomplete = _secureSession.IsSessionOpen && _secureIncomingBuffer.Count > 0 &&
+                    _secureIncomingBuffer[0] == Constants.SERIAL_HEADER1 &&
+                    (_secureIncomingBuffer.Count < 2 || _secureIncomingBuffer[1] == Constants.SERIAL_HEADER2) &&
+                    (_secureIncomingBuffer.Count < 3 || _secureIncomingBuffer[2] == command);
+                if (incomplete)
+                {
+                    _secureIncomingBuffer.Clear();
+                }
+            }
+
+            if (incomplete)
+            {
+                MarkControllerSessionLost(requestStaticSnapshot: true);
+            }
+        }
+
+        if (incomplete)
+        {
+            LoggingService.AddLog("The controller returned an incomplete response. Reconnect and try again.");
+        }
+    }
+
+    private async Task<string?> RequestFirmwareVersionCoreAsync(int timeoutMs)
     {
         if (!_serialPort.IsOpen)
         {
             return null;
         }
 
-        await _standaloneRequestLock.WaitAsync();
-        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
+        using IDisposable pollingSuspension = SuspendLivePolling();
+        bool preserveSecureSession = _secureSession.IsSessionOpen;
+        if (!preserveSecureSession)
+        {
+            ResetLogReceiveState(discardSerialInput: true);
+        }
+        var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _firmwareVersionTcs = tcs;
+
         try
         {
-            bool preserveSecureSession = _secureSession.IsSessionOpen;
-            _suspendLiveRequestPolling = true;
-            if (!preserveSecureSession)
+            SendCommand(Constants.COMMAND_ID_FW_VER);
+            Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
+            if (completedTask != tcs.Task)
             {
-                ResetLogReceiveState(discardSerialInput: true);
+                if (tcs.Task.IsCompletedSuccessfully)
+                {
+                    return tcs.Task.Result;
+                }
+                AbandonIncompletePublicResponse(Constants.COMMAND_ID_FW_VER);
+                return null;
             }
-            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _firmwareVersionTcs = tcs;
 
-            try
-            {
-                SendCommand(Constants.COMMAND_ID_FW_VER);
-                Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
-                if (completedTask != tcs.Task)
-                {
-                    return null;
-                }
-
-                return await tcs.Task;
-            }
-            finally
-            {
-                if (_firmwareVersionTcs == tcs)
-                {
-                    _firmwareVersionTcs = null;
-                }
-
-                if (!preserveSecureSession)
-                {
-                    ResetLogReceiveState(discardSerialInput: false);
-                }
-
-                _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
-                if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
-                {
-                    EnsureLiveRequestPolling();
-                }
-            }
+            return await tcs.Task;
         }
         finally
         {
-            _standaloneRequestLock.Release();
+            if (_firmwareVersionTcs == tcs)
+            {
+                _firmwareVersionTcs = null;
+            }
+
+            pollingSuspension.Dispose();
+            if (!_suspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
+            {
+                EnsureLiveRequestPolling();
+            }
         }
     }
 
@@ -6819,9 +7028,8 @@ public class SerialPortService : IDisposable
             return null;
         }
 
-        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
+        using IDisposable pollingSuspension = SuspendLivePolling();
         bool preserveSecureSession = _secureSession.IsSessionOpen;
-        _suspendLiveRequestPolling = true;
         if (!preserveSecureSession)
         {
             ResetLogReceiveState(discardSerialInput: true);
@@ -6835,6 +7043,11 @@ public class SerialPortService : IDisposable
             Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
             if (completedTask != tcs.Task)
             {
+                if (tcs.Task.IsCompletedSuccessfully)
+                {
+                    return tcs.Task.Result;
+                }
+                AbandonIncompletePublicResponse(Constants.COMMAND_ID_BUILD_DATE);
                 return null;
             }
 
@@ -6847,13 +7060,8 @@ public class SerialPortService : IDisposable
                 _buildDateTcs = null;
             }
 
-            if (!preserveSecureSession)
-            {
-                ResetLogReceiveState(discardSerialInput: false);
-            }
-
-            _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
-            if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
+            pollingSuspension.Dispose();
+            if (!_suspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
             {
                 EnsureLiveRequestPolling();
             }
@@ -6872,9 +7080,8 @@ public class SerialPortService : IDisposable
             return null;
         }
 
-        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
+        using IDisposable pollingSuspension = SuspendLivePolling();
         bool preserveSecureSession = _secureSession.IsSessionOpen;
-        _suspendLiveRequestPolling = true;
         if (!preserveSecureSession)
         {
             ResetLogReceiveState(discardSerialInput: true);
@@ -6900,9 +7107,8 @@ public class SerialPortService : IDisposable
                 _firmwareDiagnosticTcs = null;
             }
 
-            ResetLogReceiveState(discardSerialInput: false);
-            _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
-            if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
+            pollingSuspension.Dispose();
+            if (!_suspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
             {
                 SendCommand(Constants.COMMAND_ID_REQUEST);
             }
@@ -6917,14 +7123,7 @@ public class SerialPortService : IDisposable
             return;
         }
 
-        // Keep partial encrypted frames and their sequence numbers intact.
-        lock (_bufferLock)
-        {
-            receivedDataBuffer.Clear();
-        }
-
-        foundTrailer1 = false;
-        _packetReady = false;
+        // Keep both partial envelopes and their decoded frame fragments intact.
     }
 
     private void ResetCellularTestReceiveState(bool discardSerialInput)
@@ -6949,7 +7148,8 @@ public class SerialPortService : IDisposable
 
         try
         {
-            if (_isDisposed || !_serialPort.IsOpen || _suspendLiveRequestPolling || _logTransferSessionActive)
+            if (_isDisposed || !_serialPort.IsOpen || _suspendLiveRequestPolling ||
+                _logTransferSessionActive || _configurationSaveActive)
             {
                 return (false, null);
             }
@@ -6969,8 +7169,7 @@ public class SerialPortService : IDisposable
             return null;
         }
 
-        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
-        _suspendLiveRequestPolling = true;
+        using IDisposable pollingSuspension = SuspendLivePolling();
         var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         try
@@ -6993,10 +7192,8 @@ public class SerialPortService : IDisposable
                 _cellularTestTcs = null;
             }
 
-            ResetCellularTestReceiveState(discardSerialInput: false);
-
-            _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
-            if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
+            pollingSuspension.Dispose();
+            if (!_suspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
             {
                 SendCommand(Constants.COMMAND_ID_REQUEST);
             }
@@ -7011,15 +7208,24 @@ public class SerialPortService : IDisposable
             return null;
         }
 
-        await _standaloneRequestLock.WaitAsync();
-        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
-        _suspendLiveRequestPolling = true;
-        ResetStandaloneReceiveState(discardSerialInput: true);
+        return await RunStandaloneRequestAsync(() =>
+            RequestOpenRemoteProvisioningCoreAsync(cellularSettings, provisioningRequestJson, timeoutMs));
+    }
+
+    private async Task<string?> RequestOpenRemoteProvisioningCoreAsync(CellularParameters cellularSettings, string provisioningRequestJson, int timeoutMs)
+    {
+        if (!_serialPort.IsOpen)
+        {
+            return null;
+        }
+
+        using IDisposable pollingSuspension = SuspendLivePolling();
         var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _openRemoteProvisioningTcs = tcs;
 
         try
         {
+            ResetStandaloneReceiveState(discardSerialInput: true);
+            _openRemoteProvisioningTcs = tcs;
             SendOpenRemoteProvisioningCommand(cellularSettings, provisioningRequestJson);
             Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
             if (completedTask != tcs.Task)
@@ -7036,14 +7242,11 @@ public class SerialPortService : IDisposable
                 _openRemoteProvisioningTcs = null;
             }
 
-            ResetStandaloneReceiveState(discardSerialInput: false);
-            _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
-            if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
+            pollingSuspension.Dispose();
+            if (!_suspendLiveRequestPolling && _serialPort.IsOpen && !sendingConfig)
             {
                 SendCommand(Constants.COMMAND_ID_REQUEST);
             }
-
-            _standaloneRequestLock.Release();
         }
     }
 
@@ -7054,8 +7257,8 @@ public class SerialPortService : IDisposable
             byte[] data = BuildOpenRemoteProvisioningCommand(cellularSettings, provisioningRequestJson);
             LoggingService.AddLog("Sending PDM registration request.",
                 details: $"transport={(ShouldSendCommandOverSecureEnvelope(Constants.COMMAND_ID_OPENREMOTE_PROVISION) ? "encrypted" : "legacy")}; pinEnabled={_secureSession.PinEnabled}; frameBytes={data.Length}");
-            _serialPort.Write(data, 0, data.Length);
             lastCommandSent = Constants.COMMAND_ID_OPENREMOTE_PROVISION;
+            _serialPort.Write(data, 0, data.Length);
         }
     }
 
@@ -7114,8 +7317,8 @@ public class SerialPortService : IDisposable
             }
 
             byte[] data = BuildCellularTestCommand(cellularSettings);
-            _serialPort.Write(data, 0, data.Length);
             lastCommandSent = Constants.COMMAND_ID_CELLULAR_TEST;
+            _serialPort.Write(data, 0, data.Length);
         }
     }
 
@@ -7317,42 +7520,32 @@ public class SerialPortService : IDisposable
 
     public async Task<IReadOnlyList<ControllerLogFileInfo>> RequestLogFileListAsync(int timeoutMs = 5000)
     {
+        return await RunStandaloneRequestAsync(() => RequestLogFileListCoreAsync(timeoutMs));
+    }
+
+    private async Task<IReadOnlyList<ControllerLogFileInfo>> RequestLogFileListCoreAsync(int timeoutMs)
+    {
         if (!_serialPort.IsOpen)
         {
             return Array.Empty<ControllerLogFileInfo>();
         }
 
         bool preserveSecureSession = _secureSession.IsSessionOpen;
-
-        await _standaloneRequestLock.WaitAsync();
-        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
-        _suspendLiveRequestPolling = true;
+        using IDisposable pollingSuspension = SuspendLivePolling();
         try
         {
             if (!preserveSecureSession)
             {
                 ResetLogReceiveState(discardSerialInput: true);
             }
-            else
-            {
-                lock (_bufferLock)
-                {
-                    receivedDataBuffer.Clear();
-                }
-
-                foundTrailer1 = false;
-                _packetReady = false;
-            }
-
             for (int attempt = 0; attempt < 3; attempt++)
             {
                 var tcs = new TaskCompletionSource<IReadOnlyList<ControllerLogFileInfo>>(TaskCreationOptions.RunContinuationsAsynchronously);
-                _logFileListTcs = tcs;
-                LogProtocolDebug($"TX LOG_LIST attempt={attempt + 1}");
-                SendCommand(Constants.COMMAND_ID_LOG_LIST);
-
                 try
                 {
+                    _logFileListTcs = tcs;
+                    LogProtocolDebug($"TX LOG_LIST attempt={attempt + 1}");
+                    SendCommand(Constants.COMMAND_ID_LOG_LIST);
                     Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
                     if (completedTask != tcs.Task)
                     {
@@ -7371,7 +7564,7 @@ public class SerialPortService : IDisposable
                             {
                                 try
                                 {
-                                    processData();
+                                    ProcessNextIncomingItem();
                                 }
                                 catch
                                 {
@@ -7427,7 +7620,7 @@ public class SerialPortService : IDisposable
                     LogProtocolDebug($"LOG_LIST completed entries={files.Count}");
                     return files;
                 }
-                catch
+                catch (OperationCanceledException)
                 {
                     LogProtocolDebug($"LOG_LIST timeout/cancel on attempt={attempt + 1}");
                     if (attempt == 2)
@@ -7448,38 +7641,24 @@ public class SerialPortService : IDisposable
         }
         finally
         {
-            // Align with log-transfer session teardown. In secure mode, avoid
-            // clearing secure stream state to keep envelope sequence continuity.
-            if (!preserveSecureSession)
-            {
-                ResetLogReceiveState(discardSerialInput: false);
-            }
-            else
-            {
-                lock (_bufferLock)
-                {
-                    receivedDataBuffer.Clear();
-                }
-
-                foundTrailer1 = false;
-                _packetReady = false;
-            }
-
-            _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
+            pollingSuspension.Dispose();
 
             // Resume live polling immediately after a log-list refresh.
-            if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !_logTransferSessionActive && !sendingConfig)
+            if (!_suspendLiveRequestPolling && _serialPort.IsOpen && !_logTransferSessionActive && !sendingConfig)
             {
                 _awaitingPostLogRefreshStatusFrame = true;
                 _postLogRefreshRequestRetryCount = 0;
                 SendCommand(Constants.COMMAND_ID_REQUEST);
             }
-
-            _standaloneRequestLock.Release();
         }
     }
 
     public async Task<bool> OpenLogTransferAsync(byte logIndex, int timeoutMs = 2000)
+    {
+        return await RunStandaloneRequestAsync(() => OpenLogTransferCoreAsync(logIndex, timeoutMs));
+    }
+
+    private async Task<bool> OpenLogTransferCoreAsync(byte logIndex, int timeoutMs)
     {
         if (!_serialPort.IsOpen)
         {
@@ -7487,18 +7666,20 @@ public class SerialPortService : IDisposable
         }
 
         _bulkLogTransferStopped = false;
-        _suspendLiveRequestPolling = true;
+        using IDisposable pollingSuspension = SuspendLivePolling();
         try
         {
             for (int attempt = 1; attempt <= 2; attempt++)
             {
                 var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-                _logOpenTcs = tcs;
-                LogProtocolDebug($"TX LOG_OPEN index={logIndex} attempt={attempt}");
-                SendCommandWithByte(Constants.COMMAND_ID_LOG_OPEN, logIndex);
-
                 try
                 {
+                    lock (_parseLock)
+                    {
+                        _logOpenTcs = tcs;
+                        LogProtocolDebug($"TX LOG_OPEN index={logIndex} attempt={attempt}");
+                        SendCommandWithByte(Constants.COMMAND_ID_LOG_OPEN, logIndex);
+                    }
                     Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
                     if (completedTask != tcs.Task)
                     {
@@ -7512,10 +7693,6 @@ public class SerialPortService : IDisposable
                     {
                         return true;
                     }
-                }
-                catch
-                {
-                    LogProtocolDebug($"LOG_OPEN exception/timeout on attempt={attempt}");
                 }
                 finally
                 {
@@ -7532,22 +7709,19 @@ public class SerialPortService : IDisposable
         }
         finally
         {
-            if (!_logTransferSessionActive)
-            {
-                _suspendLiveRequestPolling = false;
-            }
+            pollingSuspension.Dispose();
         }
     }
 
     public async Task<LogChunkResponse?> RequestLogChunkAsync(int timeoutMs = 5000)
     {
-        if (!_serialPort.IsOpen)
-        {
-            return null;
-        }
+        return await RunStandaloneRequestAsync(() => RequestLogChunkCoreAsync(timeoutMs));
+    }
 
-        await _standaloneRequestLock.WaitAsync();
+    private async Task<LogChunkResponse?> RequestLogChunkCoreAsync(int timeoutMs)
+    {
         await _logChunkRequestLock.WaitAsync();
+        using IDisposable pollingSuspension = SuspendLivePolling();
         try
         {
             if (!_serialPort.IsOpen)
@@ -7560,10 +7734,6 @@ public class SerialPortService : IDisposable
                 return queuedChunk;
             }
 
-            if (!_logTransferSessionActive)
-            {
-                _suspendLiveRequestPolling = true;
-            }
             _txLogChunkCounter++;
             if (_txLogChunkCounter <= 10 || (_txLogChunkCounter % 25) == 0)
             {
@@ -7587,12 +7757,8 @@ public class SerialPortService : IDisposable
         }
         finally
         {
-            if (!_logTransferSessionActive)
-            {
-                _suspendLiveRequestPolling = false;
-            }
+            pollingSuspension.Dispose();
             _logChunkRequestLock.Release();
-            _standaloneRequestLock.Release();
         }
     }
 
@@ -7608,8 +7774,24 @@ public class SerialPortService : IDisposable
             _pendingLogChunks.Clear();
         }
 
-        _suspendLiveRequestPolling = true;
-        SendCommand(Constants.COMMAND_ID_LOG_STREAM);
+        lock (_logSessionLock)
+        {
+            bool createdSuspension = _logStreamPollingSuspension == null;
+            _logStreamPollingSuspension ??= SuspendLivePolling();
+            try
+            {
+                SendCommand(Constants.COMMAND_ID_LOG_STREAM);
+            }
+            catch
+            {
+                if (createdSuspension)
+                {
+                    _logStreamPollingSuspension.Dispose();
+                    _logStreamPollingSuspension = null;
+                }
+                throw;
+            }
+        }
         return true;
     }
 
@@ -7620,37 +7802,94 @@ public class SerialPortService : IDisposable
             return null;
         }
 
-        if (TryRecoverBufferedLogChunk(out var queuedChunk))
-        {
-            return queuedChunk;
-        }
-
-        var tcs = new TaskCompletionSource<LogChunkResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _logChunkTcs = tcs;
-        if (!_logTransferSessionActive)
-        {
-            _suspendLiveRequestPolling = true;
-        }
-
+        await _logChunkRequestLock.WaitAsync();
         try
         {
-            return await AwaitLogChunkAsync(tcs, timeoutMs, "LOG_STREAM");
+            if (!_serialPort.IsOpen)
+            {
+                return null;
+            }
+
+            if (TryRecoverBufferedLogChunk(out var queuedChunk))
+            {
+                return CompleteLogChunkWait(queuedChunk);
+            }
+
+            using IDisposable pollingSuspension = SuspendLivePolling();
+            var tcs = new TaskCompletionSource<LogChunkResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+            lock (_logChunkLock)
+            {
+                if (_pendingLogChunks.Count > 0)
+                {
+                    queuedChunk = _pendingLogChunks.Dequeue();
+                }
+                else
+                {
+                    _logChunkTcs = tcs;
+                }
+            }
+
+            if (queuedChunk != null)
+            {
+                return CompleteLogChunkWait(queuedChunk);
+            }
+
+            LogChunkResponse? result = null;
+            try
+            {
+                result = await AwaitLogChunkAsync(tcs, timeoutMs, "LOG_STREAM");
+            }
+            finally
+            {
+                lock (_logChunkLock)
+                {
+                    if (_logChunkTcs == tcs)
+                    {
+                        _logChunkTcs = null;
+                    }
+                    if (result == null && tcs.Task.IsCompletedSuccessfully)
+                    {
+                        result = tcs.Task.Result;
+                    }
+                }
+            }
+            return CompleteLogChunkWait(result);
         }
         finally
         {
-            if (!_logTransferSessionActive)
-            {
-                _suspendLiveRequestPolling = false;
-            }
+            _logChunkRequestLock.Release();
+        }
+    }
 
-            if (_logChunkTcs == tcs)
-            {
-                _logChunkTcs = null;
-            }
+    private LogChunkResponse? CompleteLogChunkWait(LogChunkResponse? chunk)
+    {
+        if (chunk?.Done == true)
+        {
+            ReleaseLogStreamPolling();
+        }
+        return chunk;
+    }
+
+    private void ReleaseLogStreamPolling()
+    {
+        lock (_logSessionLock)
+        {
+            _logStreamPollingSuspension?.Dispose();
+            _logStreamPollingSuspension = null;
         }
     }
 
     public async Task<string> ReadLogBulkAsync(Action<byte>? progressCallback, CancellationToken token)
+    {
+        if (!_serialPort.IsOpen)
+        {
+            throw new IOException("Serial port is not open.");
+        }
+
+        return await RunStandaloneRequestCancellableAsync(() => ReadLogBulkCoreAsync(progressCallback, token), token);
+    }
+
+    private async Task<string> ReadLogBulkCoreAsync(Action<byte>? progressCallback, CancellationToken token)
     {
         if (!_serialPort.IsOpen)
         {
@@ -7663,9 +7902,7 @@ public class SerialPortService : IDisposable
             throw new InvalidOperationException("The controller does not support authorized plaintext log downloads.");
         }
 
-        await _standaloneRequestLock.WaitAsync(token);
-        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
-        _suspendLiveRequestPolling = true;
+        using IDisposable pollingSuspension = SuspendLivePolling();
         _bulkLogCancelRequested = false;
         _bulkLogCancellationDrained = false;
         _bulkLogTransferStopped = false;
@@ -7712,8 +7949,7 @@ public class SerialPortService : IDisposable
                 ResetLogReceiveState(discardSerialInput: false);
             }
             SetBulkTransferReaderActive(false);
-            _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
-            _standaloneRequestLock.Release();
+            pollingSuspension.Dispose();
         }
     }
 
@@ -7779,13 +8015,10 @@ public class SerialPortService : IDisposable
                 byte[] frame = new byte[envelopeHeader.Length + length + Constants.SECURE_TAG_LENGTH];
                 envelopeHeader.CopyTo(frame, 0);
                 await ReadExactlyAsync(stream, frame, envelopeHeader.Length, length + Constants.SECURE_TAG_LENGTH, readToken);
-                if (!TryDecryptSecureEnvelope(frame, _secureSession.DeviceToClientKey, _secureSession.SessionId,
-                    _secureSession.RxSequence, out byte[] plaintext))
+                if (!TryDecryptCurrentSecureEnvelope(frame, out byte[] plaintext))
                 {
-                    ResetSecureSession();
                     throw new IOException("Log download keepalive authentication failed.");
                 }
-                _secureSession.RxSequence++;
                 if (cancelSent && plaintext.Length == 1)
                 {
                     if (keepalivePending || plaintext[0] != (byte)Constants.COMMAND_ID_CONFIM)
@@ -7875,13 +8108,21 @@ public class SerialPortService : IDisposable
             _bulkLogCancelRequested = true;
             return;
         }
-        if (_bulkLogTransferStopped) return;
-        bool shouldResumePolling = !_logTransferSessionActive;
-        _suspendLiveRequestPolling = true;
-        SendCommand(Constants.COMMAND_ID_LOG_CANCEL);
-        if (shouldResumePolling)
+        if (_bulkLogTransferStopped)
         {
-            _suspendLiveRequestPolling = false;
+            ReleaseLogStreamPolling();
+            return;
+        }
+        try
+        {
+            using (SuspendLivePolling())
+            {
+                SendCommand(Constants.COMMAND_ID_LOG_CANCEL);
+            }
+        }
+        finally
+        {
+            ReleaseLogStreamPolling();
         }
     }
 
@@ -7897,15 +8138,20 @@ public class SerialPortService : IDisposable
             return false;
         }
 
-        bool previousSuspendLiveRequestPolling = _suspendLiveRequestPolling;
-        _suspendLiveRequestPolling = true;
+        using IDisposable pollingSuspension = SuspendLivePolling();
 
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _standaloneCommandAckTcs = tcs;
-        _standaloneCommandAckId = Constants.COMMAND_ID_LOG_RESET;
         try
         {
-            SendCommand(Constants.COMMAND_ID_LOG_RESET);
+            lock (_parseLock)
+            {
+                lock (_standaloneAckLock)
+                {
+                    _standaloneCommandAckId = Constants.COMMAND_ID_LOG_RESET;
+                    _standaloneCommandAckTcs = tcs;
+                }
+                SendCommand(Constants.COMMAND_ID_LOG_RESET);
+            }
             Task completedTask = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
             if (completedTask != tcs.Task)
             {
@@ -7914,10 +8160,6 @@ public class SerialPortService : IDisposable
             }
 
             bool resetOk = await tcs.Task;
-            if (resetOk && !UseSecureStreamingTransport())
-            {
-                ResetLogReceiveState(discardSerialInput: true);
-            }
             if (!resetOk)
             {
                 LoggingService.AddLog("Controller rejected the log reset request.");
@@ -7926,15 +8168,18 @@ public class SerialPortService : IDisposable
         }
         finally
         {
-            if (_standaloneCommandAckTcs == tcs)
+            lock (_standaloneAckLock)
             {
-                _standaloneCommandAckTcs = null;
-                _standaloneCommandAckId = '\0';
+                if (_standaloneCommandAckTcs == tcs)
+                {
+                    _standaloneCommandAckTcs = null;
+                    _standaloneCommandAckId = '\0';
+                }
             }
-            _suspendLiveRequestPolling = previousSuspendLiveRequestPolling;
+            pollingSuspension.Dispose();
 
             // Kick the live stream loop back into motion after reset completes.
-            if (!previousSuspendLiveRequestPolling && _serialPort.IsOpen && !_logTransferSessionActive && !sendingConfig)
+            if (!_suspendLiveRequestPolling && _serialPort.IsOpen && !_logTransferSessionActive && !sendingConfig)
             {
                 SendCommand(Constants.COMMAND_ID_REQUEST);
             }

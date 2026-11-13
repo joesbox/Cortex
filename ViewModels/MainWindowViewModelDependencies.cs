@@ -9,13 +9,15 @@ public sealed class MainWindowViewModelDependencies
         FirmwareUpdateService? firmwareUpdateService = null,
         ProvisioningApiClient? provisioningApiClient = null,
         ProvisioningSessionStore? provisioningSessionStore = null,
-        IoFlowGraphStore? ioFlowGraphStore = null)
+        IoFlowGraphStore? ioFlowGraphStore = null,
+        ConfigurationBackupStore? configurationBackupStore = null)
     {
         AppUpdateService = appUpdateService ?? new AppUpdateService();
         FirmwareUpdateService = firmwareUpdateService ?? new FirmwareUpdateService();
         ProvisioningApiClient = provisioningApiClient ?? new ProvisioningApiClient();
         ProvisioningSessionStore = provisioningSessionStore ?? new ProvisioningSessionStore();
         IoFlowGraphStore = ioFlowGraphStore ?? new IoFlowGraphStore();
+        ConfigurationBackupStore = configurationBackupStore ?? new ConfigurationBackupStore();
     }
 
     public AppUpdateService AppUpdateService { get; }
@@ -27,4 +29,6 @@ public sealed class MainWindowViewModelDependencies
     public ProvisioningSessionStore ProvisioningSessionStore { get; }
 
     public IoFlowGraphStore IoFlowGraphStore { get; }
+
+    public ConfigurationBackupStore ConfigurationBackupStore { get; }
 }

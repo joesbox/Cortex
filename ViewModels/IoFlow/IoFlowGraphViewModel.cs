@@ -2,6 +2,7 @@ using Avalonia;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Cortex.Models;
+using Cortex.Services;
 using Nodify.Avalonia.Connections;
 using System;
 using System.Collections.Generic;
@@ -661,6 +662,12 @@ public sealed partial class IoFlowGraphViewModel : ObservableObject
     private void ShowAddNodeWarning(string message)
     {
         AddNodeWarning = message;
+    }
+
+    internal void ReportKeyboardCommandFailure(string message, Exception exception)
+    {
+        ShowAddNodeWarning(message);
+        LoggingService.AddLog(message, exception: exception);
     }
 
     private void ClearAddNodeWarning()

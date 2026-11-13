@@ -23,13 +23,13 @@ public sealed class IoFlowAnaloguePersistenceTests
             var output = Assert.Single(graph.OutputNodes);
             input.Input.ChanType = AnalogueInput.AnalogueChannelType.Active;
             await graph.ConnectNodes(input, output);
-            output.Channel.CurrentThresholdHigh = 18;
+            output.Channel.CurrentThresholdHigh = 16;
             output.Channel.DelayedOff = 1;
             output.Channel.DelayedOffTime = 1500;
             await graph.RemoveConnectionCommand.ExecuteAsync(Assert.Single(graph.Connections));
             Assert.False(output.Channel.HasConfiguredInputSource);
             Assert.Equal(0, output.Channel.InputControlPin);
-            Assert.Equal(18, output.Channel.CurrentThresholdHigh);
+            Assert.Equal(16, output.Channel.CurrentThresholdHigh);
             Assert.Equal(1500, output.Channel.DelayedOffTime);
             input.Input.ChanType = AnalogueInput.AnalogueChannelType.RawVoltage;
             input.Location = new Point(600, 300);

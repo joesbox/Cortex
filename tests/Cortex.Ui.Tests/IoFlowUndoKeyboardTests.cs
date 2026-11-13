@@ -6,6 +6,8 @@ using Avalonia.Input;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using Cortex.Models;
+using Cortex.Services;
+using Cortex.ViewModels;
 using Cortex.ViewModels.IoFlow;
 using Cortex.Views;
 using Nodify.Avalonia;
@@ -15,6 +17,70 @@ namespace Cortex.Ui.Tests;
 
 public sealed class IoFlowUndoKeyboardTests
 {
+    [AvaloniaTheory]
+    [InlineData("undo")]
+    [InlineData("delete-connection")]
+    [InlineData("delete-node")]
+    public async Task KeyboardCommandFailureIsReportedWithoutEscaping(string action)
+    {
+        string directory = Path.Combine(Path.GetTempPath(), $"cortex-ioflow-key-failure-{Guid.NewGuid():N}");
+        string path = Path.Combine(directory, "graph.json");
+        using var vm = new MainWindowViewModel(new ChannelCanTxSettingsTests.TestAppCloser(),
+            new MainWindowViewModelDependencies(ioFlowGraphStore: new IoFlowGraphStore(path)));
+        var graph = vm.IoFlowGraph;
+        var message = vm.SettingsDataView.CustomCanMessagesStaticData[0];
+        message.Id = 0x97;
+        message.Flags = 0x04;
+        graph.AddNextOutputNodeCommand.Execute(null);
+        graph.AddCanTxNodeCommand.Execute(null);
+        graph.SetCustomCanTxStateAction = (_, trigger, enabled) =>
+        {
+            message.TxTrigger = trigger;
+            message.IsEnabled = enabled;
+            return Task.FromResult(true);
+        };
+        await graph.ConnectNodes(graph.OutputNodes[0], graph.CanTxNodes[0]);
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        graph.SetCustomCanTxStateAction = (_, _, _) => completion.Task;
+        var view = new IoFlowTabView { DataContext = vm };
+        var editor = view.FindControl<NodifyEditor>("IoFlowEditor")!;
+        var window = new Window { Width = 1400, Height = 1000, Content = view };
+        try
+        {
+            window.Show();
+            UpdateLayout(window);
+            if (action == "delete-node") graph.SelectedNodes.Add(graph.CanTxNodes[0]);
+            if (action == "delete-connection") graph.SelectConnectionCommand.Execute(Assert.Single(graph.Connections));
+            Assert.True(editor.Focus());
+
+            if (action == "undo")
+                window.KeyPress(Key.Z, RawInputModifiers.Control, PhysicalKey.Z, "z");
+            else
+                window.KeyPress(Key.Delete, RawInputModifiers.None, PhysicalKey.Delete, null);
+            Task? commandTask = action == "undo" ? graph.UndoCommand.ExecutionTask
+                : action == "delete-node" ? graph.RemoveSelectedNodesCommand.ExecutionTask
+                : graph.RemoveSelectedConnectionCommand.ExecutionTask;
+            Assert.NotNull(commandTask);
+            Assert.False(commandTask.IsCompleted);
+            completion.SetException(new InvalidOperationException("Injected failure"));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => commandTask);
+            UpdateLayout(window);
+
+            string expected = action == "undo"
+                ? "Couldn't undo the I/O Flow change. Check the graph before continuing."
+                : "Couldn't delete the I/O Flow selection. Check the graph before continuing.";
+            Assert.Equal(expected, graph.AddNodeWarning);
+            Assert.Contains(LoggingService.LogEntries, entry => entry.EndsWith(expected, StringComparison.Ordinal));
+            Assert.True(message.IsEnabled);
+        }
+        finally
+        {
+            window.Close();
+            if (File.Exists(path)) File.Delete(path);
+            if (Directory.Exists(directory)) Directory.Delete(directory);
+        }
+    }
+
     [AvaloniaTheory]
     [InlineData(false, 1.0, false)]
     [InlineData(true, 1.0, false)]

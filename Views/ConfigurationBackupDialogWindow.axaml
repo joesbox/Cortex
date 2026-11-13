@@ -1,0 +1,83 @@
+<Window
+    x:Class="Cortex.Views.ConfigurationBackupDialogWindow"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:models="using:Cortex.Models"
+    xmlns:views="using:Cortex.Views"
+    x:DataType="views:ConfigurationBackupDialogWindow"
+    Title="Restore Configuration Backup"
+    Width="560"
+    Height="440"
+    CanResize="False"
+    WindowStartupLocation="CenterOwner"
+    Icon="/Assets/cortex.ico">
+    <Grid Margin="18" RowDefinitions="Auto,Auto,*,Auto,Auto" RowSpacing="12">
+        <TextBlock
+            Grid.Row="0"
+            FontSize="18"
+            FontWeight="SemiBold"
+            Text="Configuration backups" />
+        <TextBlock
+            Grid.Row="1"
+            Foreground="Gainsboro"
+            Text="Select a backup to stage its settings in Cortex." />
+
+        <Grid Grid.Row="2" RowDefinitions="Auto,*">
+            <Border
+                Grid.Row="0"
+                Padding="10,8"
+                Background="#302042"
+                CornerRadius="4,4,0,0">
+                <Grid ColumnDefinitions="*,*">
+                    <TextBlock FontWeight="SemiBold" Text="Date" />
+                    <TextBlock Grid.Column="1" FontWeight="SemiBold" Text="Time" />
+                </Grid>
+            </Border>
+            <ListBox
+                x:Name="BackupList"
+                Grid.Row="1"
+                ItemsSource="{Binding Backups}"
+                SelectionChanged="OnBackupSelectionChanged">
+                <ListBox.ItemTemplate>
+                    <DataTemplate x:DataType="models:ConfigurationBackupEntry">
+                        <Border Padding="10,8">
+                            <Grid ColumnDefinitions="*,*">
+                                <TextBlock Text="{Binding DateText}" />
+                                <TextBlock Grid.Column="1" Text="{Binding TimeText}" />
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </Grid>
+
+        <Border
+            Grid.Row="3"
+            Padding="12"
+            Background="#241F32"
+            BorderBrush="#59466F"
+            BorderThickness="1"
+            CornerRadius="6">
+            <TextBlock
+                Text="Restoring a backup only loads its settings into Cortex. It is not saved to the controller until you click Save to controller. New backups omit APN and MQTT passwords and keep the current passwords when restored."
+                TextWrapping="Wrap" />
+        </Border>
+
+        <StackPanel
+            Grid.Row="4"
+            HorizontalAlignment="Right"
+            Orientation="Horizontal"
+            Spacing="10">
+            <Button
+                x:Name="CancelButton"
+                MinWidth="96"
+                Click="OnCancelClick"
+                Content="CANCEL" />
+            <Button
+                x:Name="RestoreButton"
+                MinWidth="110"
+                Click="OnRestoreClick"
+                Content="RESTORE" />
+        </StackPanel>
+    </Grid>
+</Window>

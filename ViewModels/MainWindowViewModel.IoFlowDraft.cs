@@ -22,9 +22,7 @@ public partial class MainWindowViewModel
 
     private static IoFlowDraftSettings CreateIoFlowDraftSettings(DataStructures settings)
     {
-        if (!ConfigFileSerializer.TryDeserialize(ConfigFileSerializer.SerializeSettings(settings), out var config, out var error)
-            || config == null)
-            throw new InvalidOperationException(error);
+        ConfigSnapshot config = ConfigFileSerializer.CreateSettingsSnapshot(settings);
         config.SystemParameters = null;
         config.CellularParameters = null;
         config.IoFlowGraph = null;

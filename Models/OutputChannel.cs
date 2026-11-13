@@ -513,8 +513,32 @@ namespace Cortex.Models
             RaiseDelayedOffUiPropertiesChanged();
         }
 
+        private bool _settingImportedThresholds;
+
+        public void SetImportedThresholds(float? onThreshold, float? offThreshold)
+        {
+            if (!onThreshold.HasValue || !offThreshold.HasValue)
+            {
+                if (onThreshold.HasValue) OnThreshold = onThreshold.Value;
+                if (offThreshold.HasValue) OffThreshold = offThreshold.Value;
+                return;
+            }
+
+            _settingImportedThresholds = true;
+            try
+            {
+                OnThreshold = onThreshold.Value;
+                OffThreshold = offThreshold.Value;
+            }
+            finally
+            {
+                _settingImportedThresholds = false;
+            }
+        }
+
         partial void OnOnThresholdChanged(float value)
         {
+            if (_settingImportedThresholds) return;
             if (UsesNegativeGoingThresholds())
             {
                 if (OffThreshold < value)
@@ -530,6 +554,7 @@ namespace Cortex.Models
 
         partial void OnOffThresholdChanged(float value)
         {
+            if (_settingImportedThresholds) return;
             if (UsesNegativeGoingThresholds())
             {
                 if (value < OnThreshold)

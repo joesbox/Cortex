@@ -6,6 +6,7 @@
     using Cortex.Services;
     using Cortex.ViewModels;
     using System;
+    using System.Collections.Generic;
     using System.Diagnostics;
     using System.IO;
     using System.Linq;
@@ -353,6 +354,12 @@
         {
             var aboutWindow = new AboutWindow();
             await aboutWindow.ShowDialog(this);
+        }
+
+        public async Task<ConfigurationBackupEntry?> ShowConfigurationBackupDialogAsync(IReadOnlyList<ConfigurationBackupEntry> backups)
+        {
+            var dialog = new ConfigurationBackupDialogWindow(backups);
+            return await dialog.ShowDialog<ConfigurationBackupEntry?>(this);
         }
 
         public async Task ShowFirmwareUpdateDialogAsync(FirmwareUpdateWindowViewModel viewModel)

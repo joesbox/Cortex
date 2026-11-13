@@ -261,6 +261,7 @@ public class ConnectorPinProjectionTests
         public Task OpenUrlAsync(string url) => Task.CompletedTask;
         public Task<LocalFirmwareUpdateSelection?> BrowseLocalFirmwareUpdateFilesAsync() => Task.FromResult<LocalFirmwareUpdateSelection?>(null);
         public Task ShowAboutAsync() => Task.CompletedTask;
+        public Task<ConfigurationBackupEntry?> ShowConfigurationBackupDialogAsync(IReadOnlyList<ConfigurationBackupEntry> backups) => Task.FromResult<ConfigurationBackupEntry?>(null);
         public Task ShowFirmwareUpdateDialogAsync(FirmwareUpdateWindowViewModel viewModel) => Task.CompletedTask;
         public Task<PinSetupDialogResult?> ShowPinSetupWizardAsync(bool isPinAlreadyEnabled) => Task.FromResult<PinSetupDialogResult?>(null);
         public Task<bool> ShowRecoveryCodeAsync(string recoveryCode) => Task.FromResult(true);

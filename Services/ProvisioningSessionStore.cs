@@ -13,12 +13,17 @@ namespace Cortex.Services
     /// </summary>
     public sealed class ProvisioningSessionStore
     {
-        private static readonly string SessionPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "Cortex",
-            "provisioning-session.dat");
+        private readonly string _sessionPath;
 
         private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("Cortex.OpenRemote.Provisioning.v1");
+
+        public ProvisioningSessionStore(string? sessionPath = null)
+        {
+            _sessionPath = sessionPath ?? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Cortex",
+                "provisioning-session.dat");
+        }
 
         private sealed class StoredSession
         {
@@ -44,8 +49,8 @@ namespace Cortex.Services
                 byte[] plain = JsonSerializer.SerializeToUtf8Bytes(session);
                 byte[] encrypted = ProtectedData.Protect(plain, Entropy, DataProtectionScope.CurrentUser);
 
-                Directory.CreateDirectory(Path.GetDirectoryName(SessionPath)!);
-                File.WriteAllBytes(SessionPath, encrypted);
+                Directory.CreateDirectory(Path.GetDirectoryName(_sessionPath)!);
+                File.WriteAllBytes(_sessionPath, encrypted);
             }
             catch (Exception ex) when (ex is IOException or CryptographicException or UnauthorizedAccessException)
             {
@@ -59,14 +64,14 @@ namespace Cortex.Services
             username = string.Empty;
             refreshToken = string.Empty;
 
-            if (!OperatingSystem.IsWindows() || !File.Exists(SessionPath))
+            if (!OperatingSystem.IsWindows() || !File.Exists(_sessionPath))
             {
                 return false;
             }
 
             try
             {
-                byte[] encrypted = File.ReadAllBytes(SessionPath);
+                byte[] encrypted = File.ReadAllBytes(_sessionPath);
                 byte[] plain = ProtectedData.Unprotect(encrypted, Entropy, DataProtectionScope.CurrentUser);
                 StoredSession? session = JsonSerializer.Deserialize<StoredSession>(plain);
 
@@ -87,17 +92,17 @@ namespace Cortex.Services
             }
         }
 
-        public void Clear()
+        public bool Clear()
         {
             try
             {
-                if (File.Exists(SessionPath))
-                {
-                    File.Delete(SessionPath);
-                }
+                File.Delete(_sessionPath);
+                return true;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
+                LoggingService.AddLog("Couldn't remove the saved telemetry sign-in. Cortex may sign you in again next time.", exception: ex);
+                return false;
             }
         }
     }

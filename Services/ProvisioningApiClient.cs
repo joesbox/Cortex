@@ -199,20 +199,14 @@ namespace Cortex.Services
                 return;
             }
 
-            try
+            var logoutUri = new Uri(_keycloakBaseUri, $"realms/{Uri.EscapeDataString(realm)}/protocol/openid-connect/logout");
+            using var content = new FormUrlEncodedContent(new Dictionary<string, string>
             {
-                var logoutUri = new Uri(_keycloakBaseUri, $"realms/{Uri.EscapeDataString(realm)}/protocol/openid-connect/logout");
-                using var content = new FormUrlEncodedContent(new Dictionary<string, string>
-                {
-                    ["client_id"] = KeycloakClientId,
-                    ["refresh_token"] = refreshToken,
-                });
-                using HttpResponseMessage response = await _client.PostAsync(logoutUri, content, cancellationToken);
-            }
-            catch (HttpRequestException)
-            {
-                // Local sign out has already happened; a failed revoke must not block it.
-            }
+                ["client_id"] = KeycloakClientId,
+                ["refresh_token"] = refreshToken,
+            });
+            using HttpResponseMessage response = await _client.PostAsync(logoutUri, content, cancellationToken);
+            response.EnsureSuccessStatusCode();
         }
 
         public Task<ProvisioningDeviceStatus> GetDeviceStatusAsync(string clientId, CancellationToken cancellationToken = default)

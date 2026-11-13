@@ -125,6 +125,7 @@ public class PlaintextLogBulkTests
     public async Task BulkReader_ObservesCancellation()
     {
         using var service = new SerialPortService("COM1");
+        Set(Session(service), "IsSessionOpen", true);
         using var stream = new FragmentedStream([.. Packet("text", true), .. Encrypt([(byte)'c'])]);
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();

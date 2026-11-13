@@ -563,6 +563,7 @@ public class MainWindowViewModelMathHydrationTests
         public Task OpenUrlAsync(string url) => Task.CompletedTask;
         public Task<Models.LocalFirmwareUpdateSelection?> BrowseLocalFirmwareUpdateFilesAsync() => Task.FromResult<Models.LocalFirmwareUpdateSelection?>(null);
         public Task ShowAboutAsync() => Task.CompletedTask;
+        public Task<Models.ConfigurationBackupEntry?> ShowConfigurationBackupDialogAsync(IReadOnlyList<Models.ConfigurationBackupEntry> backups) => Task.FromResult<Models.ConfigurationBackupEntry?>(null);
         public Task ShowFirmwareUpdateDialogAsync(FirmwareUpdateWindowViewModel viewModel) => Task.CompletedTask;
         public Task<Models.PinSetupDialogResult?> ShowPinSetupWizardAsync(bool isPinAlreadyEnabled) => Task.FromResult<Models.PinSetupDialogResult?>(null);
         public Task<bool> ShowRecoveryCodeAsync(string recoveryCode) => Task.FromResult(true);

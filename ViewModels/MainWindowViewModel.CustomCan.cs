@@ -1316,23 +1316,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
     }
 
     private static bool IsSameMetadataKey(CustomCanSignalMetadata a, CustomCanSignalMetadata b)
-    {
-        if (a.MessageId.HasValue != b.MessageId.HasValue)
-        {
-            return false;
-        }
-
-        bool layoutMatch = a.StartBit == b.StartBit &&
-            a.BitLength == b.BitLength &&
-            a.IsMotorola == b.IsMotorola &&
-            a.IsSigned == b.IsSigned &&
-            CustomCanFloatsMatch(a.Factor, b.Factor, 1e-5f) &&
-            CustomCanFloatsMatch(a.Offset, b.Offset, 1e-5f);
-
-        return a.MessageId.HasValue
-            ? a.MessageId == b.MessageId && a.IsExtended == b.IsExtended && layoutMatch
-            : a.SignalIndex == b.SignalIndex && a.MessageIndex == b.MessageIndex && layoutMatch;
-    }
+        => CustomCanSignalMetadata.HasSameIdentity(a, b);
 
     private static List<CustomCanSignalMetadata> NormalizeCustomCanSignalMetadata(IEnumerable<CustomCanSignalMetadata> source)
     {
@@ -1704,7 +1688,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
         }
         else
         {
-            bool sessionStarted = BeginCustomCanConfigSession(out bool previousSuspendLiveRequestPolling);
+            bool sessionStarted = BeginCustomCanConfigSession(out IDisposable? pollingSuspension);
             IsCustomCanBusy = true;
             try
             {
@@ -1758,7 +1742,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             }
             finally
             {
-                EndCustomCanConfigSession(sessionStarted, previousSuspendLiveRequestPolling);
+                EndCustomCanConfigSession(sessionStarted, pollingSuspension);
                 IsCustomCanBusy = false;
             }
         }
@@ -2039,7 +2023,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
 
             CustomCanStatusMessage = "Saving CAN message changes...";
             IsCustomCanBusy = true;
-            bool sessionStarted = BeginCustomCanConfigSession(out bool previousSuspendLiveRequestPolling);
+            bool sessionStarted = BeginCustomCanConfigSession(out IDisposable? pollingSuspension);
             bool snapshotReceived = false;
             try
             {
@@ -2093,7 +2077,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             }
             finally
             {
-                EndCustomCanConfigSession(sessionStarted, previousSuspendLiveRequestPolling);
+                EndCustomCanConfigSession(sessionStarted, pollingSuspension);
                 IsCustomCanBusy = false;
             }
 
@@ -2663,7 +2647,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
 
         CustomCanStatusMessage = "Saving CAN signal changes...";
         IsCustomCanBusy = true;
-        bool sessionStarted = BeginCustomCanConfigSession(out bool previousSuspendLiveRequestPolling);
+        bool sessionStarted = BeginCustomCanConfigSession(out IDisposable? pollingSuspension);
         try
         {
             bool persisted = await PersistCustomCanEnableStateAsync([signal], changedMessages);
@@ -2680,7 +2664,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
         }
         finally
         {
-            EndCustomCanConfigSession(sessionStarted, previousSuspendLiveRequestPolling);
+            EndCustomCanConfigSession(sessionStarted, pollingSuspension);
             IsCustomCanBusy = false;
         }
 
@@ -2766,7 +2750,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             await Task.Delay(ClearAllCustomCanRetryDelayMs);
 
             IsCustomCanBusy = true;
-            bool sessionStarted = BeginCustomCanConfigSession(out bool previousSuspendLiveRequestPolling);
+            bool sessionStarted = BeginCustomCanConfigSession(out IDisposable? pollingSuspension);
             bool persisted;
             try
             {
@@ -2774,7 +2758,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             }
             finally
             {
-                EndCustomCanConfigSession(sessionStarted, previousSuspendLiveRequestPolling);
+                EndCustomCanConfigSession(sessionStarted, pollingSuspension);
                 IsCustomCanBusy = false;
             }
 
@@ -2949,7 +2933,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
 
         CustomCanStatusMessage = "Saving Custom CAN changes...";
         IsCustomCanBusy = true;
-        bool sessionStarted = BeginCustomCanConfigSession(out bool previousSuspendLiveRequestPolling);
+        bool sessionStarted = BeginCustomCanConfigSession(out IDisposable? pollingSuspension);
         bool snapshotReceived = false;
         try
         {
@@ -3014,7 +2998,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
         }
         finally
         {
-            EndCustomCanConfigSession(sessionStarted, previousSuspendLiveRequestPolling);
+            EndCustomCanConfigSession(sessionStarted, pollingSuspension);
             IsCustomCanBusy = false;
         }
 
@@ -3034,26 +3018,33 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
         return true;
     }
 
-    private bool BeginCustomCanConfigSession(out bool previousSuspendLiveRequestPolling)
+    private bool BeginCustomCanConfigSession(out IDisposable? pollingSuspension)
     {
-        previousSuspendLiveRequestPolling = false;
+        pollingSuspension = null;
         if (_portService == null)
         {
             return false;
         }
 
-        previousSuspendLiveRequestPolling = _portService.BeginCustomCanConfigSession();
+        pollingSuspension = _portService.BeginCustomCanConfigSession();
         return true;
     }
 
-    private void EndCustomCanConfigSession(bool sessionStarted, bool previousSuspendLiveRequestPolling)
+    private void EndCustomCanConfigSession(bool sessionStarted, IDisposable? pollingSuspension)
     {
-        if (!sessionStarted || _portService == null)
+        if (!sessionStarted || pollingSuspension == null)
         {
             return;
         }
 
-        _portService.EndCustomCanConfigSession(previousSuspendLiveRequestPolling);
+        if (_portService != null)
+        {
+            _portService.EndCustomCanConfigSession(pollingSuspension);
+        }
+        else
+        {
+            pollingSuspension.Dispose();
+        }
     }
 
     private async Task<bool> SaveSignalToControllerWithRetryAsync(DbcCanSignalDefinition signalDefinition, byte dlc, ushort timeoutMs, CustomCanTxOptions txOptions, bool batched = false, int? targetMessageSlotIndex = null, bool isDbcImport = false)
@@ -3116,7 +3107,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
 
         if (!batched && _portService != null && IsConnected && CommsEstablished)
         {
-            bool sessionStarted = BeginCustomCanConfigSession(out bool previousSuspendLiveRequestPolling);
+            bool sessionStarted = BeginCustomCanConfigSession(out IDisposable? pollingSuspension);
             try
             {
                 bool snapshotReceived = await _portService.RequestCustomCanSnapshotAsync();
@@ -3131,7 +3122,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             }
             finally
             {
-                EndCustomCanConfigSession(sessionStarted, previousSuspendLiveRequestPolling);
+                EndCustomCanConfigSession(sessionStarted, pollingSuspension);
             }
         }
 
@@ -3285,7 +3276,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
 
         if (_portService != null && IsConnected && CommsEstablished)
         {
-            bool sessionStarted = BeginCustomCanConfigSession(out bool previousSuspendLiveRequestPolling);
+            bool sessionStarted = BeginCustomCanConfigSession(out IDisposable? pollingSuspension);
             try
             {
                 CustomCanStatusMessage = string.Empty;
@@ -3301,7 +3292,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             }
             finally
             {
-                EndCustomCanConfigSession(sessionStarted, previousSuspendLiveRequestPolling);
+                EndCustomCanConfigSession(sessionStarted, pollingSuspension);
             }
         }
 
@@ -3312,7 +3303,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
 
         if (_portService != null && IsConnected && CommsEstablished)
         {
-            bool sessionStarted = BeginCustomCanConfigSession(out bool previousSuspendLiveRequestPolling);
+            bool sessionStarted = BeginCustomCanConfigSession(out IDisposable? pollingSuspension);
             IsCustomCanBusy = true;
             try
             {
@@ -3341,7 +3332,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             }
             finally
             {
-                EndCustomCanConfigSession(sessionStarted, previousSuspendLiveRequestPolling);
+                EndCustomCanConfigSession(sessionStarted, pollingSuspension);
                 if (!batched)
                 {
                     IsCustomCanBusy = false;
@@ -3620,6 +3611,10 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
     }
 
     private bool TryValidateCustomCanConfiguration(int targetMessageIndex, CustomCanMessage targetMessage, int targetSignalIndex, CustomCanSignal targetSignal, out string error)
+        => TryValidateCustomCanConfigurationForSettings(SettingsDataView, targetMessageIndex, targetMessage, targetSignalIndex, targetSignal, false, out error);
+
+    private static bool TryValidateCustomCanConfigurationForSettings(DataStructures settings, int targetMessageIndex, CustomCanMessage targetMessage,
+        int targetSignalIndex, CustomCanSignal targetSignal, bool allowEmptyDisabledSignals, out string error)
     {
         error = string.Empty;
 
@@ -3628,13 +3623,13 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
 
         CustomCanMessage GetMessage(int index) => index == targetMessageIndex
             ? targetMessage
-            : SettingsDataView.CustomCanMessagesStaticData[index];
+            : settings.CustomCanMessagesStaticData[index];
 
         CustomCanSignal GetSignal(int index) => index == targetSignalIndex
             ? targetSignal
-            : SettingsDataView.CustomCanSignalsStaticData[index];
+            : settings.CustomCanSignalsStaticData[index];
 
-        for (int i = 0; i < SettingsDataView.CustomCanMessagesStaticData.Count; i++)
+        for (int i = 0; i < settings.CustomCanMessagesStaticData.Count; i++)
         {
             CustomCanMessage message = GetMessage(i);
             if ((message.Flags & ~0x0F) != 0)
@@ -3686,7 +3681,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             }
         }
 
-        for (int i = 0; i < SettingsDataView.CustomCanMessagesStaticData.Count; i++)
+        for (int i = 0; i < settings.CustomCanMessagesStaticData.Count; i++)
         {
             CustomCanMessage message = GetMessage(i);
             if (!IsEnabled(message) || (message.Flags & 0x04) != 0)
@@ -3712,7 +3707,7 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
             }
         }
 
-        for (int i = 0; i < SettingsDataView.CustomCanSignalsStaticData.Count; i++)
+        for (int i = 0; i < settings.CustomCanSignalsStaticData.Count; i++)
         {
             CustomCanSignal signal = GetSignal(i);
             if ((signal.Flags & ~0x07) != 0)
@@ -3721,13 +3716,14 @@ public partial class MainWindowViewModel : INotifyDataErrorInfo
                 return false;
             }
 
-            if (signal.MessageIndex >= SettingsDataView.CustomCanMessagesStaticData.Count)
+            if (signal.MessageIndex >= settings.CustomCanMessagesStaticData.Count)
             {
                 error = $"Custom CAN signal slot {i + 1} references invalid message slot {signal.MessageIndex + 1}.";
                 return false;
             }
 
-            if (signal.StartBit >= 64 || signal.BitLength is 0 or > 64)
+            if (signal.StartBit >= 64 || signal.BitLength > 64 ||
+                (signal.BitLength == 0 && (!allowEmptyDisabledSignals || (signal.Flags & 0x01) != 0)))
             {
                 error = $"Custom CAN signal slot {i + 1} has invalid bit range (start {signal.StartBit}, length {signal.BitLength}).";
                 return false;

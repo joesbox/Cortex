@@ -12,6 +12,7 @@ namespace Cortex.Services
         private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
         {
             WriteIndented = true,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         };
 
         public static string SerializeSettings(DataStructures settingsData, IoFlowGraphConfigSnapshot? ioFlowGraph = null, bool includeCustomCanMetadata = true)
@@ -24,6 +25,8 @@ namespace Cortex.Services
 
             return JsonSerializer.Serialize(snapshot, JsonOptions);
         }
+
+        internal static ConfigSnapshot CreateSettingsSnapshot(DataStructures settingsData) => BuildSnapshot(settingsData, null);
 
         public static bool TryDeserialize(string json, out ConfigSnapshot? snapshot, out string? error)
         {
@@ -42,6 +45,8 @@ namespace Cortex.Services
                     && !string.IsNullOrWhiteSpace(snapshot.IoFlowGraph?.ControllerSettingsSignature))
                 {
                     using var signature = JsonDocument.Parse(snapshot.IoFlowGraph.ControllerSettingsSignature);
+                    if (signature.RootElement.ValueKind != JsonValueKind.Object)
+                        throw new ArgumentException("The I/O Flow settings signature must be a JSON object.");
                     if (signature.RootElement.TryGetProperty("InputsAndOutputs", out _))
                     {
                         var legacy = JsonSerializer.Deserialize<ConfigSnapshot>(snapshot.IoFlowGraph.ControllerSettingsSignature);
@@ -56,10 +61,11 @@ namespace Cortex.Services
                     return false;
                 }
 
+                ValidateSnapshot(snapshot);
                 error = null;
                 return true;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is JsonException or ArgumentException)
             {
                 snapshot = null;
                 error = $"Failed to parse configuration file: {ex.Message}";
@@ -69,6 +75,13 @@ namespace Cortex.Services
 
         public static void ApplySnapshot(DataStructures target, ConfigSnapshot snapshot)
         {
+            ValidateSnapshot(snapshot);
+            if (snapshot.CanMessages?.Any(message => message.Index >= target.CustomCanMessagesStaticData.Count) == true ||
+                snapshot.CanSignals?.Any(signal => signal.Index >= target.CustomCanSignalsStaticData.Count) == true ||
+                snapshot.Channels?.Count > target.ChannelsStaticData.Count ||
+                snapshot.DigitalInputs?.Count > target.DigitalInputsStaticData.Count ||
+                snapshot.AnalogueInputs?.Count > target.AnalogueInputsStaticData.Count)
+                throw new ArgumentException("Configuration does not fit the target settings.");
             if (snapshot.CanMessages != null)
             {
                 foreach (var source in snapshot.CanMessages)
@@ -115,9 +128,6 @@ namespace Cortex.Services
                         targetChannel.Name = ToFixedName(sourceChannel.Name);
                     }
 
-                    targetChannel.AnalogRaw = sourceChannel.AnalogRaw ?? targetChannel.AnalogRaw;
-                    targetChannel.CurrentValue = sourceChannel.CurrentValue ?? targetChannel.CurrentValue;
-                    targetChannel.Override = sourceChannel.Override ?? targetChannel.Override;
                     targetChannel.CurrentThresholdHigh = sourceChannel.CurrentThresholdHigh ?? targetChannel.CurrentThresholdHigh;
                     targetChannel.CurrentThresholdLow = sourceChannel.CurrentThresholdLow ?? targetChannel.CurrentThresholdLow;
                     targetChannel.RetryCount = sourceChannel.RetryCount ?? targetChannel.RetryCount;
@@ -139,13 +149,11 @@ namespace Cortex.Services
                             targetChannel.InputControlPin = parsedInputPin.Value;
                         }
                     }
-                    targetChannel.OnThreshold = sourceChannel.OnThreshold ?? targetChannel.OnThreshold;
-                    targetChannel.OffThreshold = sourceChannel.OffThreshold ?? targetChannel.OffThreshold;
+                    targetChannel.SetImportedThresholds(sourceChannel.OnThreshold, sourceChannel.OffThreshold);
                     targetChannel.ScaleMin = sourceChannel.ScaleMin ?? targetChannel.ScaleMin;
                     targetChannel.ScaleMax = sourceChannel.ScaleMax ?? targetChannel.ScaleMax;
                     targetChannel.PWMMin = sourceChannel.PWMMin ?? targetChannel.PWMMin;
                     targetChannel.PWMMax = sourceChannel.PWMMax ?? targetChannel.PWMMax;
-                    targetChannel.ErrorFlags = sourceChannel.ErrorFlags ?? targetChannel.ErrorFlags;
                     targetChannel.SoftStartEnabled = sourceChannel.SoftStartEnabled ?? targetChannel.SoftStartEnabled;
                     targetChannel.SoftStartTime = sourceChannel.SoftStartTime ?? targetChannel.SoftStartTime;
                     targetChannel.SoftStopEnabled = sourceChannel.SoftStopEnabled ?? targetChannel.SoftStopEnabled;
@@ -156,8 +164,6 @@ namespace Cortex.Services
                     targetChannel.MathRootRule = sourceChannel.MathRootRule ?? targetChannel.MathRootRule;
                     targetChannel.MathFollowChannel = sourceChannel.MathFollowChannel ?? OutputChannel.MathFollowNone;
                     targetChannel.MathOutputMode = sourceChannel.MathOutputMode ?? targetChannel.MathOutputMode;
-                    targetChannel.MathCalculatedRootValue = sourceChannel.MathCalculatedRootValue ?? targetChannel.MathCalculatedRootValue;
-                    targetChannel.MathError = sourceChannel.MathError ?? targetChannel.MathError;
                     targetChannel.EnsureMathRuleSlots();
 
                     if (sourceChannel.MathRules != null)
@@ -177,9 +183,6 @@ namespace Cortex.Services
                             rule.OperandBType = sourceRule.OperandBType ?? rule.OperandBType;
                             rule.OperandBIndex = sourceRule.OperandBIndex ?? rule.OperandBIndex;
                             rule.OperandBConstant = sourceRule.OperandBConstant ?? rule.OperandBConstant;
-                            rule.RuntimeValue = sourceRule.RuntimeValue ?? rule.RuntimeValue;
-                            rule.RuntimeError = sourceRule.RuntimeError ?? rule.RuntimeError;
-                            rule.Evaluated = sourceRule.Evaluated ?? rule.Evaluated;
                         }
                     }
 
@@ -244,15 +247,9 @@ namespace Cortex.Services
 
             if (snapshot.SystemParameters != null)
             {
-                target.SystemParamsStaticData.SystemTemperature = snapshot.SystemParameters.SystemTemperature ?? target.SystemParamsStaticData.SystemTemperature;
-                target.SystemParamsStaticData.SIMModuleTemp = snapshot.SystemParameters.SIMModuleTemp ?? target.SystemParamsStaticData.SIMModuleTemp;
-                target.SystemParamsStaticData.IMUTemp = snapshot.SystemParameters.IMUTemp ?? target.SystemParamsStaticData.IMUTemp;
                 target.SystemParamsStaticData.CANResEnabled = snapshot.SystemParameters.CANResEnabled ?? target.SystemParamsStaticData.CANResEnabled;
                 target.SystemParamsStaticData.CANBusBitrate = snapshot.SystemParameters.CANBusBitrate ?? target.SystemParamsStaticData.CANBusBitrate;
-                target.SystemParamsStaticData.VBatt = snapshot.SystemParameters.VBatt ?? target.SystemParamsStaticData.VBatt;
-                target.SystemParamsStaticData.SystemCurrent = snapshot.SystemParameters.SystemCurrent ?? target.SystemParamsStaticData.SystemCurrent;
                 target.SystemParamsStaticData.SystemCurrentLimit = snapshot.SystemParameters.SystemCurrentLimit ?? target.SystemParamsStaticData.SystemCurrentLimit;
-                target.SystemParamsStaticData.ErrorFlags = snapshot.SystemParameters.ErrorFlags ?? target.SystemParamsStaticData.ErrorFlags;
                 target.SystemParamsStaticData.ChannelDataCANID = snapshot.SystemParameters.ChannelDataCANID ?? target.SystemParamsStaticData.ChannelDataCANID;
                 target.SystemParamsStaticData.DigitalInputDataCANID = snapshot.SystemParameters.DigitalInputDataCANID ?? target.SystemParamsStaticData.DigitalInputDataCANID;
                 target.SystemParamsStaticData.AnalogueInputDataCANID = snapshot.SystemParameters.AnalogueInputDataCANID ?? target.SystemParamsStaticData.AnalogueInputDataCANID;
@@ -265,7 +262,6 @@ namespace Cortex.Services
                 target.SystemParamsStaticData.AllowData = snapshot.SystemParameters.AllowData ?? target.SystemParamsStaticData.AllowData;
                 target.SystemParamsStaticData.AllowGPS = snapshot.SystemParameters.AllowGPS ?? target.SystemParamsStaticData.AllowGPS;
                 target.SystemParamsStaticData.AllowMotionDetect = snapshot.SystemParameters.AllowMotionDetect ?? target.SystemParamsStaticData.AllowMotionDetect;
-                target.SystemParamsStaticData.MobileSignalPercent = snapshot.SystemParameters.MobileSignalPercent ?? target.SystemParamsStaticData.MobileSignalPercent;
                 target.SystemParamsStaticData.TimeZoneId = snapshot.SystemParameters.TimeZoneId ?? target.SystemParamsStaticData.TimeZoneId;
                 target.SystemParamsStaticData.TimeZoneRule = snapshot.SystemParameters.TimeZoneRule ?? target.SystemParamsStaticData.TimeZoneRule;
             }
@@ -296,7 +292,7 @@ namespace Cortex.Services
                 // loading an older file cannot wipe names tracked for other signals.
                 foreach (CustomCanSignalMetadataSnapshot metadata in snapshot.CustomCanSignalMetadata)
                 {
-                    target.CustomCanSignalsMetadata.Add(new CustomCanSignalMetadata
+                    var imported = new CustomCanSignalMetadata
                     {
                         SignalIndex = Math.Clamp(metadata.SignalIndex ?? 0, 0, Constants.MAX_CUSTOM_CAN_SIGNALS - 1),
                         MessageIndex = (byte)Math.Clamp(metadata.MessageIndex ?? 0, 0, Constants.MAX_CUSTOM_CAN_MESSAGES - 1),
@@ -314,9 +310,136 @@ namespace Cortex.Services
                         MaxValue = metadata.MaxValue,
                         Units = metadata.Units ?? string.Empty,
                         IdentityFingerprint = metadata.IdentityFingerprint ?? string.Empty,
-                    });
+                    };
+                    int existing = target.CustomCanSignalsMetadata.ToList().FindIndex(item => CustomCanSignalMetadata.HasSameIdentity(item, imported));
+                    if (existing >= 0)
+                        target.CustomCanSignalsMetadata[existing] = imported;
+                    else
+                        target.CustomCanSignalsMetadata.Add(imported);
                 }
             }
+        }
+
+        private static void ValidateSnapshot(ConfigSnapshot snapshot)
+        {
+            static void Require(bool condition, string message)
+            {
+                if (!condition) throw new ArgumentException(message);
+            }
+            static bool Finite(params float?[] values) => values.All(value => !value.HasValue || float.IsFinite(value.Value));
+
+            Require(snapshot.FormatVersion == 1, $"Unsupported configuration format version {snapshot.FormatVersion}.");
+            Require(snapshot.Channels == null || snapshot.Channels.Count <= Constants.NUM_OUTPUT_CHANNELS, "Too many output channels.");
+            Require(snapshot.DigitalInputs == null || snapshot.DigitalInputs.Count <= Constants.NUM_DIGITAL_INPUTS, "Too many digital inputs.");
+            Require(snapshot.AnalogueInputs == null || snapshot.AnalogueInputs.Count <= Constants.NUM_ANALOGUE_INPUTS, "Too many analogue inputs.");
+            if (snapshot.Channels != null)
+            {
+                foreach (var channel in snapshot.Channels)
+                {
+                    Require(channel != null, "A channel entry is null.");
+                    Require(!channel!.ChanType.HasValue || Enum.IsDefined(channel.ChanType.Value), "Invalid channel type.");
+                    Require(!channel.Category.HasValue || Enum.IsDefined(channel.Category.Value), "Invalid channel category.");
+                    Require(channel.PWMSetDuty is null or <= 100 && channel.PWMMin is null or <= 100 && channel.PWMMax is null or <= 100, "Invalid PWM percentage.");
+                    Require(channel.CurrentThresholdHigh is null or >= 0 and <= 17 && channel.CurrentThresholdLow is null or >= 0 and <= 17 &&
+                        channel.InrushDelay is null or >= 0 and <= 2 && channel.InrushCurrentLimit is null or >= 0 and <= 50, "Invalid current limit or inrush setting.");
+                    Require(channel.InputControlPin is null or 0 || InputPinCatalog.AllInputPins.Contains(channel.InputControlPin.Value), "Invalid input control pin.");
+                    if (!channel.InputControlPin.HasValue && !string.IsNullOrWhiteSpace(channel.InputControlLabel))
+                    {
+                        byte? pin = InputPinCatalog.TryParseLabel(channel.InputControlLabel);
+                        Require(pin == 0 || (pin.HasValue && InputPinCatalog.AllInputPins.Contains(pin.Value)), "Invalid input control label.");
+                    }
+                    Require(Finite(channel.CurrentThresholdHigh, channel.CurrentThresholdLow, channel.InrushDelay, channel.InrushCurrentLimit,
+                        channel.OnThreshold, channel.OffThreshold, channel.ScaleMin, channel.ScaleMax, channel.SoftStartTime,
+                        channel.SoftStopTime, channel.IntermittentOnTime, channel.IntermittentOffTime), "A channel setting is not finite.");
+                    Require(channel.MathRuleCount is null or <= Constants.NUM_MATH_RULE_SLOTS && channel.MathRootRule is null or < Constants.NUM_MATH_RULE_SLOTS, "Invalid math rule count or root.");
+                    Require(!channel.MathRuleCount.HasValue || !channel.MathRootRule.HasValue || channel.MathRuleCount == 0 || channel.MathRootRule < channel.MathRuleCount, "Math root is outside the configured rules.");
+                    Require(channel.MathFollowChannel is null or OutputChannel.MathFollowNone || channel.MathFollowChannel < Constants.NUM_OUTPUT_CHANNELS, "Invalid math follower channel.");
+                    Require(channel.MathOutputMode is null or <= 1, "Invalid math output mode.");
+                    Require(channel.DelayedOnTime is null or >= 0 and <= 3600000 && channel.DelayedOffTime is null or >= 0 and <= 3600000 &&
+                        channel.RunOnTime is null or >= 0 and <= 3600000, "Invalid channel delay.");
+                    Require(channel.SoftStartTime is null or >= 0 and <= 5 && channel.SoftStopTime is null or >= 0 and <= 5 &&
+                        channel.IntermittentOnTime is null or >= 0 and <= 10 && channel.IntermittentOffTime is null or >= 0 and <= 10, "Invalid channel timing.");
+                    Require(channel.DelayedOn is null or <= 1 && channel.DelayedOff is null or <= 1 && channel.DelayedOffTrigger is null or <= 1 && channel.SoftStartEnabled is null or <= 1 && channel.SoftStopEnabled is null or <= 1 && channel.MultiChannel is null or <= 1, "Invalid channel flag.");
+                    if (channel.MathRules != null)
+                    {
+                        Require(channel.MathRules.Count <= Constants.NUM_MATH_RULE_SLOTS, "Too many math rules.");
+                        foreach (var rule in channel.MathRules)
+                        {
+                            Require(rule != null, "A math rule is null.");
+                            Require(rule!.Operation is null or <= (byte)OutputChannel.MathOperation.TOGGLE &&
+                                rule.OperandAType is null or <= (byte)OutputChannel.MathOperandType.CanSignal &&
+                                rule.OperandBType is null or <= (byte)OutputChannel.MathOperandType.CanSignal &&
+                                rule.HysteresisEnabled is null or <= 1, "Invalid math rule.");
+                            Require(Finite(rule.OnThreshold, rule.OffThreshold, rule.OperandAConstant, rule.OperandBConstant), "A math rule setting is not finite.");
+                        }
+                    }
+                }
+            }
+            if (snapshot.DigitalInputs != null)
+                foreach (var input in snapshot.DigitalInputs)
+                    Require(input != null && (input.InputNumber is null or >= 1 and <= Constants.NUM_DIGITAL_INPUTS), "Invalid digital input.");
+            if (snapshot.AnalogueInputs != null)
+                foreach (var input in snapshot.AnalogueInputs)
+                {
+                    Require(input != null, "An analogue input is null.");
+                    Require(input!.InputNumber is null or >= 1 and <= Constants.NUM_ANALOGUE_INPUTS, "Invalid analogue input number.");
+                    Require(!input.ChanType.HasValue || Enum.IsDefined(input.ChanType.Value), "Invalid analogue input type.");
+                    Require(!input.Units.HasValue || Enum.IsDefined(input.Units.Value), "Invalid analogue input units.");
+                    Require(input.CalibrationPoints is null or >= 2 and <= 3, "Invalid calibration point count.");
+                    Require(Finite(input.CalibrationVolt1, input.CalibrationVolt2, input.CalibrationVolt3,
+                        input.CalibrationValue1, input.CalibrationValue2, input.CalibrationValue3, input.ConfigRangeMin,
+                        input.ConfigRangeMax, input.NTCBeta, input.NTCNominalResistance), "An analogue setting is not finite.");
+                }
+
+            if (snapshot.CanMessages != null)
+            {
+                var indices = new HashSet<int>();
+                foreach (var message in snapshot.CanMessages)
+                {
+                    Require(message != null, "A CAN message is null.");
+                    Require(message!.Index >= 0 && message.Index < Constants.MAX_CUSTOM_CAN_MESSAGES && indices.Add(message.Index), "Invalid or duplicate CAN message slot.");
+                    Require(message.Dlc <= 8 && message.Id <= ((message.Flags & 2) != 0 ? 0x1FFFFFFFu : 0x7FFu), "Invalid CAN message ID or DLC.");
+                    Require((message.Flags & ~0x0F) == 0 && ((message.Flags & 8) == 0 || (message.Flags & 4) != 0) &&
+                        (message.TxTrigger == Constants.CUSTOM_CAN_TX_TRIGGER_ALWAYS || message.TxTrigger < Constants.NUM_OUTPUT_CHANNELS),
+                        "Invalid CAN message flags or trigger.");
+                }
+            }
+            if (snapshot.CanSignals != null)
+            {
+                var indices = new HashSet<int>();
+                foreach (var signal in snapshot.CanSignals)
+                {
+                    Require(signal != null, "A CAN signal is null.");
+                    Require(signal!.Index >= 0 && signal.Index < Constants.MAX_CUSTOM_CAN_SIGNALS && indices.Add(signal.Index), "Invalid or duplicate CAN signal slot.");
+                    Require(signal.MessageIndex < Constants.MAX_CUSTOM_CAN_MESSAGES && signal.StartBit < 64 && signal.BitLength <= 64 && ((signal.Flags & 1) == 0 || signal.BitLength > 0), "Invalid CAN signal reference or bit range.");
+                    Require((signal.Flags & ~0x07) == 0 &&
+                        (signal.ValueSource == Constants.CUSTOM_CAN_VALUE_SOURCE_CONSTANT || signal.ValueSource < Constants.NUM_OUTPUT_CHANNELS) &&
+                        ((signal.Flags & 1) == 0 || CustomCanBitLayout.GetOccupiedBits(signal.StartBit, signal.BitLength, (signal.Flags & 2) != 0).Count == signal.BitLength),
+                        "Invalid CAN signal flags, source or bit layout.");
+                    Require(Finite(signal.Factor, signal.Offset), "A CAN signal setting is not finite.");
+                }
+            }
+            if (snapshot.CustomCanSignalMetadata != null)
+                foreach (var metadata in snapshot.CustomCanSignalMetadata)
+                {
+                    Require(metadata != null, "A CAN metadata entry is null.");
+                    Require(metadata!.SignalIndex is null or >= 0 and < Constants.MAX_CUSTOM_CAN_SIGNALS &&
+                        metadata.MessageIndex is null or >= 0 and < Constants.MAX_CUSTOM_CAN_MESSAGES &&
+                        metadata.StartBit is null or < 64 && metadata.BitLength is null or >= 1 and <= 64 &&
+                        metadata.MessageId is null or <= 0x1FFFFFFF, "Invalid CAN metadata identity.");
+                    Require(Finite(metadata.Factor, metadata.Offset, metadata.MinValue, metadata.MaxValue), "A CAN metadata setting is not finite.");
+                }
+            if (snapshot.SystemParameters is { } system)
+            {
+                Require(system.ChannelDataCANID is null or <= 0x7FF && system.DigitalInputDataCANID is null or <= 0x7FF &&
+                    system.AnalogueInputDataCANID is null or <= 0x7FF && system.SystemDataCANID is null or <= 0x7FF &&
+                    system.SystemConfigCANID is null or <= 0x7FF && system.ConfigDataCANID is null or <= 0x7FF, "Invalid system CAN ID.");
+                Require(system.TimeZoneRule == null || system.TimeZoneRule.Length == 0 || system.TimeZoneRule.Length == Constants.TIME_ZONE_RULE_LENGTH, "Invalid time zone rule length.");
+                Require(Finite(system.SystemCurrentLimit) && system.SystemCurrentLimit is null or >= 0 and <= 150, "Invalid system current limit.");
+            }
+            if (snapshot.IoFlowGraph is { } graph)
+                Require(graph.Canvases != null && graph.Nodes != null && graph.StandaloneLogicRules != null && graph.OutputRootLogicNodeByChannel != null &&
+                    graph.Canvases.All(canvas => canvas != null) && graph.Nodes.All(node => node != null) && graph.StandaloneLogicRules.All(rule => rule != null), "Invalid I/O Flow graph.");
         }
 
         private static ConfigSnapshot BuildSnapshot(DataStructures settingsData, IoFlowGraphConfigSnapshot? ioFlowGraph)
@@ -342,9 +465,6 @@ namespace Cortex.Services
                     Category = channel.Category,
                     PWMSetDuty = channel.PWMSetDuty,
                     Name = ToStringName(channel.Name),
-                    AnalogRaw = channel.AnalogRaw,
-                    CurrentValue = channel.CurrentValue,
-                    Override = channel.Override,
                     CurrentThresholdHigh = channel.CurrentThresholdHigh,
                     CurrentThresholdLow = channel.CurrentThresholdLow,
                     RetryCount = channel.RetryCount,
@@ -362,7 +482,6 @@ namespace Cortex.Services
                     ScaleMax = channel.ScaleMax,
                     PWMMin = channel.PWMMin,
                     PWMMax = channel.PWMMax,
-                    ErrorFlags = channel.ErrorFlags,
                     SoftStartEnabled = channel.SoftStartEnabled,
                     SoftStartTime = channel.SoftStartTime,
                     SoftStopEnabled = channel.SoftStopEnabled,
@@ -373,8 +492,6 @@ namespace Cortex.Services
                     MathRootRule = channel.MathRootRule,
                     MathFollowChannel = channel.MathFollowChannel == OutputChannel.MathFollowNone ? null : channel.MathFollowChannel,
                     MathOutputMode = channel.MathOutputMode,
-                    MathCalculatedRootValue = channel.MathCalculatedRootValue,
-                    MathError = channel.MathError,
                     MathRules = channel.MathRules
                         .Take(Constants.NUM_MATH_RULE_SLOTS)
                         .Select(rule => new MathRuleSnapshot
@@ -389,9 +506,6 @@ namespace Cortex.Services
                             OperandBType = rule.OperandBType,
                             OperandBIndex = rule.OperandBIndex,
                             OperandBConstant = rule.OperandBConstant,
-                            RuntimeValue = rule.RuntimeValue,
-                            RuntimeError = rule.RuntimeError,
-                            Evaluated = rule.Evaluated,
                         }).ToList(),
                     DelayedOn = channel.DelayedOn,
                     DelayedOnTime = channel.DelayedOnTime,
@@ -425,15 +539,9 @@ namespace Cortex.Services
                 }).ToList(),
                 SystemParameters = new SystemParametersSnapshot
                 {
-                    SystemTemperature = settingsData.SystemParamsStaticData.SystemTemperature,
-                    SIMModuleTemp = settingsData.SystemParamsStaticData.SIMModuleTemp,
-                    IMUTemp = settingsData.SystemParamsStaticData.IMUTemp,
                     CANResEnabled = settingsData.SystemParamsStaticData.CANResEnabled,
                     CANBusBitrate = settingsData.SystemParamsStaticData.CANBusBitrate,
-                    VBatt = settingsData.SystemParamsStaticData.VBatt,
-                    SystemCurrent = settingsData.SystemParamsStaticData.SystemCurrent,
                     SystemCurrentLimit = settingsData.SystemParamsStaticData.SystemCurrentLimit,
-                    ErrorFlags = settingsData.SystemParamsStaticData.ErrorFlags,
                     ChannelDataCANID = settingsData.SystemParamsStaticData.ChannelDataCANID,
                     DigitalInputDataCANID = settingsData.SystemParamsStaticData.DigitalInputDataCANID,
                     AnalogueInputDataCANID = settingsData.SystemParamsStaticData.AnalogueInputDataCANID,
@@ -446,7 +554,6 @@ namespace Cortex.Services
                     AllowData = settingsData.SystemParamsStaticData.AllowData,
                     AllowGPS = settingsData.SystemParamsStaticData.AllowGPS,
                     AllowMotionDetect = settingsData.SystemParamsStaticData.AllowMotionDetect,
-                    MobileSignalPercent = settingsData.SystemParamsStaticData.MobileSignalPercent,
                     TimeZoneId = settingsData.SystemParamsStaticData.TimeZoneId,
                     TimeZoneRule = settingsData.SystemParamsStaticData.TimeZoneRule,
                 },

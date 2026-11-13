@@ -9,6 +9,7 @@ using Avalonia.Markup.Xaml;
 using Avalonia.Media;
 using Avalonia.VisualTree;
 using CommunityToolkit.Mvvm.Input;
+using Cortex.Services;
 using Cortex.ViewModels;
 using Cortex.ViewModels.IoFlow;
 using Nodify.Avalonia;
@@ -339,7 +340,14 @@ namespace Cortex.Views
             if (_undoButton?.Command is IAsyncRelayCommand command && command.CanExecute(null))
             {
                 e.Handled = true;
-                await command.ExecuteAsync(null);
+                try
+                {
+                    await command.ExecuteAsync(null);
+                }
+                catch (Exception ex)
+                {
+                    ReportIoFlowKeyFailure("Couldn't undo the I/O Flow change. Check the graph before continuing.", ex);
+                }
             }
         }
 
@@ -351,17 +359,36 @@ namespace Cortex.Views
                 return;
             }
 
-            if (mainViewModel.IoFlowGraph.SelectedNodes.Count > 0 && mainViewModel.IoFlowGraph.RemoveSelectedNodesCommand.CanExecute(null))
+            try
             {
-                mainViewModel.IoFlowGraph.RemoveSelectedNodesCommand.Execute(null);
-                e.Handled = true;
-                return;
-            }
+                if (mainViewModel.IoFlowGraph.SelectedNodes.Count > 0 && mainViewModel.IoFlowGraph.RemoveSelectedNodesCommand.CanExecute(null))
+                {
+                    e.Handled = true;
+                    await mainViewModel.IoFlowGraph.RemoveSelectedNodesCommand.ExecuteAsync(null);
+                    return;
+                }
 
-            if (mainViewModel.IoFlowGraph.SelectedConnection != null && mainViewModel.IoFlowGraph.RemoveSelectedConnectionCommand.CanExecute(null))
+                if (mainViewModel.IoFlowGraph.SelectedConnection != null && mainViewModel.IoFlowGraph.RemoveSelectedConnectionCommand.CanExecute(null))
+                {
+                    e.Handled = true;
+                    await mainViewModel.IoFlowGraph.RemoveSelectedConnectionCommand.ExecuteAsync(null);
+                }
+            }
+            catch (Exception ex)
             {
-                e.Handled = true;
-                await mainViewModel.IoFlowGraph.RemoveSelectedConnectionCommand.ExecuteAsync(null);
+                ReportIoFlowKeyFailure("Couldn't delete the I/O Flow selection. Check the graph before continuing.", ex);
+            }
+        }
+
+        private void ReportIoFlowKeyFailure(string message, Exception exception)
+        {
+            if (DataContext is MainWindowViewModel viewModel)
+            {
+                viewModel.IoFlowGraph.ReportKeyboardCommandFailure(message, exception);
+            }
+            else
+            {
+                LoggingService.AddLog(message, exception: exception);
             }
         }
 
